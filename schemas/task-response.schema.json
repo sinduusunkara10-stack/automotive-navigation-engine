@@ -105,6 +105,48 @@
         }
       }
     },
+    "actionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "success"
+      ],
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "resultingUrl": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "description": "Snapshot of success-criteria evaluation.",
+      "additionalProperties": false,
+      "required": [
+        "satisfiedCriteriaIds",
+        "estimatedCompletion"
+      ],
+      "properties": {
+        "satisfiedCriteriaIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "estimatedCompletion": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Engine's 0-1 estimate of progress toward success; a classification, not raw evidence."
+        }
+      }
+    },
     "observation": {
       "type": "object",
       "description": "Compact structured summary of the page derived from visible and accessible elements. Never the raw HTML document.",
@@ -197,46 +239,11 @@
           "$ref": "#/$defs/selectedAction"
         },
         "actionResult": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "success"
-          ],
-          "properties": {
-            "success": {
-              "type": "boolean"
-            },
-            "error": {
-              "type": "string"
-            },
-            "resultingUrl": {
-              "type": "string",
-              "format": "uri"
-            }
-          }
+          "$ref": "#/$defs/actionResult"
         },
         "progress": {
-          "type": "object",
-          "description": "Snapshot of success-criteria evaluation after this step.",
-          "additionalProperties": false,
-          "required": [
-            "satisfiedCriteriaIds",
-            "estimatedCompletion"
-          ],
-          "properties": {
-            "satisfiedCriteriaIds": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "estimatedCompletion": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1,
-              "description": "Engine's 0-1 estimate of progress toward success; a classification, not raw evidence."
-            }
-          }
+          "$ref": "#/$defs/progress",
+          "description": "Snapshot of success-criteria evaluation after this step."
         },
         "safetyFlags": {
           "type": "array",
@@ -361,32 +368,142 @@
         },
         "cta_clicks": {
           "type": "array",
+          "description": "CTAs the engine actually clicked, one entry per click action executed. Distinct from finish_page_ctas, which records all visible CTAs on a page regardless of whether they were clicked.",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": [
               "stepIndex",
-              "label",
-              "url",
-              "timestamp"
+              "timestamp",
+              "sourcePageUrl",
+              "ctaText",
+              "elementType",
+              "actionSucceeded",
+              "navigationSucceeded"
             ],
             "properties": {
               "stepIndex": {
                 "type": "integer"
               },
-              "label": {
-                "type": "string"
-              },
-              "selector": {
-                "type": "string"
-              },
-              "url": {
+              "timestamp": {
                 "type": "string",
-                "format": "uri"
+                "format": "date-time"
+              },
+              "sourcePageUrl": {
+                "type": "string",
+                "format": "uri",
+                "description": "URL of the page the CTA was clicked on."
+              },
+              "sourcePageTitle": {
+                "type": "string"
+              },
+              "ctaText": {
+                "type": "string",
+                "description": "Visible text of the clicked CTA element as rendered on the page."
+              },
+              "accessibleName": {
+                "type": "string",
+                "description": "Accessible name (e.g. aria-label) of the clicked CTA element, when available."
+              },
+              "elementType": {
+                "type": "string",
+                "description": "Generic element tag/role, e.g. \"a\", \"button\"."
+              },
+              "destinationUrl": {
+                "type": "string",
+                "description": "Destination URL of the CTA, when available (e.g. an anchor's href) at click time."
+              },
+              "resultingUrl": {
+                "type": "string",
+                "format": "uri",
+                "description": "Page URL after the click action completed, when known."
+              },
+              "navigationSucceeded": {
+                "type": "boolean",
+                "description": "Whether the click resulted in the page actually navigating to a new URL."
+              },
+              "actionSucceeded": {
+                "type": "boolean",
+                "description": "Whether the click action itself executed without error."
+              },
+              "error": {
+                "type": "string",
+                "description": "Error message when the click action did not succeed."
+              }
+            }
+          }
+        },
+        "journey_path": {
+          "type": "array",
+          "description": "Complete ordered navigation history: one entry per completed navigate/observe/decide/act cycle. Generic across any task/domain.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "timestamp",
+              "pageUrlBefore",
+              "pageTitle",
+              "selectedAction",
+              "decisionReason",
+              "actionOutcome",
+              "pageUrlAfter",
+              "progress"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
               },
               "timestamp": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "pageUrlBefore": {
+                "type": "string",
+                "format": "uri",
+                "description": "Page URL observed before the action was taken."
+              },
+              "pageTitle": {
+                "type": "string"
+              },
+              "selectedAction": {
+                "$ref": "#/$defs/selectedAction"
+              },
+              "selectedElement": {
+                "type": "object",
+                "description": "Details of the observed element the selected action targeted, when applicable.",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "role",
+                  "accessibleName"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  },
+                  "accessibleName": {
+                    "type": "string"
+                  }
+                }
+              },
+              "decisionReason": {
+                "type": "string",
+                "description": "Rationale supplied by the reasoning provider for choosing the selected action."
+              },
+              "actionOutcome": {
+                "$ref": "#/$defs/actionResult"
+              },
+              "pageUrlAfter": {
+                "type": "string",
+                "format": "uri",
+                "description": "Page URL after the action, falling back to pageUrlBefore when the action did not navigate."
+              },
+              "progress": {
+                "$ref": "#/$defs/progress"
               }
             }
           }

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Step Two</title>
+    <meta name="description" content="Fixture intermediate page for the local navigation-engine proof of concept." />
+  </head>
+  <body>
+    <h1>Step Two</h1>
+    <p>This is an intermediate page of the local navigation-engine fixture.</p>
+    <button type="button" id="learn-more">Learn more about this step</button>
+    <a href="/success.html" id="continue-link-2">Continue</a>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "step2", fictionalId: "FIX-STEP2-001" });
+
+      var ga4Params = new URLSearchParams({
+        v: "2",
+        tid: "G-FICTIONALTEST1",
+        cid: "555.123456",
+        en: "page_view",
+        dl: location.href,
+        dt: document.title,
+      });
+      new Image().src = "/g/collect?" + ga4Params.toString();
+    </script>
+  </body>
+</html>

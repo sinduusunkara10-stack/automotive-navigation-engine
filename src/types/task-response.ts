@@ -99,6 +99,40 @@ export interface FinishPageCtaCapture {
   accessibleName?: string;
 }
 
+export interface CtaClickCapture {
+  stepIndex: number;
+  timestamp: string;
+  sourcePageUrl: string;
+  sourcePageTitle?: string;
+  ctaText: string;
+  accessibleName?: string;
+  elementType: string;
+  destinationUrl?: string;
+  resultingUrl?: string;
+  navigationSucceeded: boolean;
+  actionSucceeded: boolean;
+  error?: string;
+}
+
+export interface JourneyPathSelectedElement {
+  id: string;
+  role: string;
+  accessibleName: string;
+}
+
+export interface JourneyPathEntry {
+  stepIndex: number;
+  timestamp: string;
+  pageUrlBefore: string;
+  pageTitle: string;
+  selectedAction: SelectedAction;
+  selectedElement?: JourneyPathSelectedElement;
+  decisionReason: string;
+  actionOutcome: ActionResult;
+  pageUrlAfter: string;
+  progress: Progress;
+}
+
 export interface Captures {
   page_visits?: PageVisitCapture[];
   errors?: ErrorCapture[];
@@ -107,6 +141,8 @@ export interface Captures {
   ga4_network_events?: Ga4NetworkEventCapture[];
   screenshots?: ScreenshotCapture[];
   finish_page_ctas?: FinishPageCtaCapture[];
+  cta_clicks?: CtaClickCapture[];
+  journey_path?: JourneyPathEntry[];
 }
 
 export interface EngineAssessment {

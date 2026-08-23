@@ -56,6 +56,8 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
         "ga4_network_events",
         "screenshots",
         "finish_page_ctas",
+        "cta_clicks",
+        "journey_path",
       ],
       limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: {
@@ -131,6 +133,54 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
       assert.ok(fileStat.isFile() && fileStat.size > 0, `expected a screenshot file at ${screenshot.ref}`);
     }
 
+    // cta_clicks records only the two CTAs the engine actually clicked (the "Continue"
+    // control on start.html and on step2.html) — never the visible-but-unclicked CTAs
+    // on the success page, which belong to finish_page_ctas instead.
+    const ctaClicks = response.captures.cta_clicks ?? [];
+    assert.equal(ctaClicks.length, 2, "expected exactly the two actually-clicked CTAs");
+    for (const click of ctaClicks) {
+      assert.equal(click.ctaText, "Continue");
+      assert.equal(click.elementType, "a");
+      assert.equal(click.actionSucceeded, true);
+      assert.equal(click.navigationSucceeded, true);
+    }
+    const firstClick = ctaClicks.find((c) => c.sourcePageUrl === `${baseUrl}/start.html`);
+    assert.ok(firstClick, "expected a recorded click on start.html");
+    assert.equal(firstClick?.destinationUrl, `${baseUrl}/step2.html`);
+    assert.equal(firstClick?.resultingUrl, `${baseUrl}/step2.html`);
+    const secondClick = ctaClicks.find((c) => c.sourcePageUrl === `${baseUrl}/step2.html`);
+    assert.ok(secondClick, "expected a recorded click on step2.html");
+    assert.equal(secondClick?.destinationUrl, `${baseUrl}/success.html`);
+    assert.equal(secondClick?.resultingUrl, `${baseUrl}/success.html`);
+    const clickedCtaTexts = ctaClicks.map((c) => c.ctaText);
+    assert.ok(
+      !clickedCtaTexts.includes("Learn more about this step") &&
+        !clickedCtaTexts.includes("View fictional offers") &&
+        !clickedCtaTexts.includes("Contact us") &&
+        !clickedCtaTexts.includes("Subscribe to updates"),
+      "CTAs that were never clicked must not appear in cta_clicks",
+    );
+
+    // journey_path is the complete ordered navigation history: one entry per step,
+    // in chronological order, with before/after URLs and the reasoning provider's
+    // decision reason and outcome for that step.
+    const journeyPath = response.captures.journey_path ?? [];
+    assert.equal(journeyPath.length, response.steps.length, "expected one journey_path entry per step");
+    journeyPath.forEach((entry, index) => {
+      assert.equal(entry.stepIndex, index, "journey_path must be in chronological step order");
+      assert.ok(entry.decisionReason.length > 0, "expected a non-empty decision reason");
+      assert.equal(typeof entry.actionOutcome.success, "boolean");
+    });
+    assert.equal(journeyPath[0]?.pageUrlBefore, `${baseUrl}/start.html`);
+    assert.equal(journeyPath[0]?.pageUrlAfter, `${baseUrl}/step2.html`);
+    assert.equal(journeyPath[0]?.selectedAction.type, "click");
+    assert.equal(journeyPath[0]?.selectedElement?.accessibleName, "Continue");
+    assert.equal(journeyPath[1]?.pageUrlBefore, `${baseUrl}/step2.html`);
+    assert.equal(journeyPath[1]?.pageUrlAfter, `${baseUrl}/success.html`);
+    const finalEntry = journeyPath[journeyPath.length - 1];
+    assert.equal(finalEntry?.selectedAction.type, "stop_success");
+    assert.ok(finalEntry?.progress.satisfiedCriteriaIds.includes("reached_success_page"));
+
     await validateAgainstResponseSchema(response);
   } finally {
     await page.close();
@@ -179,6 +229,8 @@ test("capture modules only run when the task requests them", async () => {
     assert.equal(response.captures.ga4_network_events, undefined);
     assert.equal(response.captures.screenshots, undefined);
     assert.equal(response.captures.finish_page_ctas, undefined);
+    assert.equal(response.captures.cta_clicks, undefined);
+    assert.equal(response.captures.journey_path, undefined);
 
     await validateAgainstResponseSchema(response);
   } finally {

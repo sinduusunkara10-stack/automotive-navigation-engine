@@ -142,15 +142,19 @@ Capture modules are the only place task-specific extraction logic lives. Each mo
   `engineAssessment` may be presented as page-observed fact.
 
 v1 ships the module set implied by the two example use cases (`page_visits`, `page_metadata`,
-`cta_clicks`, `finish_page_ctas`, `data_layer_evidence`, `ga4_network_events`, `screenshots`,
-`errors`, `offer_extraction`), but the registry is designed to accept new modules without
-touching the core loop. `page_metadata` and `finish_page_ctas` were added to the enum by the
-local-evidence-capture proof of concept (see `docs/v1-scope.md`); `cta_clicks` remains a
-reserved name for a future click-tracking module with a different shape (an actually-clicked
-CTA event) than `finish_page_ctas` (visible CTAs observed on the current page, whether clicked
-or not).
+`cta_clicks`, `finish_page_ctas`, `journey_path`, `data_layer_evidence`, `ga4_network_events`,
+`screenshots`, `errors`, `offer_extraction`), but the registry is designed to accept new modules
+without touching the core loop. `page_metadata` and `finish_page_ctas` were added to the enum by
+the local-evidence-capture proof of concept (see `docs/v1-scope.md`). `cta_clicks` and
+`journey_path` were added by the action-tracking / journey-path proof of concept: `cta_clicks`
+records only the CTAs the engine actually clicked (a different shape — and a different trigger,
+the `click` action itself rather than `capture` — than `finish_page_ctas`, which records all
+visible CTAs on whichever page a `capture` action runs against, whether clicked or not);
+`journey_path` records one ordered entry per completed navigate/observe/decide/act cycle,
+derived from the same per-step data already in the response's `steps` array but reshaped as a
+standalone, domain-agnostic capture.
 
-Most capture modules run only when the `capture` action is dispatched. Two exceptions, driven
+Most capture modules run only when the `capture` action is dispatched. Some exceptions, driven
 by what the evidence actually requires:
 
 - `data_layer_evidence` samples `window.dataLayer` opportunistically on every step (not only on
@@ -160,6 +164,13 @@ by what the evidence actually requires:
 - `ga4_network_events` attaches a request listener for the lifetime of the run (from just
   before the first navigation until the run ends), because GA4-style requests can fire at any
   point in a page's lifecycle, not only when `capture` is dispatched.
+- `cta_clicks` runs opportunistically whenever the engine executes a `click` action, not on
+  `capture`, because it exists to record actual click events as they happen, not evidence
+  visible on demand. Its evidence (visible text, accessible name, element type, destination
+  URL) is read from the target element immediately before the click executes, since a click
+  can navigate away and take that element with it.
+- `journey_path` runs on every completed step regardless of which action was selected, because
+  it is the ordered navigation history itself, not evidence pulled from the page.
 
 ## 9. HTTP API boundary (n8n integration)
 
@@ -210,6 +221,8 @@ as not-yet-built rather than removed from the plan — see §11.
     ga4NetworkEvents.ts      # implemented
     screenshots.ts           # implemented
     finishPageCtas.ts        # implemented
+    ctaClicks.ts             # implemented
+    journeyPath.ts           # implemented
     registry.ts             # tracks which of the schema's captureModule names are implemented
 
   /safety                  # guardrails independent of the reasoning layer
@@ -247,9 +260,9 @@ Key intent behind this layout:
   automotive/GA4/brand concepts.
 - `capture-modules` is the only directory allowed to know what a "dataLayer event" or an
   "offer card" is, and even there each module only knows its own concern. `page_visits`,
-  `page_metadata`, `data_layer_evidence`, `ga4_network_events`, `screenshots`, and
-  `finish_page_ctas` are implemented; `cta_clicks`, `errors`, and `offer_extraction` remain
-  reserved names in the schema's `captureModule` enum, not yet built.
+  `page_metadata`, `data_layer_evidence`, `ga4_network_events`, `screenshots`,
+  `finish_page_ctas`, `cta_clicks`, and `journey_path` are implemented; `errors` and
+  `offer_extraction` remain reserved names in the schema's `captureModule` enum, not yet built.
 - `types` mirrors `/schemas/*.json` so the engine's internal types and the wire contract
   cannot silently drift.
 
@@ -264,8 +277,8 @@ This phase implements the core loop end to end against a **mock reasoning provid
   per-run logging beyond the response's `steps` array (`/logging`), and env/config loading
   (`/config`).
 - Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
-  `ga4_network_events`, `screenshots`, and `finish_page_ctas` (`cta_clicks`, `errors`,
-  `offer_extraction` remain reserved names, not yet built).
+  `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, and `journey_path`
+  (`errors` and `offer_extraction` remain reserved names, not yet built).
 - `formSubmissionGuard` / `dataEntryGuard` as separate modules — until form submission or
   data entry is exercised by a real task, this stays unimplemented rather than speculative.
 - A `/prompts` directory — there is no real prompt to version yet.
