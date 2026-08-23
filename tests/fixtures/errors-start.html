@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Errors Fixture</title>
+    <meta
+      name="description"
+      content="Fixture page that deliberately triggers safe, fictional failures for the errors capture module."
+    />
+  </head>
+  <body>
+    <h1>Errors Fixture</h1>
+    <p>This page deliberately triggers safe, fictional failures for the errors/diagnostics capture module.</p>
+
+    <div
+      id="intercept-overlay"
+      style="position: fixed; inset: 0; z-index: 9999; background: transparent"
+    ></div>
+    <a href="/errors-unreachable.html" id="continue-link">Continue</a>
+
+    <script>
+      // Fictional uncaught page JavaScript error (deliberately undefined function).
+      fictionalUndefinedFn();
+    </script>
+    <script>
+      console.error("Fictional console error: fictional-widget failed to initialize");
+    </script>
+    <script>
+      // Fictional failed network request: this path does not exist on the fixture
+      // server and resolves to an HTTP 404.
+      fetch("/fictional-missing-endpoint.json").catch(function () {});
+    </script>
+  </body>
+</html>

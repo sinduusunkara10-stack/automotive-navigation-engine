@@ -601,27 +601,75 @@
         },
         "errors": {
           "type": "array",
+          "description": "Raw technical diagnostics captured during the run: page JS errors, console errors, failed network requests, navigation/action failures, missing target elements, and safety/limit stops. Generic engine evidence, never converted into a business conclusion (see engineAssessment for that). Never contains cookies, auth headers, request bodies, credentials, tokens, personal data, or raw stack traces with environment paths.",
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": [
-              "stepIndex",
+              "timestamp",
+              "category",
+              "severity",
               "message",
-              "timestamp"
+              "recoverable",
+              "stoppedRun"
             ],
             "properties": {
-              "stepIndex": {
-                "type": "integer"
-              },
-              "message": {
-                "type": "string"
-              },
-              "stack": {
-                "type": "string"
-              },
               "timestamp": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "stepIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Step during which this diagnostic was observed, when the engine has begun stepping. Absent for diagnostics observed before step 0 (e.g. during the initial navigation)."
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "page_js_error",
+                  "console_error",
+                  "network_request_failed",
+                  "navigation_failure",
+                  "action_execution_failure",
+                  "action_timeout",
+                  "target_element_missing",
+                  "safety_guard_stop",
+                  "limit_stop"
+                ]
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "error",
+                  "critical"
+                ]
+              },
+              "pageUrl": {
+                "type": "string",
+                "format": "uri",
+                "description": "Page URL at the time this diagnostic was observed, when known."
+              },
+              "actionType": {
+                "$ref": "#/$defs/actionType",
+                "description": "Action type in effect when this diagnostic was observed, when applicable."
+              },
+              "targetElementId": {
+                "type": "string",
+                "description": "Engine-assigned element id (see observation.interactiveElements) the action targeted, when applicable. Never a raw selector or page content."
+              },
+              "message": {
+                "type": "string",
+                "description": "Concise, human-readable description of the diagnostic."
+              },
+              "recoverable": {
+                "type": "boolean",
+                "description": "Whether the run continued after this diagnostic was observed."
+              },
+              "stoppedRun": {
+                "type": "boolean",
+                "description": "Whether this diagnostic directly caused the run to stop."
               }
             }
           }

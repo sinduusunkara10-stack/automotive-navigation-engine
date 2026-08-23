@@ -1,4 +1,4 @@
-import type { SelectedAction } from "./actions.js";
+import type { ActionType, SelectedAction } from "./actions.js";
 
 export type RunStatus =
   | "success"
@@ -52,11 +52,30 @@ export interface PageVisitCapture {
   timestamp: string;
 }
 
+export type ErrorCategory =
+  | "page_js_error"
+  | "console_error"
+  | "network_request_failed"
+  | "navigation_failure"
+  | "action_execution_failure"
+  | "action_timeout"
+  | "target_element_missing"
+  | "safety_guard_stop"
+  | "limit_stop";
+
+export type ErrorSeverity = "info" | "warning" | "error" | "critical";
+
 export interface ErrorCapture {
-  stepIndex: number;
-  message: string;
-  stack?: string;
   timestamp: string;
+  stepIndex?: number;
+  category: ErrorCategory;
+  severity: ErrorSeverity;
+  pageUrl?: string;
+  actionType?: ActionType;
+  targetElementId?: string;
+  message: string;
+  recoverable: boolean;
+  stoppedRun: boolean;
 }
 
 export interface PageMetadataCapture {

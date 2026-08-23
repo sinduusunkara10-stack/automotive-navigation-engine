@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/integration/local-poc.test.ts",
+    "test": "node --import tsx --test tests/integration/local-poc.test.ts tests/integration/errors-capture.test.ts",
     "validate:schemas": "ajv validate --spec=draft2020 -c ajv-formats -s schemas/task-request.schema.json -d \"examples/*.json\"",
     "check": "npm run typecheck && npm run validate:schemas && npm run test"
   },

@@ -152,7 +152,10 @@ the `click` action itself rather than `capture` — than `finish_page_ctas`, whi
 visible CTAs on whichever page a `capture` action runs against, whether clicked or not);
 `journey_path` records one ordered entry per completed navigate/observe/decide/act cycle,
 derived from the same per-step data already in the response's `steps` array but reshaped as a
-standalone, domain-agnostic capture.
+standalone, domain-agnostic capture. `errors` records generic technical diagnostics (page JS
+errors, console errors, failed network requests, navigation/action failures, missing target
+elements, and safety/limit stops) as raw evidence, kept separate from `engineAssessment`; see
+below for its triggers.
 
 Most capture modules run only when the `capture` action is dispatched. Some exceptions, driven
 by what the evidence actually requires:
@@ -171,6 +174,13 @@ by what the evidence actually requires:
   can navigate away and take that element with it.
 - `journey_path` runs on every completed step regardless of which action was selected, because
   it is the ordered navigation history itself, not evidence pulled from the page.
+- `errors` attaches page-level listeners (page JS errors, console errors, failed network
+  requests) for the lifetime of the run, from just before the first navigation, for the same
+  reason as `ga4_network_events`: these can fire at any point in a page's lifecycle. It also
+  records a diagnostic entry directly from the core loop whenever a navigation/action fails or
+  times out, a click target isn't found among the observed interactive elements, or a safety
+  guardrail (including `maxSteps`/`maxBacktracks`/loop detection) stops the run — none of which
+  are tied to the `capture` action either.
 
 ## 9. HTTP API boundary (n8n integration)
 
@@ -223,6 +233,7 @@ as not-yet-built rather than removed from the plan — see §11.
     finishPageCtas.ts        # implemented
     ctaClicks.ts             # implemented
     journeyPath.ts           # implemented
+    errors.ts                # implemented (errors)
     registry.ts             # tracks which of the schema's captureModule names are implemented
 
   /safety                  # guardrails independent of the reasoning layer
@@ -261,8 +272,9 @@ Key intent behind this layout:
 - `capture-modules` is the only directory allowed to know what a "dataLayer event" or an
   "offer card" is, and even there each module only knows its own concern. `page_visits`,
   `page_metadata`, `data_layer_evidence`, `ga4_network_events`, `screenshots`,
-  `finish_page_ctas`, `cta_clicks`, and `journey_path` are implemented; `errors` and
-  `offer_extraction` remain reserved names in the schema's `captureModule` enum, not yet built.
+  `finish_page_ctas`, `cta_clicks`, `journey_path`, and `errors` are implemented;
+  `offer_extraction` remains a reserved name in the schema's `captureModule` enum, not yet
+  built.
 - `types` mirrors `/schemas/*.json` so the engine's internal types and the wire contract
   cannot silently drift.
 
@@ -277,8 +289,8 @@ This phase implements the core loop end to end against a **mock reasoning provid
   per-run logging beyond the response's `steps` array (`/logging`), and env/config loading
   (`/config`).
 - Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
-  `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, and `journey_path`
-  (`errors` and `offer_extraction` remain reserved names, not yet built).
+  `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, `journey_path`, and
+  `errors` (`offer_extraction` remains a reserved name, not yet built).
 - `formSubmissionGuard` / `dataEntryGuard` as separate modules — until form submission or
   data entry is exercised by a real task, this stays unimplemented rather than speculative.
 - A `/prompts` directory — there is no real prompt to version yet.
