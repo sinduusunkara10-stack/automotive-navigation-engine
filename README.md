@@ -47,6 +47,10 @@ safety guards, and a set of capture modules (`page_visits`, `page_metadata`,
 against local HTML fixtures (no Claude API, n8n, Google Sheets, BigQuery, or real website
 involved yet). See `docs/v1-scope.md` for exactly what has and hasn't been built.
 
+`src/api` adds a minimal local HTTP boundary around this engine (see "Local HTTP API" below).
+It still only runs the mock reasoning provider against local fixtures — it is a proof-of-concept
+wrapper, not a deployment.
+
 ## Running the local proof of concept
 
 ```
@@ -94,6 +98,85 @@ Every task, regardless of use case, runs the same loop:
 Task-specific extraction (dataLayer evidence, GA4 network events, CTA/offer capture,
 screenshots) happens in pluggable **capture modules**, kept separate from this core loop. See
 `docs/architecture.md` for the full design.
+
+## Local HTTP API (proof of concept, not production-ready)
+
+`src/api` exposes a minimal HTTP boundary around the engine described above. It still only
+runs the mock reasoning provider against local fixtures/target URLs you supply — nothing here
+talks to the Claude API, n8n, Google Sheets, BigQuery, or Browserless.
+
+```
+npm run start:api   # starts the API on http://127.0.0.1:3000 (override with PORT=xxxx)
+npm run test:api    # runs the API integration tests in isolation
+```
+
+Endpoints:
+
+- `GET /v1/health` — liveness check.
+- `POST /v1/tasks` — accepts a `task-request.schema.json`-shaped body, starts a run in the
+  background, and immediately returns `{ taskId, runId, status: "accepted" }`.
+- `GET /v1/tasks/:runId` — returns `{ status: "running" }` while the run is in progress, or the
+  completed/failed result once it finishes.
+
+Sample request (`POST /v1/tasks`):
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "taskId": "example-run-0001",
+  "objective": "Reach the fixture's success page by following the visible continue control.",
+  "startUrl": "http://127.0.0.1:4173/start.html",
+  "allowedDomains": ["127.0.0.1"],
+  "successCriteria": [
+    {
+      "id": "reached_success_page",
+      "type": "url_pattern",
+      "description": "The current page URL matches the success fixture.",
+      "config": { "pattern": "http://127.0.0.1:4173/success.html" }
+    }
+  ],
+  "captureModules": ["page_visits", "cta_clicks", "journey_path"],
+  "limits": { "maxSteps": 5, "maxBacktracks": 0 },
+  "safety": { "allowedActions": ["click", "wait", "capture", "stop_success", "stop_blocked", "stop_failure"] },
+  "outputSchemaVersion": "1.0.0"
+}
+```
+
+Sample response (`GET /v1/tasks/:runId` once complete):
+
+```json
+{
+  "runId": "run_5f2c...",
+  "taskId": "example-run-0001",
+  "status": "completed",
+  "result": {
+    "schemaVersion": "1.0.0",
+    "taskId": "example-run-0001",
+    "status": "success",
+    "startUrl": "http://127.0.0.1:4173/start.html",
+    "finalUrl": "http://127.0.0.1:4173/success.html",
+    "steps": ["..."],
+    "captures": { "page_visits": ["..."], "cta_clicks": ["..."], "journey_path": ["..."] },
+    "engineAssessment": { "objectiveAchieved": true, "confidence": 1, "summary": "..." },
+    "diagnostics": { "stepCount": 2, "backtrackCount": 0, "totalDurationMs": 812, "finishReason": "stop_success_action" }
+  }
+}
+```
+
+**Current limitations:**
+
+- Runs are stored in an in-memory `Map` only (`src/api/taskStore.ts`) — **all run state is lost
+  when the process restarts**. This is a local proof of concept, not durable storage.
+- No authentication of any kind is implemented. **The API must not be exposed to any deployed,
+  shared, or n8n-accessible environment until authentication is added** (see
+  `docs/n8n-integration.md` §5).
+- No queues, database, webhooks, dashboard, cloud deployment, Docker packaging, API keys, or
+  rate limiting — deliberately out of scope for this task.
+- One task runs at a time per browser instance launched; there is no concurrency/queueing
+  layer.
+- Basic protections that are in place: a JSON body size limit, `Content-Type: application/json`
+  enforcement, no permissive CORS headers, generic (non-leaking) error responses, and graceful
+  shutdown on `SIGINT`/`SIGTERM`.
 
 ## Example task JSONs
 

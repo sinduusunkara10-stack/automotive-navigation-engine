@@ -3,8 +3,14 @@
 n8n is the external orchestrator. It owns triggering, forms, human review, Google Sheets,
 BigQuery, and reporting. The navigation engine's job is narrow and mechanical: accept a
 validated task, run the navigate/observe/decide/act loop, and return a validated result. This
-document describes the HTTP contract between the two, at the design level — no server exists
-yet (see `docs/v1-scope.md`).
+document describes the HTTP contract between the two.
+
+**Current status:** a minimal local HTTP server implementing this contract now exists
+(`src/api`, see `README.md` §"Local HTTP API"), but it is a **local proof of concept only**. It
+still runs the mock reasoning provider against local fixtures/target URLs, stores runs
+in-memory only, and has **no authentication** — it is not wired up to a real n8n instance, and
+must not be pointed at one, or exposed on any shared/deployed network, until an auth mechanism
+(§5) is added.
 
 ## 1. Roles
 
@@ -28,38 +34,48 @@ malformed task) and the engine on receipt (never trust the network boundary). `s
 and `outputSchemaVersion` in the request let both sides detect a contract mismatch explicitly
 rather than failing on unexpected fields later in the run.
 
-## 3. Proposed endpoints (not yet implemented)
+## 3. Endpoints (implemented as a local proof of concept)
 
 ```
 POST /v1/tasks
 ```
-Submits a new task-request. Because a configurator journey can take minutes, this endpoint is
-expected to respond quickly with a run handle rather than blocking for the full run:
+Submits a new task-request. Because a configurator journey can take minutes, this endpoint
+responds quickly with a run handle rather than blocking for the full run — the current
+implementation starts the run in the background and returns immediately:
 
 ```json
 { "taskId": "example-configurator-journey-0001", "runId": "run_...", "status": "accepted" }
 ```
 
+A body that isn't valid JSON, isn't `Content-Type: application/json`, or fails
+`task-request.schema.json` validation is rejected (`400`/`415`) and no run is started.
+
 ```
 GET /v1/tasks/{runId}
 ```
-Returns the current state: `running`, or a terminal `task-response` body once the run has
-finished (`status` field per the response schema: `success`, `blocked`, `failure`,
-`max_steps_reached`, `max_backtracks_reached`, `max_duration_reached`).
+Returns `{ "status": "running" }` while the run is in progress, `{ "status": "failed", "error": "..." }`
+if the engine could not produce a result at all, or `{ "status": "completed", "result": <task-response> }`
+once finished — `result` is the same `task-response` body described below (`status` field per
+the response schema: `success`, `blocked`, `failure`, `max_steps_reached`,
+`max_backtracks_reached`, `max_duration_reached`). An unknown `runId` returns `404`.
 
 ```
 GET /v1/health
 ```
-Basic liveness/readiness check for n8n to gate scheduled workflows on.
+Basic liveness/readiness check for n8n to gate scheduled workflows on. Returns only
+`{ status, service, time }` — no environment details or secrets.
 
-### Sync vs. async (open decision)
+**Not yet implemented:** authentication (§5), a durable task store (runs are in-memory and lost
+on restart — see `README.md`), queues, webhooks, dashboards, cloud deployment, Docker, API
+keys, and rate limiting. None of these are wired up in this phase.
 
-Submit-and-poll (above) is the proposed default so n8n's HTTP Request node isn't held open for
+### Sync vs. async (resolved for the local proof of concept)
+
+Submit-and-poll (above) is what's implemented, so n8n's HTTP Request node isn't held open for
 the duration of a multi-minute journey. A webhook-callback variant (engine POSTs the finished
 `task-response` back to an n8n webhook URL supplied in the request's `metadata`) is a
 reasonable alternative and is easy to add later without breaking the schema — it's a delivery
-mechanism, not a contract change. This is listed as an unresolved decision in
-`docs/v1-scope.md`.
+mechanism, not a contract change. Not implemented in this phase.
 
 ## 4. Error handling
 
@@ -75,9 +91,14 @@ mechanism, not a contract change. This is listed as an unresolved decision in
   than only a bare HTTP `500`. A `500` is reserved for cases where no response body could be
   constructed at all.
 
-## 5. Authentication (open decision)
+## 5. Authentication (open decision — mandatory before any deployed or n8n-accessible environment)
 
-No auth mechanism is finalized yet (see `docs/v1-scope.md`, open decision #1). Candidates:
+No auth mechanism is implemented yet (see `docs/v1-scope.md`, open decision #1), and the
+current `src/api` implementation is unauthenticated by design — it is a local proof of concept
+meant to run only on a developer's own machine against local fixtures. **Do not point a real
+n8n instance at this API, and do not deploy it to any shared, networked, or production
+environment, until an authentication mechanism from the candidates below (or an equivalent) is
+implemented and reviewed.** Candidates:
 
 - A shared-secret bearer token, provided to n8n and the engine via environment variables on
   each side — never committed to source control.
