@@ -2,12 +2,15 @@ import type { Page } from "playwright";
 import type { TaskRequest } from "../types/task-request.js";
 import type { Captures, StepLog } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
+import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation } from "../observation/observationBuilder.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { checkLimitsBreach, validateDecision } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
+import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
+import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { evaluateSuccessCriteria } from "./successEvaluator.js";
 import type { RunState } from "./state.js";
 
@@ -70,6 +73,7 @@ export async function runStep(params: {
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
       safetyFlags: [limitsBreach],
     });
+    recordJourneyPathEntry(captures, task.captureModules, stepLog);
     return {
       stepLog,
       terminal:
@@ -104,6 +108,15 @@ export async function runStep(params: {
   });
 
   const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
+
+  // Element attributes must be read before the click executes: a click can navigate
+  // away, taking the clicked element's DOM node with it.
+  const wantsCtaClickCapture = task.captureModules.includes("cta_clicks");
+  const clickedElementDetails =
+    wantsCtaClickCapture && effectiveAction.type === "click" && effectiveAction.target
+      ? await readClickedElementDetails(page, effectiveAction.target)
+      : undefined;
+
   const actionResult = await dispatchAction({
     page,
     action: effectiveAction,
@@ -111,6 +124,17 @@ export async function runStep(params: {
     stepIndex,
     captureModules: task.captureModules,
   });
+
+  if (wantsCtaClickCapture && effectiveAction.type === "click") {
+    const ctaClick = buildCtaClickCapture({
+      stepIndex,
+      sourcePageUrl: observation.url,
+      sourcePageTitle: observation.title,
+      details: clickedElementDetails,
+      actionResult,
+    });
+    captures.cta_clicks = [...(captures.cta_clicks ?? []), ctaClick];
+  }
 
   state.recordAction(effectiveAction);
   (await evaluateSuccessCriteria(page, task.successCriteria)).forEach((id) => state.satisfiedCriteriaIds.add(id));
@@ -124,6 +148,7 @@ export async function runStep(params: {
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     safetyFlags: safetyResult.flags,
   });
+  recordJourneyPathEntry(captures, task.captureModules, stepLog);
 
   if (effectiveAction.type === "stop_success") {
     return { stepLog, terminal: "success", finishReason: "stop_success_action" };
@@ -166,4 +191,11 @@ function buildStepLog(params: {
     },
     ...(safetyFlags.length > 0 ? { safetyFlags } : {}),
   };
+}
+
+function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModuleName[], stepLog: StepLog): void {
+  if (!captureModules.includes("journey_path")) {
+    return;
+  }
+  captures.journey_path = [...(captures.journey_path ?? []), buildJourneyPathEntry(stepLog)];
 }

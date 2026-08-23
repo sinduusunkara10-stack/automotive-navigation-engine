@@ -3,6 +3,7 @@ export const CAPTURE_MODULE_NAMES = [
   "page_metadata",
   "cta_clicks",
   "finish_page_ctas",
+  "journey_path",
   "data_layer_evidence",
   "ga4_network_events",
   "screenshots",

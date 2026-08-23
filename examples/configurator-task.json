@@ -30,6 +30,7 @@
   "captureModules": [
     "page_visits",
     "cta_clicks",
+    "journey_path",
     "data_layer_evidence",
     "ga4_network_events",
     "screenshots",
