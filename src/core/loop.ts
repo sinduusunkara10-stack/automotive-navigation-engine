@@ -7,6 +7,7 @@ import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { checkLimitsBreach, validateDecision } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
+import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { evaluateSuccessCriteria } from "./successEvaluator.js";
 import type { RunState } from "./state.js";
 
@@ -37,6 +38,14 @@ export async function runStep(params: {
 
   const observation = await buildObservation(page);
   state.recordVisit(observation.url);
+
+  // Unlike the explicit `capture` action, dataLayer evidence must reflect every page in
+  // the journey (its initial pushes and whatever accumulated by the time each step runs),
+  // so it is sampled opportunistically on every step rather than only when requested.
+  if (task.captureModules.includes("data_layer_evidence")) {
+    const dataLayerEntry = await captureDataLayer(page, stepIndex);
+    captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), dataLayerEntry];
+  }
 
   (await evaluateSuccessCriteria(page, task.successCriteria)).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
@@ -95,7 +104,13 @@ export async function runStep(params: {
   });
 
   const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
-  const actionResult = await dispatchAction({ page, action: effectiveAction, captures, stepIndex });
+  const actionResult = await dispatchAction({
+    page,
+    action: effectiveAction,
+    captures,
+    stepIndex,
+    captureModules: task.captureModules,
+  });
 
   state.recordAction(effectiveAction);
   (await evaluateSuccessCriteria(page, task.successCriteria)).forEach((id) => state.satisfiedCriteriaIds.add(id));

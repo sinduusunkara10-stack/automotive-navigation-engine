@@ -141,9 +141,25 @@ Capture modules are the only place task-specific extraction logic lives. Each mo
   requirement: nothing in `captures` may be an engine inference, and nothing in
   `engineAssessment` may be presented as page-observed fact.
 
-v1 ships the module set implied by the two example use cases (`page_visits`, `cta_clicks`,
-`data_layer_evidence`, `ga4_network_events`, `screenshots`, `errors`, `offer_extraction`), but
-the registry is designed to accept new modules without touching the core loop.
+v1 ships the module set implied by the two example use cases (`page_visits`, `page_metadata`,
+`cta_clicks`, `finish_page_ctas`, `data_layer_evidence`, `ga4_network_events`, `screenshots`,
+`errors`, `offer_extraction`), but the registry is designed to accept new modules without
+touching the core loop. `page_metadata` and `finish_page_ctas` were added to the enum by the
+local-evidence-capture proof of concept (see `docs/v1-scope.md`); `cta_clicks` remains a
+reserved name for a future click-tracking module with a different shape (an actually-clicked
+CTA event) than `finish_page_ctas` (visible CTAs observed on the current page, whether clicked
+or not).
+
+Most capture modules run only when the `capture` action is dispatched. Two exceptions, driven
+by what the evidence actually requires:
+
+- `data_layer_evidence` samples `window.dataLayer` opportunistically on every step (not only on
+  `capture`), so evidence reflects each page's own initial and subsequently pushed entries as
+  the run crosses multiple pages, not just whichever page happens to be current when `capture`
+  runs.
+- `ga4_network_events` attaches a request listener for the lifetime of the run (from just
+  before the first navigation until the run ends), because GA4-style requests can fire at any
+  point in a page's lifecycle, not only when `capture` is dispatched.
 
 ## 9. HTTP API boundary (n8n integration)
 
@@ -189,6 +205,11 @@ as not-yet-built rather than removed from the plan — see §11.
 
   /capture-modules         # pluggable, task-specific evidence extraction
     pageVisits.ts           # implemented
+    pageMetadata.ts         # implemented
+    dataLayer.ts             # implemented (data_layer_evidence)
+    ga4NetworkEvents.ts      # implemented
+    screenshots.ts           # implemented
+    finishPageCtas.ts        # implemented
     registry.ts             # tracks which of the schema's captureModule names are implemented
 
   /safety                  # guardrails independent of the reasoning layer
@@ -225,8 +246,10 @@ Key intent behind this layout:
 - `core`, `actions`, `observation`, `reasoning`, and `safety` contain **zero** references to
   automotive/GA4/brand concepts.
 - `capture-modules` is the only directory allowed to know what a "dataLayer event" or an
-  "offer card" is, and even there each module only knows its own concern. Only `page_visits`
-  is implemented so far; the rest of the schema's `captureModule` enum are reserved names.
+  "offer card" is, and even there each module only knows its own concern. `page_visits`,
+  `page_metadata`, `data_layer_evidence`, `ga4_network_events`, `screenshots`, and
+  `finish_page_ctas` are implemented; `cta_clicks`, `errors`, and `offer_extraction` remain
+  reserved names in the schema's `captureModule` enum, not yet built.
 - `types` mirrors `/schemas/*.json` so the engine's internal types and the wire contract
   cannot silently drift.
 
@@ -240,8 +263,9 @@ This phase implements the core loop end to end against a **mock reasoning provid
 - The HTTP API surface for n8n (`/api`), a browser session manager (`/browser`), structured
   per-run logging beyond the response's `steps` array (`/logging`), and env/config loading
   (`/config`).
-- Capture modules beyond `page_visits` (`cta_clicks`, `data_layer_evidence`,
-  `ga4_network_events`, `screenshots`, `errors`, `offer_extraction`).
+- Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
+  `ga4_network_events`, `screenshots`, and `finish_page_ctas` (`cta_clicks`, `errors`,
+  `offer_extraction` remain reserved names, not yet built).
 - `formSubmissionGuard` / `dataEntryGuard` as separate modules — until form submission or
   data entry is exercised by a real task, this stays unimplemented rather than speculative.
 - A `/prompts` directory — there is no real prompt to version yet.

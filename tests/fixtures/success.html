@@ -3,9 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <title>Success</title>
+    <meta name="description" content="Fixture success page for the local navigation-engine proof of concept." />
   </head>
   <body>
     <h1>Success</h1>
     <p data-testid="success-marker">You have reached the success state.</p>
+    <p>Explore fictional next steps below.</p>
+    <a href="/offers.html" id="cta-view-offers">View fictional offers</a>
+    <a href="/contact.html" id="cta-contact" aria-label="Contact a fictional dealer">Contact us</a>
+    <button type="button" id="cta-newsletter">Subscribe to updates</button>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "success", fictionalId: "FIX-SUCCESS-001" });
+      window.dataLayer.push({ event: "journey_complete", value: "fictional_milestone_42" });
+
+      var ga4Params = new URLSearchParams({
+        v: "2",
+        tid: "G-FICTIONALTEST1",
+        cid: "555.123456",
+        en: "journey_complete",
+        dl: location.href,
+        dt: document.title,
+      });
+      new Image().src = "/g/collect?" + ga4Params.toString();
+    </script>
   </body>
 </html>

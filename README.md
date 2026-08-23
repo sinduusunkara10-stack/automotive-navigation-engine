@@ -41,9 +41,11 @@ examples/
 ```
 
 `/src` contains a v1 scaffold: the core navigation loop, action executors, observation builder,
-and safety guards, driven in this phase by a deterministic mock reasoning provider against a
-local HTML fixture (no Claude API, n8n, Google Sheets, BigQuery, or real website involved yet).
-See `docs/v1-scope.md` for exactly what has and hasn't been built.
+safety guards, and a set of capture modules (`page_visits`, `page_metadata`,
+`data_layer_evidence`, `ga4_network_events`, `screenshots`, `finish_page_ctas`), driven in this
+phase by a deterministic mock reasoning provider against a local HTML fixture (no Claude API,
+n8n, Google Sheets, BigQuery, or real website involved yet). See `docs/v1-scope.md` for exactly
+what has and hasn't been built.
 
 ## Running the local proof of concept
 
@@ -57,7 +59,11 @@ npm run check             # all three, in order
 
 `npm test` starts a local static server for `tests/fixtures/start.html` and `success.html`,
 runs the engine with the mock reasoning provider against it, and asserts the resulting
-`TaskResponse` validates against `schemas/task-response.schema.json`.
+`TaskResponse` validates against `schemas/task-response.schema.json`. The fixture pages include
+a simulated `window.dataLayer`, simulated GA4 `collect` requests, page metadata, and (on the
+success page) multiple visible CTAs, so the same run exercises every implemented capture
+module. Screenshots captured during the test are written to `test-artifacts/screenshots/`
+(gitignored) rather than embedded in the response.
 
 ## The generic loop
 
