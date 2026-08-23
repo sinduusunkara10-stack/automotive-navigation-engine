@@ -1,0 +1,25 @@
+{
+  "name": "navigation-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Generic, reusable navigation engine (navigate -> observe -> decide -> act -> check success) with a deterministic local proof of concept.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/integration/local-poc.test.ts",
+    "validate:schemas": "ajv validate --spec=draft2020 -c ajv-formats -s schemas/task-request.schema.json -d \"examples/*.json\"",
+    "check": "npm run typecheck && npm run validate:schemas && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "ajv": "^8.17.1",
+    "ajv-cli": "^5.0.0",
+    "ajv-formats": "^3.0.1",
+    "playwright": "1.56.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

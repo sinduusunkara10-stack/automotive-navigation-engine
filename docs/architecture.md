@@ -153,17 +153,20 @@ schema-validated at the boundary. n8n owns everything downstream: forms, Google 
 BigQuery, alerting. See `docs/n8n-integration.md` for the API contract. The engine itself does
 not know n8n exists beyond "something calls this HTTP API with a validated JSON body."
 
-## 10. Proposed TypeScript folder structure
+## 10. TypeScript folder structure
 
-This is the target layout for the implementation phase (not yet built in this foundation
-commit):
+The v1 scaffold below is built and covered by an automated local proof-of-concept test.
+Pieces from the original target layout that are not part of this phase (Claude reasoning
+client, HTTP API, browser session manager, structured logging, env/config loading) are noted
+as not-yet-built rather than removed from the plan — see §11.
 
 ```
 /src
   /core                   # generic navigation loop / orchestration state machine
-    engine.ts             # top-level run(taskRequest) -> taskResponse
+    engine.ts             # top-level runTask(taskRequest) -> taskResponse
     loop.ts               # navigate -> observe -> decide -> act -> check-success iteration
     state.ts              # run state: step count, backtrack count, visited-state history
+    successEvaluator.ts    # evaluates successCriteria against the live page
 
   /actions                # controlled action vocabulary, one deterministic executor each
     click.ts
@@ -178,57 +181,30 @@ commit):
     index.ts              # action registry / dispatch table
 
   /observation            # compact structured page observation, no raw HTML
-    accessibilityTree.ts
-    interactiveElements.ts
     observationBuilder.ts
 
-  /reasoning               # Claude decision integration
-    promptBuilder.ts
-    decisionParser.ts      # validates Claude's output against the action vocabulary
-    claudeClient.ts
+  /reasoning               # pluggable decision-provider boundary
+    reasoningProvider.ts    # ReasoningProvider interface
+    mockReasoningProvider.ts # deterministic stand-in used by the local PoC; no Claude API call yet
 
   /capture-modules         # pluggable, task-specific evidence extraction
-    pageVisits.ts
-    ctaClicks.ts
-    dataLayerEvidence.ts
-    ga4NetworkEvents.ts
-    screenshots.ts
-    errors.ts
-    offerExtraction.ts
-    registry.ts
+    pageVisits.ts           # implemented
+    registry.ts             # tracks which of the schema's captureModule names are implemented
 
   /safety                  # guardrails independent of the reasoning layer
     domainGuard.ts
     limitsGuard.ts
     repeatedActionGuard.ts
     loopDetector.ts
-    formSubmissionGuard.ts
-    dataEntryGuard.ts
+    index.ts               # aggregates the guards into one validateDecision() call
 
-  /schema                  # TS types + validators aligned with /schemas/*.json
-    taskRequest.ts
-    taskResponse.ts
-    validate.ts
-
-  /browser                 # Playwright session lifecycle
-    browserManager.ts
-    sessionContext.ts
-
-  /logging                 # structured per-step logging
-    stepLogger.ts
-
-  /api                     # HTTP surface consumed by n8n
-    server.ts
-    routes/
-      submitTask.ts
-      taskStatus.ts
-
-  /config                  # env/config loading; no secrets committed
-    env.ts
+  /types                   # TS types mirroring /schemas/*.json
+    actions.ts
+    captureModule.ts
+    task-request.ts
+    task-response.ts
 
   index.ts
-
-/prompts                   # versioned reasoning prompt templates
 
 /schemas                   # versioned JSON Schemas (source of truth for the contract)
 
@@ -237,9 +213,11 @@ commit):
 /docs
 
 /tests
-  unit/
   integration/
-  fixtures/
+    local-poc.test.ts      # drives the engine against the local fixture end to end
+  fixtures/                 # start.html / success.html used by the local PoC
+  helpers/
+    staticServer.ts         # local-origin HTTP server for the fixture pages
 ```
 
 Key intent behind this layout:
@@ -247,11 +225,23 @@ Key intent behind this layout:
 - `core`, `actions`, `observation`, `reasoning`, and `safety` contain **zero** references to
   automotive/GA4/brand concepts.
 - `capture-modules` is the only directory allowed to know what a "dataLayer event" or an
-  "offer card" is, and even there each module only knows its own concern.
-- `schema` mirrors `/schemas/*.json` so the HTTP boundary and internal types cannot drift.
+  "offer card" is, and even there each module only knows its own concern. Only `page_visits`
+  is implemented so far; the rest of the schema's `captureModule` enum are reserved names.
+- `types` mirrors `/schemas/*.json` so the engine's internal types and the wire contract
+  cannot silently drift.
 
-## 11. What this foundation commit does and does not include
+## 11. What the v1 scaffold does and does not include
 
-This commit establishes contracts and documentation only (see `docs/v1-scope.md` for the
-detailed scope boundary). No `/src` implementation, `package.json`, or CI pipeline is created
-yet — that is the recommended next step, not part of this change.
+This phase implements the core loop end to end against a **mock reasoning provider** and a
+**local HTML fixture** — no network calls to Claude, n8n, or any real website. See
+`docs/v1-scope.md` for the full scope boundary. Deliberately not built yet:
+
+- A real Claude-backed `ReasoningProvider` (`reasoningProvider.ts` is the extension point).
+- The HTTP API surface for n8n (`/api`), a browser session manager (`/browser`), structured
+  per-run logging beyond the response's `steps` array (`/logging`), and env/config loading
+  (`/config`).
+- Capture modules beyond `page_visits` (`cta_clicks`, `data_layer_evidence`,
+  `ga4_network_events`, `screenshots`, `errors`, `offer_extraction`).
+- `formSubmissionGuard` / `dataEntryGuard` as separate modules — until form submission or
+  data entry is exercised by a real task, this stays unimplemented rather than speculative.
+- A `/prompts` directory — there is no real prompt to version yet.
