@@ -40,9 +40,24 @@ examples/
   competitor-offers-task.json   # use case 2: competitor offers capture
 ```
 
-`/src` (the TypeScript implementation) does not exist yet — this repository currently contains
-the architecture and contract foundation only. See `docs/v1-scope.md` for exactly what has and
-hasn't been built, and the recommended next implementation step.
+`/src` contains a v1 scaffold: the core navigation loop, action executors, observation builder,
+and safety guards, driven in this phase by a deterministic mock reasoning provider against a
+local HTML fixture (no Claude API, n8n, Google Sheets, BigQuery, or real website involved yet).
+See `docs/v1-scope.md` for exactly what has and hasn't been built.
+
+## Running the local proof of concept
+
+```
+npm install
+npm run typecheck       # tsc --noEmit
+npm run validate:schemas # validates examples/*.json against schemas/task-request.schema.json
+npm test                 # runs the engine against tests/fixtures/*.html end to end
+npm run check             # all three, in order
+```
+
+`npm test` starts a local static server for `tests/fixtures/start.html` and `success.html`,
+runs the engine with the mock reasoning provider against it, and asserts the resulting
+`TaskResponse` validates against `schemas/task-response.schema.json`.
 
 ## The generic loop
 
