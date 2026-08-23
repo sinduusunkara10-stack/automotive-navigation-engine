@@ -13,6 +13,7 @@ export interface InteractiveElement {
   role: string;
   accessibleName: string;
   visible?: boolean;
+  destinationUrl?: string;
 }
 
 export interface Observation {

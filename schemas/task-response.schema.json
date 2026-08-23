@@ -189,6 +189,10 @@
               },
               "visible": {
                 "type": "boolean"
+              },
+              "destinationUrl": {
+                "type": "string",
+                "description": "Destination URL of the element, when available (e.g. an anchor's href), surfaced to the reasoning layer so it can distinguish navigation targets without raw HTML."
               }
             }
           }

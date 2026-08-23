@@ -91,8 +91,11 @@ Explicitly out of scope for v1 (candidate for v2+):
 3. **Sync vs. async task execution.** A configurator journey may take minutes; does n8n call
    and block, or submit-and-poll/webhook-callback? `docs/n8n-integration.md` proposes
    submit-and-poll as the default but this is not finalized.
-4. **Claude model/version pinning strategy** for the reasoning layer, and how prompt-version
-   changes are tracked against response quality over time.
+4. **Claude model/version pinning strategy** for the reasoning layer — partially resolved:
+   `ClaudeReasoningProvider` pins a documented default (`CLAUDE_MODEL`, default
+   `claude-sonnet-5`; see README "Reasoning provider selection" and `docs/architecture.md` §6),
+   overridable per deployment via env var. How prompt-version changes are tracked against
+   response quality over time remains open.
 5. **Rate limiting / politeness controls** (delay between steps, respecting robots.txt or
    site terms) for competitor-offers-style monitoring tasks — not yet specified in the safety
    schema beyond the existing step/duration/backtrack limits.

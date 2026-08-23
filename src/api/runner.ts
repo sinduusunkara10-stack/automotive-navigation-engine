@@ -1,20 +1,21 @@
 import { chromium } from "playwright";
 import { runTask } from "../core/engine.js";
-import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
+import { createReasoningProvider } from "../reasoning/providerFactory.js";
 import type { TaskRequest } from "../types/task-request.js";
 import * as taskStore from "./taskStore.js";
 
-const reasoning = new MockReasoningProvider();
-
 /**
- * Runs the existing engine loop against the mock reasoning provider and records the
- * outcome in the task store. Intentionally not awaited by the HTTP handler that starts
- * it — POST /v1/tasks returns as soon as the run is accepted, per the submit-and-poll
- * design in docs/n8n-integration.md.
+ * Runs the existing engine loop and records the outcome in the task store.
+ * Intentionally not awaited by the HTTP handler that starts it — POST /v1/tasks returns
+ * as soon as the run is accepted, per the submit-and-poll design in
+ * docs/n8n-integration.md. The reasoning provider is selected per run from
+ * REASONING_PROVIDER (mock by default; see docs/architecture.md §6 and README.md) —
+ * never touches a real website, n8n, Google Sheets, or BigQuery regardless of provider.
  */
 export async function executeTaskAsync(runId: string, task: TaskRequest): Promise<void> {
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
+    const reasoning = createReasoningProvider();
     browser = await chromium.launch();
     const page = await browser.newPage();
     try {
