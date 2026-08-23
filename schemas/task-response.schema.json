@@ -1,0 +1,546 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sinduusunkara10-stack/automotive-navigation-engine/schemas/task-response.schema.json",
+  "title": "Navigation Engine Task Response",
+  "description": "Structured result returned by the generic navigation engine after a run completes (successfully, blocked, failed, or limit-exhausted). Raw website-derived evidence (captures) is kept separate from engine-generated classifications/reasoning (engineAssessment), per design requirement #8.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "status",
+    "startUrl",
+    "finalUrl",
+    "steps",
+    "captures",
+    "engineAssessment",
+    "diagnostics"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Version of this task-response contract, e.g. \"1.0.0\".",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "taskId": {
+      "type": "string",
+      "description": "Echoes the taskId from the originating task-request.",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "description": "Terminal outcome of the run.",
+      "enum": [
+        "success",
+        "blocked",
+        "failure",
+        "max_steps_reached",
+        "max_backtracks_reached",
+        "max_duration_reached"
+      ]
+    },
+    "statusReason": {
+      "type": "string",
+      "description": "Short human-readable explanation of why the run ended in this status (e.g. which safety constraint triggered a block)."
+    },
+    "startUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "finalUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered log of every navigate/observe/decide/act cycle executed during the run.",
+      "items": {
+        "$ref": "#/$defs/stepLog"
+      }
+    },
+    "captures": {
+      "$ref": "#/$defs/captures"
+    },
+    "engineAssessment": {
+      "$ref": "#/$defs/engineAssessment"
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    }
+  },
+  "$defs": {
+    "actionType": {
+      "type": "string",
+      "enum": [
+        "click",
+        "scroll",
+        "wait",
+        "go_back",
+        "navigate",
+        "capture",
+        "stop_success",
+        "stop_blocked",
+        "stop_failure"
+      ]
+    },
+    "selectedAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/actionType"
+        },
+        "target": {
+          "type": "string",
+          "description": "Selector, element id, or URL the action applies to, when applicable."
+        },
+        "params": {
+          "type": "object",
+          "description": "Action-specific parameters (e.g. scroll distance, wait duration, navigate URL).",
+          "additionalProperties": true
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "description": "Compact structured summary of the page derived from visible and accessible elements. Never the raw HTML document.",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "title",
+        "interactiveElements"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "title": {
+          "type": "string"
+        },
+        "interactiveElements": {
+          "type": "array",
+          "description": "Condensed list of clickable/actionable elements available to the reasoning layer.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "role",
+              "accessibleName"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable reference the engine can resolve back to a Playwright locator."
+              },
+              "role": {
+                "type": "string",
+                "description": "ARIA/accessibility role, e.g. \"button\", \"link\"."
+              },
+              "accessibleName": {
+                "type": "string"
+              },
+              "visible": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "notableText": {
+          "type": "array",
+          "description": "Short list of salient visible text snippets (headings, prices, banners) surfaced to the reasoning layer without sending full page content.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "stepLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepIndex",
+        "timestamp",
+        "currentUrl",
+        "observation",
+        "decision",
+        "selectedAction",
+        "actionResult",
+        "progress"
+      ],
+      "properties": {
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "currentUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "observation": {
+          "$ref": "#/$defs/observation"
+        },
+        "decision": {
+          "type": "string",
+          "description": "Constrained rationale text produced by the reasoning layer for choosing the selected action."
+        },
+        "selectedAction": {
+          "$ref": "#/$defs/selectedAction"
+        },
+        "actionResult": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "success"
+          ],
+          "properties": {
+            "success": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "resultingUrl": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        },
+        "progress": {
+          "type": "object",
+          "description": "Snapshot of success-criteria evaluation after this step.",
+          "additionalProperties": false,
+          "required": [
+            "satisfiedCriteriaIds",
+            "estimatedCompletion"
+          ],
+          "properties": {
+            "satisfiedCriteriaIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "estimatedCompletion": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Engine's 0-1 estimate of progress toward success; a classification, not raw evidence."
+            }
+          }
+        },
+        "safetyFlags": {
+          "type": "array",
+          "description": "Any guardrails that were evaluated and triggered on this step (e.g. domain_blocked, loop_detected, repeated_action, form_submission_blocked).",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "captures": {
+      "type": "object",
+      "description": "Raw, website-derived evidence collected by capture modules, keyed by module name. Only modules the task requested are populated. This section must contain evidence as observed, not engine interpretation.",
+      "additionalProperties": false,
+      "properties": {
+        "page_visits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "url",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "title": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        "cta_clicks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "label",
+              "url",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "label": {
+                "type": "string"
+              },
+              "selector": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        "data_layer_evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "url",
+              "timestamp",
+              "raw"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "raw": {
+                "description": "Unmodified dataLayer entries as read from the page at capture time.",
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "ga4_network_events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "requestUrl",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "requestUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "params": {
+                "description": "Raw query/body parameters observed on the outgoing GA4 network request.",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "ref",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "ref": {
+                "type": "string",
+                "description": "Storage reference (path or URL) to the captured screenshot. The engine does not embed binary image data in this response."
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why this screenshot was taken, e.g. \"finish_state\", \"error\", \"scheduled\"."
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "message",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "stack": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        },
+        "offer_extraction": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "url",
+              "offerText",
+              "timestamp",
+              "evidenceScreenshotRef"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "vehicleOrModel": {
+                "type": "string"
+              },
+              "offerText": {
+                "type": "string"
+              },
+              "displayedPrice": {
+                "type": "string",
+                "description": "Price as displayed on the page, kept as text to preserve currency/formatting exactly as shown."
+              },
+              "validityText": {
+                "type": "string",
+                "description": "Visible validity/terms text as shown on the page, if any."
+              },
+              "evidenceScreenshotRef": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    },
+    "engineAssessment": {
+      "type": "object",
+      "description": "Engine-generated interpretation, kept separate from raw captures so downstream consumers never conflate observed evidence with classification.",
+      "additionalProperties": false,
+      "required": [
+        "objectiveAchieved",
+        "confidence",
+        "summary"
+      ],
+      "properties": {
+        "objectiveAchieved": {
+          "type": "boolean"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "summary": {
+          "type": "string",
+          "description": "Short natural-language summary of what happened during the run."
+        },
+        "satisfiedSuccessCriteriaIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "string",
+          "description": "Any additional engine observations not captured elsewhere (e.g. anomalies noticed but not part of a capture module)."
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepCount",
+        "backtrackCount",
+        "totalDurationMs",
+        "finishReason"
+      ],
+      "properties": {
+        "stepCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "backtrackCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalDurationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "finishReason": {
+          "type": "string",
+          "description": "Low-level reason the loop stopped, e.g. \"stop_success_action\", \"max_steps\", \"domain_blocked\", \"unhandled_error\"."
+        },
+        "engineVersion": {
+          "type": "string",
+          "description": "Version of the navigation engine build that produced this response."
+        }
+      }
+    }
+  }
+}
