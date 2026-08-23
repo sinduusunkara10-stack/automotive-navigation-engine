@@ -43,13 +43,17 @@ examples/
 `/src` contains a v1 scaffold: the core navigation loop, action executors, observation builder,
 safety guards, and a set of capture modules (`page_visits`, `page_metadata`,
 `data_layer_evidence`, `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`,
-`journey_path`, `errors`), driven in this phase by a deterministic mock reasoning provider
-against local HTML fixtures (no Claude API, n8n, Google Sheets, BigQuery, or real website
-involved yet). See `docs/v1-scope.md` for exactly what has and hasn't been built.
+`journey_path`, `errors`), driven by a pluggable reasoning provider: the deterministic
+**mock** provider by default, or the real **Claude-backed** provider opt-in via
+`REASONING_PROVIDER=claude` (see "Reasoning provider selection" below). Automated tests always
+use the mock provider or a deterministic fake Claude client — never a real network call to
+Claude, n8n, Google Sheets, BigQuery, or a real website. See `docs/v1-scope.md` for exactly what
+has and hasn't been built.
 
-`src/api` adds a minimal local HTTP boundary around this engine (see "Local HTTP API" below).
-It still only runs the mock reasoning provider against local fixtures — it is a proof-of-concept
-wrapper, not a deployment.
+`src/api` adds a minimal local HTTP boundary around this engine (see "Local HTTP API" below). It
+runs against local fixtures/target URLs you supply, using the mock reasoning provider by default
+or the real Claude API when opted in — it is a proof-of-concept wrapper either way, not a
+deployment.
 
 ## Running the local proof of concept
 
@@ -79,6 +83,87 @@ target intercepted so the action itself fails) and asserts each is captured unde
 that stopped the run, with no cookies, auth headers, request bodies, credentials, tokens, or
 raw stack traces included.
 
+`npm test` also runs `tests/unit/*.test.ts`, which cover the Claude reasoning provider (prompt
+construction, decision validation, retry/fallback behavior, provider selection) entirely
+against a deterministic fake model client — no network access, no `ANTHROPIC_API_KEY`, and no
+Claude usage. See "Reasoning provider selection" below for the real provider and its separate,
+opt-in manual smoke test.
+
+## Reasoning provider selection
+
+The engine's reasoning layer (`src/reasoning`, see `docs/architecture.md` §6) is pluggable
+behind one `ReasoningProvider` interface. Two implementations exist:
+
+- **`MockReasoningProvider`** — deterministic, no network calls. **The default** if
+  `REASONING_PROVIDER` is unset or empty, and what every automated test uses.
+- **`ClaudeReasoningProvider`** — calls the real Claude API (via the official
+  `@anthropic-ai/sdk`) for exactly one structured navigation decision per step, validated
+  against the same controlled action vocabulary and `allowedDomains` the safety layer enforces
+  before it ever reaches Playwright.
+
+Select the provider with:
+
+```
+REASONING_PROVIDER=mock     # default; also selected automatically if unset/empty
+REASONING_PROVIDER=claude   # real Claude-backed provider; requires ANTHROPIC_API_KEY
+```
+
+An unsupported value (e.g. a typo) fails clearly at startup rather than silently falling back
+to mock. Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is
+gitignored; only `.env.example`, with placeholder values, is committed).
+
+### Claude provider configuration
+
+Read only from `ANTHROPIC_API_KEY` — never logged, returned, partially displayed, or committed.
+Optional tuning (defaults shown; see `src/reasoning/config.ts`):
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CLAUDE_MODEL` | `claude-sonnet-5` | Called once per navigation step (potentially many times per run), so a lower-cost/lower-latency model is the conservative default. Not hardcoded without this documented rationale — override for tasks needing stronger reasoning. |
+| `CLAUDE_MAX_OUTPUT_TOKENS` | `1024` | Clamped to `[64, 4096]`. |
+| `CLAUDE_TIMEOUT_MS` | `15000` | Per-request timeout, clamped to `[1000, 60000]`. |
+| `CLAUDE_MAX_RETRIES` | `1` | **Hard-capped at 1** regardless of this value — the same never-relaxed-ceiling pattern `src/safety` uses for `maxSteps`/`maxBacktracks`. |
+| `CLAUDE_MIN_CONFIDENCE` | `0.5` | Below this, a decision is treated as invalid (rejected, retried once, then a safe `stop_blocked` fallback) — never silently accepted. |
+
+### Safety and validation controls specific to the Claude provider
+
+- Claude only ever sees the same compact `Observation` the core loop already builds (objective,
+  success criteria, current URL/title/notable text, interactive elements with
+  id/type/accessibleName/visible/destinationUrl, `allowedActions`, `allowedDomains`, remaining
+  step/backtrack budget, recent actions) — never raw HTML, cookies, storage, headers, or
+  authentication values. Enforced structurally: `ReasoningContext` (what the provider receives)
+  has no field through which any of those could reach the prompt. See
+  `tests/unit/promptBuilder.test.ts`.
+- The decision is constrained by a strict, per-run structured-output schema
+  (`src/reasoning/claudeDecisionSchema.ts`) built from *this run's* `allowedActions` — Claude
+  cannot select an action outside that list, and cannot return JavaScript, Playwright code,
+  selectors, or shell commands (there is no field for them).
+- Every decision is re-validated engine-side before it can reach the safety layer or Playwright
+  (`src/reasoning/validateClaudeDecision.ts`): the action must still be in `allowedActions`, a
+  `click` target must reference an element actually observed this step, and a `navigate` URL is
+  re-checked against `allowedDomains` with the same guard the safety layer itself uses.
+- On invalid/malformed output, a refusal, or an API error, the provider retries at most once and
+  then returns a safe `stop_blocked` decision rather than throwing or crashing the run — the
+  existing safety layer in `src/safety` re-checks whatever any provider returns regardless.
+- API errors are reduced to a small sanitised category (e.g. `rate_limited`,
+  `authentication_failed`, `timeout`) before being recorded anywhere; the API key and raw SDK
+  error text never cross that boundary.
+
+### Manual local-fixture smoke test (opt-in, real API call)
+
+`npm test` / `npm run check` never call the real Claude API. A separate, manual smoke test does,
+and only when both conditions hold:
+
+```
+REASONING_PROVIDER=claude ANTHROPIC_API_KEY=sk-ant-... npm run smoke:claude
+```
+
+**Usage and cost warning:** this makes exactly **one real, billed** call to the Claude API
+(`tests/manual/claudeReasoningProviderSmokeTest.ts` caps the task at `maxSteps: 1` — the minimum
+needed to prove the integration end to end). It only ever navigates the local fictional fixture
+under `tests/fixtures/` — **no real website, n8n, Google Sheets, or BigQuery is involved**. If
+either env var is unset, the script prints a message and exits without making any call.
+
 ## The generic loop
 
 Every task, regardless of use case, runs the same loop:
@@ -101,9 +186,11 @@ screenshots) happens in pluggable **capture modules**, kept separate from this c
 
 ## Local HTTP API (proof of concept, not production-ready)
 
-`src/api` exposes a minimal HTTP boundary around the engine described above. It still only
-runs the mock reasoning provider against local fixtures/target URLs you supply — nothing here
-talks to the Claude API, n8n, Google Sheets, BigQuery, or Browserless.
+`src/api` exposes a minimal HTTP boundary around the engine described above, against local
+fixtures/target URLs you supply — nothing here talks to n8n, Google Sheets, BigQuery, or
+Browserless. It uses `MockReasoningProvider` by default; setting `REASONING_PROVIDER=claude`
+(see "Reasoning provider selection" above) makes it use the real Claude API for navigation
+decisions instead — still a local proof of concept, not a production deployment.
 
 ```
 npm run start:api   # starts the API on http://127.0.0.1:3000 (override with PORT=xxxx)

@@ -20,7 +20,8 @@ export async function buildObservation(page: Page): Promise<Observation> {
         const style = window.getComputedStyle(el);
         const visible =
           rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-        return { id, role, accessibleName, visible };
+        const destinationUrl = el instanceof HTMLAnchorElement ? el.href : undefined;
+        return { id, role, accessibleName, visible, ...(destinationUrl ? { destinationUrl } : {}) };
       });
     },
     { attr: ELEMENT_ID_ATTR, selector: INTERACTIVE_SELECTOR },

@@ -102,6 +102,13 @@ export async function runStep(params: {
     objective: task.objective,
     successCriteria: task.successCriteria,
     allowedActions: task.safety.allowedActions,
+    allowedDomains: task.allowedDomains,
+    limits: {
+      maxSteps: task.limits.maxSteps,
+      maxBacktracks: task.limits.maxBacktracks,
+      stepsUsed: state.stepCount,
+      backtracksUsed: state.backtrackCount,
+    },
     observation,
     recentActions: state.actionHistory,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],

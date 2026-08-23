@@ -90,18 +90,74 @@ reasoning prompt.
 
 ## 6. Reasoning layer
 
-`src/reasoning` is responsible for:
+`src/reasoning` is a pluggable client boundary behind one interface, `ReasoningProvider`
+(`reasoningProvider.ts`): `decide(context: ReasoningContext): Promise<Decision>`. Two
+implementations exist:
 
-- building a bounded prompt from the objective, success criteria, current observation, and a
-  trimmed recent-step history
-- calling Claude with a constrained output format (the action vocabulary + target + params +
-  short rationale) — enforced by schema/JSON-mode validation, not by trusting free text
-- rejecting/re-prompting on a malformed or out-of-vocabulary decision
+- `MockReasoningProvider` (`mockReasoningProvider.ts`) — deterministic, no network calls; the
+  default provider, used by every automated test and by the API unless overridden.
+- `ClaudeReasoningProvider` (`claudeReasoningProvider.ts`) — the real Claude-backed provider.
 
-The reasoning layer is a pluggable client boundary: it is the only place the engine talks to
-Claude, and its output is always validated against the same action vocabulary the safety layer
-enforces. Prompts live under `/prompts`, are versioned, and are treated as part of the engine's
-contract surface (changing them can change navigation behavior).
+Both see exactly the same `ReasoningContext`: objective, success criteria,
+`allowedActions`/`allowedDomains` for this run, remaining step/backtrack budget, the current
+compact `Observation` (never raw HTML), recent action history, and satisfied success-criteria
+ids. Neither ever receives a `Page`/browser handle — the reasoning layer cannot reach cookies,
+storage, headers, or any DOM beyond what `Observation` already exposes.
+
+### ClaudeReasoningProvider
+
+Selected via `REASONING_PROVIDER=claude` (see README "Reasoning provider selection"). Per
+decision:
+
+1. `promptBuilder.ts` builds a bounded system/user prompt from `ReasoningContext` only —
+   objective, success criteria, current page url/title/notableText, interactive elements
+   (id/type/accessibleName/visible/destinationUrl), `allowedActions`, `allowedDomains`, a
+   trimmed recent-action history, and remaining step/backtrack budget. Lists are capped
+   (elements, notable text, recent actions) to keep prompts small.
+2. `claudeDecisionSchema.ts` builds a strict Zod schema, scoped to this run's `allowedActions`,
+   for exactly one decision: `action` (closed enum), `targetElementId` (click only),
+   `navigateUrl` (navigate only — validated against `allowedDomains`, never a free `target`
+   string Claude could smuggle a selector/script/command through), `reason`, `confidence`, and
+   a narrow `params` (only the numeric knobs `scroll`/`wait` already accept).
+3. `anthropicReasoningModelClient.ts` — the only file that imports `@anthropic-ai/sdk` — calls
+   `client.messages.parse()` with `output_config.format` built from that schema (structured
+   outputs; see the Anthropic docs), so the response is schema-validated before it even reaches
+   this engine. SDK errors are caught and reduced to a small sanitised category set (e.g.
+   `rate_limited`, `authentication_failed`, `timeout`) — raw SDK error text, which could echo
+   request details, never crosses this boundary.
+4. `validateClaudeDecision.ts` is a second, engine-side check: re-confirms `action` is still in
+   `allowedActions`, resolves `targetElementId` against the elements actually observed this
+   step, re-validates `navigateUrl` against `allowedDomains` via the same `domainGuard` the
+   safety layer uses, and enforces `CLAUDE_MIN_CONFIDENCE` (documented policy: below the
+   threshold, the decision is treated as invalid, not silently accepted).
+5. On a malformed/invalid/errored response, `ClaudeReasoningProvider` retries **at most once**
+   (`CLAUDE_MAX_RETRIES`, hard-capped at 1 regardless of configuration — the same
+   never-relaxed-ceiling pattern `src/safety` uses for `maxSteps`/`maxBacktracks`). If no valid
+   decision is produced, it returns a safe `stop_blocked` decision rather than throwing —
+   `ReasoningProvider.decide()` always resolves to a `Decision`, so the core loop never needs a
+   Claude-specific error path. The safety layer in `src/safety` still re-validates whatever any
+   provider returns; this is a second line of defence, not a replacement for it.
+
+Per-decision usage metadata (input/output tokens, model, latency, retry count, accept/reject/
+error/fallback outcome) is recorded on an in-memory decision log
+(`ClaudeReasoningProvider#getDecisionLog()`), never under `captures.*` (raw website evidence)
+or `engineAssessment` (engine classification) — see the separation rule in CLAUDE.md. Wiring
+this log into `TaskResponse`/`diagnostics` would be a `task-response.schema.json` contract
+change and is deliberately left for a follow-up (see README "What's deliberately not
+implemented").
+
+Configuration (`src/reasoning/config.ts`): `ANTHROPIC_API_KEY` (required, read only from this
+env var, never logged), `CLAUDE_MODEL` (default `claude-sonnet-5` — this provider is called
+once per navigation step, so a lower-cost/lower-latency model is the conservative default;
+override for tasks needing stronger reasoning), `CLAUDE_MAX_OUTPUT_TOKENS`,
+`CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_RETRIES` (hard-capped at 1), `CLAUDE_MIN_CONFIDENCE`.
+
+Provider selection (`src/reasoning/providerFactory.ts`) reads `REASONING_PROVIDER`: unset/empty
+defaults safely to `MockReasoningProvider`; `mock`/`claude` select explicitly; any other value
+fails clearly (`UnsupportedReasoningProviderError`) rather than silently running the wrong
+provider. This is wired in at the API boundary (`src/api/runner.ts`), not in `src/core/loop.ts`
+— the core loop still just takes whatever `ReasoningProvider` it is given, keeping provider
+selection an application concern, not a core-loop one.
 
 ## 7. Safety / guardrail layer
 
@@ -222,7 +278,15 @@ as not-yet-built rather than removed from the plan — see §11.
 
   /reasoning               # pluggable decision-provider boundary
     reasoningProvider.ts    # ReasoningProvider interface
-    mockReasoningProvider.ts # deterministic stand-in used by the local PoC; no Claude API call yet
+    mockReasoningProvider.ts # deterministic stand-in; default provider, no Claude API call
+    claudeReasoningProvider.ts       # real Claude-backed provider (see §6)
+    promptBuilder.ts                 # builds the compact prompt from ReasoningContext
+    claudeDecisionSchema.ts          # strict Zod schema for the one-decision structured output
+    validateClaudeDecision.ts        # engine-side re-validation before a decision is trusted
+    reasoningModelClient.ts          # SDK-agnostic model-client boundary (fakeable in tests)
+    anthropicReasoningModelClient.ts # the only file importing @anthropic-ai/sdk
+    config.ts                        # env config for ClaudeReasoningProvider
+    providerFactory.ts               # REASONING_PROVIDER-based provider selection
 
   /capture-modules         # pluggable, task-specific evidence extraction
     pageVisits.ts           # implemented
@@ -260,6 +324,14 @@ as not-yet-built rather than removed from the plan — see §11.
 /tests
   integration/
     local-poc.test.ts      # drives the engine against the local fixture end to end
+  unit/
+    promptBuilder.test.ts             # asserts the Claude prompt is compact + non-sensitive
+    validateClaudeDecision.test.ts    # business-rule validation of a Claude decision
+    claudeReasoningProvider.test.ts   # provider behavior via an injected fake model client
+    providerFactory.test.ts           # REASONING_PROVIDER selection behavior
+    fakes/, helpers/                  # deterministic test doubles, no network/API key
+  manual/
+    claudeReasoningProviderSmokeTest.ts # opt-in real-API smoke test (see README); not run by npm test
   fixtures/                 # start.html / success.html used by the local PoC
   helpers/
     staticServer.ts         # local-origin HTTP server for the fixture pages
@@ -281,16 +353,24 @@ Key intent behind this layout:
 ## 11. What the v1 scaffold does and does not include
 
 This phase implements the core loop end to end against a **mock reasoning provider** and a
-**local HTML fixture** — no network calls to Claude, n8n, or any real website. See
-`docs/v1-scope.md` for the full scope boundary. Deliberately not built yet:
+**local HTML fixture** by default, plus a real, opt-in **Claude-backed reasoning provider**
+(`ClaudeReasoningProvider`, selected via `REASONING_PROVIDER=claude`; see §6) — automated tests
+and the default configuration still never make a network call to Claude, n8n, or any real
+website. See `docs/v1-scope.md` for the full scope boundary. Deliberately not built yet:
 
-- A real Claude-backed `ReasoningProvider` (`reasoningProvider.ts` is the extension point).
-- The HTTP API surface for n8n (`/api`), a browser session manager (`/browser`), structured
-  per-run logging beyond the response's `steps` array (`/logging`), and env/config loading
-  (`/config`).
+- The HTTP API surface for n8n (`/api`) exists as a local proof of concept only (see
+  README.md "Local HTTP API"); a browser session manager (`/browser`), structured per-run
+  logging beyond the response's `steps` array plus `ClaudeReasoningProvider`'s in-memory
+  decision log (`/logging`), and a general env/config loading module (`/config` — only
+  `src/reasoning/config.ts` exists so far, scoped to the reasoning provider) remain unbuilt.
+- Wiring `ClaudeReasoningProvider`'s per-decision usage metadata (tokens, latency, retries) into
+  `TaskResponse`/`diagnostics` — that is a `task-response.schema.json` contract change, not
+  attempted in this change (see §6). The metadata is recorded, just not surfaced there yet.
 - Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
   `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, `journey_path`, and
   `errors` (`offer_extraction` remains a reserved name, not yet built).
 - `formSubmissionGuard` / `dataEntryGuard` as separate modules — until form submission or
   data entry is exercised by a real task, this stays unimplemented rather than speculative.
-- A `/prompts` directory — there is no real prompt to version yet.
+- A `/prompts` directory — the Claude prompt lives in `src/reasoning/promptBuilder.ts` and is
+  covered by `tests/unit/promptBuilder.test.ts`, but is not yet split into a separately
+  versioned `/prompts` asset.
