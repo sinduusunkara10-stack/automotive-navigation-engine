@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sinduusunkara10-stack/automotive-navigation-engine/schemas/task-request.schema.json",
+  "title": "Navigation Engine Task Request",
+  "description": "Structured task submitted by an orchestrator (e.g. n8n) to the generic navigation engine. Describes a single navigate -> observe -> decide -> act -> check-success run. This contract is domain-agnostic: nothing here is specific to automotive, GA4, or any brand.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "objective",
+    "startUrl",
+    "allowedDomains",
+    "successCriteria",
+    "captureModules",
+    "limits",
+    "safety",
+    "outputSchemaVersion"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Version of this task-request contract, e.g. \"1.0.0\". Must be validated by the engine before use.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "taskId": {
+      "type": "string",
+      "description": "Caller-supplied unique identifier for this task run, echoed back in the response.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "objective": {
+      "type": "string",
+      "description": "Human-readable, natural-language description of what the engine should try to accomplish. Consumed by the reasoning layer as guidance, not parsed for control flow.",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "startUrl": {
+      "type": "string",
+      "description": "Absolute URL where the navigation loop begins.",
+      "format": "uri"
+    },
+    "allowedDomains": {
+      "type": "array",
+      "description": "Allow-list of hostnames (or hostname patterns) the engine may navigate to. Any navigation attempt outside this list must be blocked by the safety layer.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "successCriteria": {
+      "type": "array",
+      "description": "Ordered or unordered list of conditions the engine checks after each step to decide whether the objective has been reached.",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/successCriterion"
+      }
+    },
+    "captureModules": {
+      "type": "array",
+      "description": "Task-specific capture modules to activate during the run. Each module is a pluggable unit that records evidence; the core navigation loop does not know what any of them mean.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/captureModule"
+      }
+    },
+    "maxSteps": {
+      "type": "integer",
+      "description": "Deprecated top-level convenience field. Prefer limits.maxSteps. Retained only for readability in examples; engine reads limits.maxSteps as the source of truth.",
+      "deprecated": true,
+      "minimum": 1
+    },
+    "limits": {
+      "$ref": "#/$defs/limits"
+    },
+    "safety": {
+      "$ref": "#/$defs/safety"
+    },
+    "outputSchemaVersion": {
+      "type": "string",
+      "description": "Version of the task-response contract the caller expects back, e.g. \"1.0.0\".",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional free-form, non-authoritative key-value bag for orchestrator bookkeeping (e.g. requestedBy, market, campaign id). The engine must not branch its core logic on any value in here.",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "successCriterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "description"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable identifier for this criterion, referenced in the response's progress reporting."
+        },
+        "type": {
+          "type": "string",
+          "description": "Kind of check the engine performs. New types are additive and must not require changes to the core loop.",
+          "enum": [
+            "url_pattern",
+            "element_present",
+            "element_text_match",
+            "data_layer_event",
+            "network_event",
+            "custom"
+          ]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable explanation of what this criterion checks, also usable by the reasoning layer."
+        },
+        "config": {
+          "type": "object",
+          "description": "Type-specific parameters (e.g. { \"pattern\": \"**/summary\" } for url_pattern, { \"selector\": \"...\" } for element_present). Left open to keep new criterion types additive.",
+          "additionalProperties": true
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether this criterion must be satisfied for stop_success, or is informational-only for progress tracking.",
+          "default": true
+        }
+      }
+    },
+    "captureModule": {
+      "type": "string",
+      "description": "Identifier of a registered capture module. The core engine treats these as opaque plugin names.",
+      "enum": [
+        "page_visits",
+        "cta_clicks",
+        "data_layer_evidence",
+        "ga4_network_events",
+        "screenshots",
+        "errors",
+        "offer_extraction"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxSteps",
+        "maxBacktracks"
+      ],
+      "properties": {
+        "maxSteps": {
+          "type": "integer",
+          "description": "Hard ceiling on the number of navigate/act cycles before the run is stopped with a max_steps outcome.",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "maxBacktracks": {
+          "type": "integer",
+          "description": "Hard ceiling on the number of go_back actions before the run is stopped with a max_backtracks outcome.",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "maxDurationSeconds": {
+          "type": "integer",
+          "description": "Optional wall-clock budget for the whole run.",
+          "minimum": 1
+        },
+        "maxRepeatedActions": {
+          "type": "integer",
+          "description": "Number of times the same (action type + target) pair may repeat consecutively before loop detection stops the run.",
+          "minimum": 1,
+          "default": 3
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedActions"
+      ],
+      "properties": {
+        "allowedActions": {
+          "type": "array",
+          "description": "Subset of the global action vocabulary this task is permitted to use. The engine must reject any decision selecting an action outside this list.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/actionType"
+          }
+        },
+        "allowFormSubmission": {
+          "type": "boolean",
+          "description": "Must be explicitly set true to permit any action that submits a form. Defaults to false (disabled).",
+          "default": false
+        },
+        "allowPaymentOrPurchase": {
+          "type": "boolean",
+          "description": "Always disallowed in v1. Present for forward compatibility only; the engine must reject a task where this is true.",
+          "const": false,
+          "default": false
+        },
+        "allowPersonalDataEntry": {
+          "type": "boolean",
+          "description": "Always disallowed in v1. Present for forward compatibility only; the engine must reject a task where this is true.",
+          "const": false,
+          "default": false
+        },
+        "requireDomainConfirmationOnRedirect": {
+          "type": "boolean",
+          "description": "If true, a cross-domain redirect that stays within allowedDomains is still logged as a notable event in the step log.",
+          "default": true
+        }
+      }
+    },
+    "actionType": {
+      "type": "string",
+      "description": "Controlled action vocabulary. The reasoning layer selects one of these per step; it never generates arbitrary Playwright code.",
+      "enum": [
+        "click",
+        "scroll",
+        "wait",
+        "go_back",
+        "navigate",
+        "capture",
+        "stop_success",
+        "stop_blocked",
+        "stop_failure"
+      ]
+    }
+  }
+}

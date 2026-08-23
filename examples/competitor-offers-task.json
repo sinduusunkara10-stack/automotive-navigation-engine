@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "1.0.0",
+  "taskId": "example-competitor-offers-0001",
+  "objective": "Navigate to the competitor's current offers/promotions page and capture each visible promotional offer, including the vehicle or model it applies to, the displayed price, and any visible validity information, with evidence screenshots.",
+  "startUrl": "https://www.example-competitor-oem.com/offers",
+  "allowedDomains": [
+    "www.example-competitor-oem.com"
+  ],
+  "successCriteria": [
+    {
+      "id": "offers-list-visible",
+      "type": "element_present",
+      "description": "The offers listing has rendered with at least one promotional offer card.",
+      "config": {
+        "selector": "[data-testid=\"offer-card\"]"
+      },
+      "required": true
+    }
+  ],
+  "captureModules": [
+    "page_visits",
+    "offer_extraction",
+    "screenshots",
+    "errors"
+  ],
+  "limits": {
+    "maxSteps": 25,
+    "maxBacktracks": 3,
+    "maxDurationSeconds": 600,
+    "maxRepeatedActions": 3
+  },
+  "safety": {
+    "allowedActions": [
+      "click",
+      "scroll",
+      "wait",
+      "go_back",
+      "navigate",
+      "capture",
+      "stop_success",
+      "stop_blocked",
+      "stop_failure"
+    ],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.0.0",
+  "metadata": {
+    "useCase": "competitor-offers-monitoring",
+    "requestedBy": "n8n-workflow-demo"
+  }
+}

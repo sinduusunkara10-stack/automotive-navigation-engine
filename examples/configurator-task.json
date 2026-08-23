@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "1.0.0",
+  "taskId": "example-configurator-journey-0001",
+  "objective": "Starting from the homepage, find and enter the vehicle configurator, proceed through the configuration steps to a finish or summary state, and capture the journey taken along with GA4 and dataLayer evidence.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "allowedDomains": [
+    "www.example-automotive-oem.com",
+    "configurator.example-automotive-oem.com"
+  ],
+  "successCriteria": [
+    {
+      "id": "reached-configurator",
+      "type": "url_pattern",
+      "description": "Navigation has entered the configurator sub-application.",
+      "config": {
+        "pattern": "https://configurator.example-automotive-oem.com/**"
+      },
+      "required": false
+    },
+    {
+      "id": "reached-finish-state",
+      "type": "element_present",
+      "description": "The configurator has reached a finish/summary screen showing the completed build.",
+      "config": {
+        "selector": "[data-testid=\"configurator-summary\"]"
+      },
+      "required": true
+    }
+  ],
+  "captureModules": [
+    "page_visits",
+    "cta_clicks",
+    "data_layer_evidence",
+    "ga4_network_events",
+    "screenshots",
+    "errors"
+  ],
+  "limits": {
+    "maxSteps": 60,
+    "maxBacktracks": 5,
+    "maxDurationSeconds": 900,
+    "maxRepeatedActions": 3
+  },
+  "safety": {
+    "allowedActions": [
+      "click",
+      "scroll",
+      "wait",
+      "go_back",
+      "navigate",
+      "capture",
+      "stop_success",
+      "stop_blocked",
+      "stop_failure"
+    ],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.0.0",
+  "metadata": {
+    "useCase": "configurator-journey",
+    "requestedBy": "n8n-workflow-demo"
+  }
+}
