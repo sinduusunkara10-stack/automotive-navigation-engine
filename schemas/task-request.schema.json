@@ -147,7 +147,9 @@
       "description": "Identifier of a registered capture module. The core engine treats these as opaque plugin names.",
       "enum": [
         "page_visits",
+        "page_metadata",
         "cta_clicks",
+        "finish_page_ctas",
         "data_layer_evidence",
         "ga4_network_events",
         "screenshots",

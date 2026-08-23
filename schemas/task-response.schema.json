@@ -280,6 +280,85 @@
             }
           }
         },
+        "page_metadata": {
+          "type": "array",
+          "description": "Generic per-page metadata (title, meta description, lang) as read from the document, with no engine interpretation.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "url",
+              "timestamp"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "lang": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "finish_page_ctas": {
+          "type": "array",
+          "description": "Visible calls-to-action found on the page at capture time (e.g. a journey's finish/success state). Generic element evidence only — no domain-specific classification.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "pageUrl",
+              "timestamp",
+              "text",
+              "elementType"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "pageUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "text": {
+                "type": "string",
+                "description": "Visible text of the CTA element as rendered on the page."
+              },
+              "url": {
+                "type": "string",
+                "description": "Destination URL of the CTA, when available (e.g. an anchor's href)."
+              },
+              "elementType": {
+                "type": "string",
+                "description": "Generic element tag/role, e.g. \"a\", \"button\"."
+              },
+              "accessibleName": {
+                "type": "string",
+                "description": "Accessible name (e.g. aria-label) of the CTA element, when available."
+              }
+            }
+          }
+        },
         "cta_clicks": {
           "type": "array",
           "items": {

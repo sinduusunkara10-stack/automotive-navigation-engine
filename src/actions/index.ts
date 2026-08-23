@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
 import type { ActionResult, Captures } from "../types/task-response.js";
+import type { CaptureModuleName } from "../types/captureModule.js";
 import { executeClick } from "./click.js";
 import { executeScroll } from "./scroll.js";
 import { executeWait } from "./wait.js";
@@ -16,10 +17,11 @@ export interface DispatchParams {
   action: SelectedAction;
   captures: Captures;
   stepIndex: number;
+  captureModules: CaptureModuleName[];
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
-  const { page, action, captures, stepIndex } = params;
+  const { page, action, captures, stepIndex, captureModules } = params;
   switch (action.type) {
     case "click":
       return executeClick(page, action);
@@ -32,7 +34,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     case "navigate":
       return executeNavigate(page, action);
     case "capture":
-      return executeCapture(page, captures, stepIndex);
+      return executeCapture(page, captures, stepIndex, captureModules);
     case "stop_success":
       return executeStopSuccess();
     case "stop_blocked":

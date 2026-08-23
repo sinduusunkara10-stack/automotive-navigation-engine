@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -49,7 +49,14 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
           config: { pattern: `${baseUrl}/success.html` },
         },
       ],
-      captureModules: ["page_visits"],
+      captureModules: [
+        "page_visits",
+        "page_metadata",
+        "data_layer_evidence",
+        "ga4_network_events",
+        "screenshots",
+        "finish_page_ctas",
+      ],
       limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: {
         allowedActions: ["click", "wait", "capture", "stop_success", "stop_blocked", "stop_failure"],
@@ -71,6 +78,107 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
     assert.ok(response.captures.page_visits && response.captures.page_visits.length > 0);
     assert.equal(response.engineAssessment.objectiveAchieved, true);
     assert.equal(response.diagnostics.finishReason, "stop_success_action");
+
+    // dataLayer evidence must cover both pages of the journey: the fixture pushes its
+    // own initial + subsequent events on each page, and evidence is preserved raw.
+    const dataLayerCaptures = response.captures.data_layer_evidence ?? [];
+    assert.ok(dataLayerCaptures.length >= 2, "expected dataLayer evidence from at least two steps");
+    assert.ok(dataLayerCaptures.some((entry) => entry.url === `${baseUrl}/start.html`));
+    const successDataLayer = dataLayerCaptures.find((entry) => entry.url === `${baseUrl}/success.html`);
+    assert.ok(successDataLayer, "expected dataLayer evidence captured on the success page");
+    assert.ok(successDataLayer.raw.some((entry) => entry.event === "page_view" && entry.page === "success"));
+    assert.ok(successDataLayer.raw.some((entry) => entry.event === "journey_complete"));
+
+    // Simulated GA4 collect requests fired by both fixture pages must be observed and
+    // their raw fictional parameters preserved, with no unrelated traffic mixed in.
+    const ga4Captures = response.captures.ga4_network_events ?? [];
+    assert.ok(ga4Captures.length >= 2, "expected a GA4-style request from each fixture page");
+    for (const event of ga4Captures) {
+      assert.ok(event.requestUrl.includes("/g/collect"));
+      assert.equal(event.params?.tid, "G-FICTIONALTEST1");
+    }
+    assert.ok(ga4Captures.some((event) => event.params?.en === "page_view"));
+    assert.ok(ga4Captures.some((event) => event.params?.en === "journey_complete"));
+
+    // Finish-page CTAs: multiple visible CTAs on the success page, generic element
+    // evidence only (no automotive-specific classification).
+    const ctaCaptures = response.captures.finish_page_ctas ?? [];
+    assert.ok(ctaCaptures.length >= 3, "expected multiple visible CTAs on the finish page");
+    assert.ok(ctaCaptures.every((cta) => cta.pageUrl === `${baseUrl}/success.html`));
+    const offersLink = ctaCaptures.find((cta) => cta.text === "View fictional offers");
+    assert.ok(offersLink);
+    assert.equal(offersLink?.elementType, "a");
+    assert.equal(offersLink?.url, `${baseUrl}/offers.html`);
+    const contactLink = ctaCaptures.find((cta) => cta.text === "Contact us");
+    assert.equal(contactLink?.accessibleName, "Contact a fictional dealer");
+    const newsletterButton = ctaCaptures.find((cta) => cta.text === "Subscribe to updates");
+    assert.equal(newsletterButton?.elementType, "button");
+
+    // page_metadata is raw, website-derived evidence (title/description/lang), not an
+    // engine classification.
+    const pageMetadata = response.captures.page_metadata ?? [];
+    assert.ok(pageMetadata.length > 0);
+    assert.equal(pageMetadata[0]?.title, "Success");
+    assert.equal(pageMetadata[0]?.lang, "en");
+    assert.ok(pageMetadata[0]?.description?.includes("Fixture success page"));
+
+    // Screenshots are saved as artefacts on disk; the response only carries a path
+    // reference, never embedded image data.
+    const screenshots = response.captures.screenshots ?? [];
+    assert.ok(screenshots.length > 0);
+    for (const screenshot of screenshots) {
+      const fileStat = await stat(screenshot.ref);
+      assert.ok(fileStat.isFile() && fileStat.size > 0, `expected a screenshot file at ${screenshot.ref}`);
+    }
+
+    await validateAgainstResponseSchema(response);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("capture modules only run when the task requests them", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task: TaskRequest = {
+      schemaVersion: "1.0.0",
+      taskId: "local-poc-selective-capture",
+      objective: "Reach the fixture's success page by following the visible continue control.",
+      startUrl: `${baseUrl}/start.html`,
+      allowedDomains: ["127.0.0.1"],
+      successCriteria: [
+        {
+          id: "reached_success_page",
+          type: "url_pattern",
+          description: "The current page URL matches the success fixture.",
+          config: { pattern: `${baseUrl}/success.html` },
+        },
+      ],
+      captureModules: ["page_visits"],
+      limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 3 },
+      safety: {
+        allowedActions: ["click", "wait", "capture", "stop_success", "stop_blocked", "stop_failure"],
+        allowFormSubmission: false,
+        allowPaymentOrPurchase: false,
+        allowPersonalDataEntry: false,
+      },
+      outputSchemaVersion: "1.0.0",
+    };
+
+    const response = await runTask({ page, task });
+
+    assert.equal(response.status, "success");
+    assert.ok(response.captures.page_visits && response.captures.page_visits.length > 0);
+    assert.equal(response.captures.page_metadata, undefined);
+    assert.equal(response.captures.data_layer_evidence, undefined);
+    assert.equal(response.captures.ga4_network_events, undefined);
+    assert.equal(response.captures.screenshots, undefined);
+    assert.equal(response.captures.finish_page_ctas, undefined);
 
     await validateAgainstResponseSchema(response);
   } finally {

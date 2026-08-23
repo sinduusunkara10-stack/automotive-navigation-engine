@@ -59,9 +59,54 @@ export interface ErrorCapture {
   timestamp: string;
 }
 
+export interface PageMetadataCapture {
+  stepIndex: number;
+  url: string;
+  timestamp: string;
+  title?: string;
+  description?: string;
+  lang?: string;
+}
+
+export interface DataLayerCapture {
+  stepIndex: number;
+  url: string;
+  timestamp: string;
+  raw: Record<string, unknown>[];
+}
+
+export interface Ga4NetworkEventCapture {
+  stepIndex: number;
+  requestUrl: string;
+  timestamp: string;
+  params?: Record<string, string>;
+}
+
+export interface ScreenshotCapture {
+  stepIndex: number;
+  ref: string;
+  reason?: string;
+  timestamp: string;
+}
+
+export interface FinishPageCtaCapture {
+  stepIndex: number;
+  pageUrl: string;
+  timestamp: string;
+  text: string;
+  url?: string;
+  elementType: string;
+  accessibleName?: string;
+}
+
 export interface Captures {
   page_visits?: PageVisitCapture[];
   errors?: ErrorCapture[];
+  page_metadata?: PageMetadataCapture[];
+  data_layer_evidence?: DataLayerCapture[];
+  ga4_network_events?: Ga4NetworkEventCapture[];
+  screenshots?: ScreenshotCapture[];
+  finish_page_ctas?: FinishPageCtaCapture[];
 }
 
 export interface EngineAssessment {

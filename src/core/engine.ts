@@ -5,6 +5,7 @@ import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { checkNavigationAllowed } from "../safety/index.js";
+import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -30,45 +31,55 @@ export async function runTask(params: {
     });
   }
 
+  // GA4-style requests can fire on the very first page load, so the listener must be
+  // attached before that first navigation, and only when the task actually asked for it.
+  const detachGa4Capture = task.captureModules.includes("ga4_network_events")
+    ? attachGa4NetworkCapture(page, captures, () => state.stepCount)
+    : undefined;
+
   try {
-    await page.goto(task.startUrl, { timeout: 15000 });
-  } catch (error) {
+    try {
+      await page.goto(task.startUrl, { timeout: 15000 });
+    } catch (error) {
+      return buildTerminalResponse({
+        task,
+        state,
+        captures,
+        steps: [],
+        status: "failure",
+        finishReason: "initial_navigation_error",
+        statusReason: error instanceof Error ? error.message : String(error),
+        finalUrl: task.startUrl,
+      });
+    }
+
+    const steps: StepLog[] = [];
+    let terminal: TerminalStatus | undefined;
+    let finishReason = "loop_exhausted";
+
+    while (!terminal) {
+      const outcome = await runStep({ page, task, state, captures, reasoning: params.reasoning });
+      steps.push(outcome.stepLog);
+      if (outcome.terminal) {
+        terminal = outcome.terminal;
+        finishReason = outcome.finishReason ?? terminal;
+      }
+    }
+
+    const lastStep = steps[steps.length - 1];
     return buildTerminalResponse({
       task,
       state,
       captures,
-      steps: [],
-      status: "failure",
-      finishReason: "initial_navigation_error",
-      statusReason: error instanceof Error ? error.message : String(error),
-      finalUrl: task.startUrl,
+      steps,
+      status: terminal,
+      finishReason,
+      statusReason: finishReason,
+      finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
     });
+  } finally {
+    detachGa4Capture?.();
   }
-
-  const steps: StepLog[] = [];
-  let terminal: TerminalStatus | undefined;
-  let finishReason = "loop_exhausted";
-
-  while (!terminal) {
-    const outcome = await runStep({ page, task, state, captures, reasoning: params.reasoning });
-    steps.push(outcome.stepLog);
-    if (outcome.terminal) {
-      terminal = outcome.terminal;
-      finishReason = outcome.finishReason ?? terminal;
-    }
-  }
-
-  const lastStep = steps[steps.length - 1];
-  return buildTerminalResponse({
-    task,
-    state,
-    captures,
-    steps,
-    status: terminal,
-    finishReason,
-    statusReason: finishReason,
-    finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
-  });
 }
 
 function buildTerminalResponse(params: {

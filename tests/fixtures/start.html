@@ -3,10 +3,27 @@
   <head>
     <meta charset="utf-8" />
     <title>Start</title>
+    <meta name="description" content="Fixture start page for the local navigation-engine proof of concept." />
   </head>
   <body>
     <h1>Welcome</h1>
     <p>This is the starting page of the local navigation-engine fixture.</p>
     <a href="/success.html" id="continue-link">Continue</a>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "start", fictionalId: "FIX-START-001" });
+      window.dataLayer.push({ event: "consent_default", adStorage: "granted", analyticsStorage: "granted" });
+
+      var ga4Params = new URLSearchParams({
+        v: "2",
+        tid: "G-FICTIONALTEST1",
+        cid: "555.123456",
+        en: "page_view",
+        dl: location.href,
+        dt: document.title,
+      });
+      new Image().src = "/g/collect?" + ga4Params.toString();
+    </script>
   </body>
 </html>
