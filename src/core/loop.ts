@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { TaskRequest } from "../types/task-request.js";
-import type { Captures, StepLog } from "../types/task-response.js";
+import type { Captures, ErrorCategory, StepLog } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation } from "../observation/observationBuilder.js";
@@ -11,6 +11,7 @@ import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
+import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { evaluateSuccessCriteria } from "./successEvaluator.js";
 import type { RunState } from "./state.js";
 
@@ -64,6 +65,17 @@ export async function runStep(params: {
   if (limitsBreach) {
     const forcedAction: SelectedAction = { type: limitsBreach === "max_backtracks" ? "stop_blocked" : "stop_failure" };
     state.recordAction(forcedAction);
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        stepIndex,
+        category: "limit_stop",
+        severity: "critical",
+        pageUrl: observation.url,
+        message: `Hard limit reached: ${limitsBreach}.`,
+        recoverable: false,
+        stoppedRun: true,
+      });
+    }
     const stepLog = buildStepLog({
       stepIndex,
       observation,
@@ -107,6 +119,24 @@ export async function runStep(params: {
     },
   });
 
+  if (!safetyResult.allowed && task.captureModules.includes("errors")) {
+    const limitFlags = new Set(["max_steps", "max_backtracks", "max_duration", "loop_detected"]);
+    const category: ErrorCategory = safetyResult.flags.some((flag) => limitFlags.has(flag))
+      ? "limit_stop"
+      : "safety_guard_stop";
+    recordDiagnosticError(captures, {
+      stepIndex,
+      category,
+      severity: "critical",
+      pageUrl: observation.url,
+      actionType: decision.action.type,
+      ...(decision.action.target ? { targetElementId: decision.action.target } : {}),
+      message: `Run stopped by guardrail(s): ${safetyResult.flags.join(", ")}.`,
+      recoverable: false,
+      stoppedRun: true,
+    });
+  }
+
   const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
 
   // Element attributes must be read before the click executes: a click can navigate
@@ -124,6 +154,28 @@ export async function runStep(params: {
     stepIndex,
     captureModules: task.captureModules,
   });
+
+  if (!actionResult.success && task.captureModules.includes("errors")) {
+    const targetKnownMissing =
+      effectiveAction.type === "click" &&
+      (!effectiveAction.target || !observation.interactiveElements.some((el) => el.id === effectiveAction.target));
+    const category = classifyActionFailure({
+      actionType: effectiveAction.type,
+      targetKnownMissing,
+      errorMessage: actionResult.error,
+    });
+    recordDiagnosticError(captures, {
+      stepIndex,
+      category,
+      severity: "critical",
+      pageUrl: observation.url,
+      actionType: effectiveAction.type,
+      ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
+      message: actionResult.error ?? `${effectiveAction.type} action failed.`,
+      recoverable: false,
+      stoppedRun: true,
+    });
+  }
 
   if (wantsCtaClickCapture && effectiveAction.type === "click") {
     const ctaClick = buildCtaClickCapture({

@@ -6,6 +6,7 @@ import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
+import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -19,6 +20,16 @@ export async function runTask(params: {
   const captures: Captures = {};
 
   if (!checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        category: "safety_guard_stop",
+        severity: "critical",
+        pageUrl: task.startUrl,
+        message: "startUrl is outside allowedDomains; run blocked before navigation.",
+        recoverable: false,
+        stoppedRun: true,
+      });
+    }
     return buildTerminalResponse({
       task,
       state,
@@ -31,16 +42,30 @@ export async function runTask(params: {
     });
   }
 
-  // GA4-style requests can fire on the very first page load, so the listener must be
-  // attached before that first navigation, and only when the task actually asked for it.
+  // GA4-style requests (and, when requested, page errors/console errors/failed network
+  // requests) can fire on the very first page load, so listeners must be attached before
+  // that first navigation, and only when the task actually asked for them.
   const detachGa4Capture = task.captureModules.includes("ga4_network_events")
     ? attachGa4NetworkCapture(page, captures, () => state.stepCount)
+    : undefined;
+  const detachErrorCapture = task.captureModules.includes("errors")
+    ? attachErrorCapture(page, captures, () => state.stepCount)
     : undefined;
 
   try {
     try {
       await page.goto(task.startUrl, { timeout: 15000 });
     } catch (error) {
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          category: "navigation_failure",
+          severity: "critical",
+          pageUrl: task.startUrl,
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: false,
+          stoppedRun: true,
+        });
+      }
       return buildTerminalResponse({
         task,
         state,
@@ -79,6 +104,7 @@ export async function runTask(params: {
     });
   } finally {
     detachGa4Capture?.();
+    detachErrorCapture?.();
   }
 }
 

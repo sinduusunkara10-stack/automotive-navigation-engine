@@ -2,8 +2,8 @@ import type { CaptureModuleName } from "../types/captureModule.js";
 
 /**
  * Which registered capture module names have an implementation wired up in this
- * proof of concept. The other enum members (errors, offer_extraction) are reserved
- * names for later modules — deliberately not built yet.
+ * proof of concept. The other enum member (offer_extraction) is a reserved name
+ * for a later module — deliberately not built yet.
  */
 export const IMPLEMENTED_CAPTURE_MODULES: ReadonlySet<CaptureModuleName> = new Set([
   "page_visits",
@@ -14,6 +14,7 @@ export const IMPLEMENTED_CAPTURE_MODULES: ReadonlySet<CaptureModuleName> = new S
   "finish_page_ctas",
   "cta_clicks",
   "journey_path",
+  "errors",
 ]);
 
 export function isCaptureModuleImplemented(name: CaptureModuleName): boolean {

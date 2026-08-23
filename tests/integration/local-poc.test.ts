@@ -231,6 +231,7 @@ test("capture modules only run when the task requests them", async () => {
     assert.equal(response.captures.finish_page_ctas, undefined);
     assert.equal(response.captures.cta_clicks, undefined);
     assert.equal(response.captures.journey_path, undefined);
+    assert.equal(response.captures.errors, undefined);
 
     await validateAgainstResponseSchema(response);
   } finally {

@@ -43,9 +43,9 @@ examples/
 `/src` contains a v1 scaffold: the core navigation loop, action executors, observation builder,
 safety guards, and a set of capture modules (`page_visits`, `page_metadata`,
 `data_layer_evidence`, `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`,
-`journey_path`), driven in this phase by a deterministic mock reasoning provider against a
-local HTML fixture (no Claude API, n8n, Google Sheets, BigQuery, or real website involved yet).
-See `docs/v1-scope.md` for exactly what has and hasn't been built.
+`journey_path`, `errors`), driven in this phase by a deterministic mock reasoning provider
+against local HTML fixtures (no Claude API, n8n, Google Sheets, BigQuery, or real website
+involved yet). See `docs/v1-scope.md` for exactly what has and hasn't been built.
 
 ## Running the local proof of concept
 
@@ -66,6 +66,14 @@ CTAs, so the same run exercises every implemented capture module, including the 
 clicks recorded in `cta_clicks` and the full ordered `journey_path`. Screenshots captured
 during the test are written to `test-artifacts/screenshots/` (gitignored) rather than embedded
 in the response.
+
+`npm test` also runs `tests/fixtures/errors-start.html` through the engine with the `errors`
+capture module enabled. That fixture deliberately triggers safe, fictional failures (an
+uncaught page JS error, a console error, a request to a nonexistent endpoint, and a click
+target intercepted so the action itself fails) and asserts each is captured under
+`captures.errors` as raw technical diagnostics, distinguishing recoverable events from ones
+that stopped the run, with no cookies, auth headers, request bodies, credentials, tokens, or
+raw stack traces included.
 
 ## The generic loop
 
