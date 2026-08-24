@@ -88,6 +88,41 @@ capture modules may pull additional page-specific detail (e.g. offer card text) 
 Playwright when a `capture` action runs, but that detail does not need to pass through the
 reasoning prompt.
 
+Element `id`s are assigned once via a `data-nav-engine-id` DOM attribute the first time an
+element is scanned, and reused on every later scan of the same node -- so an id stays stable
+for the lifetime of the page even if the DOM around it reorders. A genuinely hidden element
+(`display:none`/`visibility:hidden`/zero size -- e.g. a responsive duplicate nav link kept in
+the DOM for another breakpoint) is never offered as a candidate at all: that is a permanent,
+safely-determinable fact at scan time, and offering it would let the reasoning layer confuse it
+with a visible look-alike. A disabled or currently-covered element *is* still offered (choosing
+one is not inherently confused, unlike picking an invisible duplicate); those are point-in-time
+facts the engine instead handles safely at execution time, below.
+
+### Action-execution consistency
+
+Because deciding an action is asynchronous (a real reasoning-provider call, or a retry), the
+page can change between when an element was observed and when the engine is ready to act on it
+-- an SPA re-render, a transient overlay, content removed entirely. `src/core/loop.ts`
+revalidates a selected `click` target's live actionability (attached, visible, enabled, not
+covered by another element) immediately before dispatching it. A target that has gone stale is
+never blindly clicked: the reasoning provider is asked once more, with a freshly rebuilt
+observation, so it can pick a different, currently-valid target; if that retry still can't
+produce an actionable target, the original decision is dispatched unchanged.
+
+`src/actions/click.ts` is the last line of defence: it revalidates the target itself right
+before clicking, and if the click still fails for a recoverable (timeout-class) reason -- the
+element was hidden/disabled/covered/detached, or a race changed it at the exact moment of the
+click -- it attempts a generic fallback: navigating directly to the element's `destinationUrl`.
+This is only ever possible for a real `<a href>` (`destinationUrl` is only ever populated from
+`HTMLAnchorElement.href`, never inferred from anchor text), and only when that URL uses an
+allowed protocol and is within `allowedDomains` -- otherwise the fallback is rejected and the
+action fails normally. A used or rejected fallback, along with the target's role/visible/
+attached/enabled state, locator-resolution result, click-error category, and whether
+re-observation was attempted, is folded into the existing `errors` capture's free-text
+`message` (via the `navigate`-style `navigation_failure` warning on success, or the normal
+critical action-failure diagnostic on failure) -- no schema change, since `ErrorCapture.message`
+is already generic, free-form text.
+
 ## 6. Reasoning layer
 
 `src/reasoning` is a pluggable client boundary behind one interface, `ReasoningProvider`

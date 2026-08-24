@@ -20,10 +20,23 @@ export interface DispatchParams {
   captureModules: CaptureModuleName[];
   allowedDomains: string[];
   actionNavigationTimeoutMs: number;
+  // Only meaningful for a `click` action -- see ExecuteClickParams in actions/click.ts.
+  reObservationAttempted?: boolean;
+  knownDestinationUrl?: string;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
-  const { page, action, captures, stepIndex, captureModules, allowedDomains, actionNavigationTimeoutMs } = params;
+  const {
+    page,
+    action,
+    captures,
+    stepIndex,
+    captureModules,
+    allowedDomains,
+    actionNavigationTimeoutMs,
+    reObservationAttempted,
+    knownDestinationUrl,
+  } = params;
   switch (action.type) {
     case "click":
       return executeClick({
@@ -34,6 +47,8 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         captures,
         stepIndex,
         captureModules,
+        reObservationAttempted,
+        knownDestinationUrl,
       });
     case "scroll":
       return executeScroll(page, action);

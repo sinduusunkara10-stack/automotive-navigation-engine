@@ -1,11 +1,11 @@
 import type { Page } from "playwright";
 import type { TaskRequest } from "../types/task-request.js";
-import type { Captures, ErrorCategory, StepLog } from "../types/task-response.js";
+import type { Captures, ErrorCategory, Observation, StepLog } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
-import { buildObservation } from "../observation/observationBuilder.js";
-import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
-import { checkLimitsBreach, validateDecision } from "../safety/index.js";
+import { buildObservation, readElementState } from "../observation/observationBuilder.js";
+import type { Decision, ReasoningProvider } from "../reasoning/reasoningProvider.js";
+import { checkLimitsBreach, validateDecision, type SafetyCheckResult } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
@@ -39,7 +39,7 @@ export async function runStep(params: {
   const { page, task, state, captures, reasoning, actionNavigationTimeoutMs } = params;
   const stepIndex = state.stepCount;
 
-  const observation = await buildObservation(page);
+  let observation = await buildObservation(page);
   state.recordVisit(observation.url);
 
   // Unlike the explicit `capture` action, dataLayer evidence must reflect every page in
@@ -97,33 +97,40 @@ export async function runStep(params: {
     };
   }
 
-  const decision = await reasoning.decide({
-    objective: task.objective,
-    successCriteria: task.successCriteria,
-    allowedActions: task.safety.allowedActions,
-    allowedDomains: task.allowedDomains,
-    limits: {
-      maxSteps: task.limits.maxSteps,
-      maxBacktracks: task.limits.maxBacktracks,
-      stepsUsed: state.stepCount,
-      backtracksUsed: state.backtrackCount,
-    },
-    observation,
-    recentActions: state.actionHistory,
-    satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
-  });
+  let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
 
-  const safetyResult = validateDecision({
-    action: decision.action,
-    safety: task.safety,
-    limits: task.limits,
-    allowedDomains: task.allowedDomains,
-    state: {
-      limits: { stepCount: state.stepCount, backtrackCount: state.backtrackCount, startedAtMs: state.startedAtMs },
-      actionHistory: state.actionHistory,
-      visitedUrls: state.visitedUrls,
-    },
-  });
+  // Before dispatching a click, revalidate the target against the *live* page rather
+  // than trusting the (possibly now-stale) observation the decision was made from --
+  // the async round trip to the reasoning provider is enough time for an SPA to re-
+  // render, an overlay to appear, or an element to be removed entirely. A target that
+  // has gone stale is never blindly clicked: the reasoning provider is asked once more,
+  // with a fresh observation, so it can pick a different, currently-valid target. If
+  // that retry still can't produce an actionable click target, the *original* decision
+  // is dispatched unchanged -- the click executor's own last-resort destinationUrl
+  // fallback (actions/click.ts) is the final line of defence for a target that stays
+  // stale even after giving the reasoning layer a second look.
+  let reObservationAttempted = false;
+  if (effectiveAction.type === "click" && effectiveAction.target) {
+    const liveState = await readElementState(page, effectiveAction.target);
+    if (!liveState.actionable) {
+      reObservationAttempted = true;
+      const freshObservation = await buildObservation(page);
+      const retry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
+
+      let retryTargetActionable = true;
+      if (retry.effectiveAction.type === "click" && retry.effectiveAction.target) {
+        const retryState = await readElementState(page, retry.effectiveAction.target);
+        retryTargetActionable = retryState.actionable;
+      }
+
+      if (retryTargetActionable) {
+        observation = freshObservation;
+        decision = retry.decision;
+        safetyResult = retry.safetyResult;
+        effectiveAction = retry.effectiveAction;
+      }
+    }
+  }
 
   if (!safetyResult.allowed && task.captureModules.includes("errors")) {
     const limitFlags = new Set(["max_steps", "max_backtracks", "max_duration", "loop_detected"]);
@@ -143,8 +150,6 @@ export async function runStep(params: {
     });
   }
 
-  const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
-
   // Element attributes must be read before the click executes: a click can navigate
   // away, taking the clicked element's DOM node with it.
   const wantsCtaClickCapture = task.captureModules.includes("cta_clicks");
@@ -161,6 +166,11 @@ export async function runStep(params: {
     captureModules: task.captureModules,
     allowedDomains: task.allowedDomains,
     actionNavigationTimeoutMs,
+    reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
+    knownDestinationUrl:
+      effectiveAction.type === "click"
+        ? observation.interactiveElements.find((el) => el.id === effectiveAction.target)?.destinationUrl
+        : undefined,
   });
 
   if (!actionResult.success && task.captureModules.includes("errors")) {
@@ -258,4 +268,50 @@ function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModul
     return;
   }
   captures.journey_path = [...(captures.journey_path ?? []), buildJourneyPathEntry(stepLog)];
+}
+
+/**
+ * Asks the reasoning provider for one decision against the given observation and runs it
+ * through the safety layer, producing the action that will actually be dispatched.
+ * Factored out so runStep can call it a second time -- with a freshly rebuilt observation
+ * -- when the first decision's click target turns out to be stale (see runStep above).
+ */
+async function obtainDecision(params: {
+  task: TaskRequest;
+  state: RunState;
+  observation: Observation;
+  reasoning: ReasoningProvider;
+}): Promise<{ decision: Decision; safetyResult: SafetyCheckResult; effectiveAction: SelectedAction }> {
+  const { task, state, observation, reasoning } = params;
+
+  const decision = await reasoning.decide({
+    objective: task.objective,
+    successCriteria: task.successCriteria,
+    allowedActions: task.safety.allowedActions,
+    allowedDomains: task.allowedDomains,
+    limits: {
+      maxSteps: task.limits.maxSteps,
+      maxBacktracks: task.limits.maxBacktracks,
+      stepsUsed: state.stepCount,
+      backtracksUsed: state.backtrackCount,
+    },
+    observation,
+    recentActions: state.actionHistory,
+    satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+  });
+
+  const safetyResult = validateDecision({
+    action: decision.action,
+    safety: task.safety,
+    limits: task.limits,
+    allowedDomains: task.allowedDomains,
+    state: {
+      limits: { stepCount: state.stepCount, backtrackCount: state.backtrackCount, startedAtMs: state.startedAtMs },
+      actionHistory: state.actionHistory,
+      visitedUrls: state.visitedUrls,
+    },
+  });
+
+  const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
+  return { decision, safetyResult, effectiveAction };
 }
