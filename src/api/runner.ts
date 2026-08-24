@@ -16,6 +16,7 @@ export async function executeTaskAsync(
   runId: string,
   task: TaskRequest,
   initialNavigationTimeoutMs?: number,
+  actionNavigationTimeoutMs?: number,
 ): Promise<void> {
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
@@ -23,7 +24,7 @@ export async function executeTaskAsync(
     browser = await chromium.launch();
     const page = await browser.newPage();
     try {
-      const result = await runTask({ page, task, reasoning, initialNavigationTimeoutMs });
+      const result = await runTask({ page, task, reasoning, initialNavigationTimeoutMs, actionNavigationTimeoutMs });
       taskStore.completeRun(runId, result);
     } finally {
       await page.close();

@@ -18,13 +18,23 @@ export interface DispatchParams {
   captures: Captures;
   stepIndex: number;
   captureModules: CaptureModuleName[];
+  allowedDomains: string[];
+  actionNavigationTimeoutMs: number;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
-  const { page, action, captures, stepIndex, captureModules } = params;
+  const { page, action, captures, stepIndex, captureModules, allowedDomains, actionNavigationTimeoutMs } = params;
   switch (action.type) {
     case "click":
-      return executeClick(page, action);
+      return executeClick({
+        page,
+        action,
+        allowedDomains,
+        timeoutMs: actionNavigationTimeoutMs,
+        captures,
+        stepIndex,
+        captureModules,
+      });
     case "scroll":
       return executeScroll(page, action);
     case "wait":
@@ -32,7 +42,15 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     case "go_back":
       return executeGoBack(page);
     case "navigate":
-      return executeNavigate(page, action);
+      return executeNavigate({
+        page,
+        action,
+        allowedDomains,
+        timeoutMs: actionNavigationTimeoutMs,
+        captures,
+        stepIndex,
+        captureModules,
+      });
     case "capture":
       return executeCapture(page, captures, stepIndex, captureModules);
     case "stop_success":

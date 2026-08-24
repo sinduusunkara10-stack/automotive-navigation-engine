@@ -10,6 +10,7 @@ import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js"
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
 import { navigateInitialPage } from "./initialNavigation.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
+import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -18,6 +19,7 @@ export async function runTask(params: {
   task: TaskRequest;
   reasoning?: ReasoningProvider;
   initialNavigationTimeoutMs?: number;
+  actionNavigationTimeoutMs?: number;
 }): Promise<TaskResponse> {
   const { page, task } = params;
   const state = new RunState();
@@ -26,10 +28,11 @@ export async function runTask(params: {
   // provider instance -- and therefore its decision log -- is used for every step, which
   // diagnostics.reasoningProvider aggregation below depends on.
   const reasoning = params.reasoning ?? new MockReasoningProvider();
-  // Overridable per-call for tests; the real API server resolves this once at startup
-  // (src/api/server.ts) from INITIAL_NAVIGATION_TIMEOUT_MS so a misconfigured value fails
-  // clearly at boot rather than per-run.
+  // Overridable per-call for tests; the real API server resolves these once at startup
+  // (src/api/server.ts) from INITIAL_NAVIGATION_TIMEOUT_MS / ACTION_NAVIGATION_TIMEOUT_MS
+  // so a misconfigured value fails clearly at boot rather than per-run.
   const initialNavigationTimeoutMs = params.initialNavigationTimeoutMs ?? readInitialNavigationTimeoutMs();
+  const actionNavigationTimeoutMs = params.actionNavigationTimeoutMs ?? readActionNavigationTimeoutMs();
 
   if (!checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
     if (task.captureModules.includes("errors")) {
@@ -113,7 +116,7 @@ export async function runTask(params: {
     let finishReason = "loop_exhausted";
 
     while (!terminal) {
-      const outcome = await runStep({ page, task, state, captures, reasoning });
+      const outcome = await runStep({ page, task, state, captures, reasoning, actionNavigationTimeoutMs });
       steps.push(outcome.stepLog);
       if (outcome.terminal) {
         terminal = outcome.terminal;

@@ -6,6 +6,7 @@ import * as taskStore from "./taskStore.js";
 import { isAuthorized, readApiAuthConfig, type ApiAuthConfig } from "./auth.js";
 import { API_VERSION } from "./version.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
+import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -73,6 +74,7 @@ async function handleCreateTask(
   req: IncomingMessage,
   res: ServerResponse,
   initialNavigationTimeoutMs: number,
+  actionNavigationTimeoutMs: number,
 ): Promise<void> {
   if (!hasJsonContentType(req)) {
     sendJson(res, 415, {
@@ -102,7 +104,7 @@ async function handleCreateTask(
   const runId = `run_${randomUUID()}`;
   taskStore.createRun(runId, task.taskId);
 
-  void executeTaskAsync(runId, task, initialNavigationTimeoutMs);
+  void executeTaskAsync(runId, task, initialNavigationTimeoutMs, actionNavigationTimeoutMs);
 
   sendJson(res, 202, { taskId: task.taskId, runId, status: "accepted" });
 }
@@ -151,6 +153,7 @@ async function handleRequest(
   res: ServerResponse,
   authConfig: ApiAuthConfig,
   initialNavigationTimeoutMs: number,
+  actionNavigationTimeoutMs: number,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://internal.invalid");
 
@@ -164,7 +167,7 @@ async function handleRequest(
       handleUnauthorized(res);
       return;
     }
-    await handleCreateTask(req, res, initialNavigationTimeoutMs);
+    await handleCreateTask(req, res, initialNavigationTimeoutMs, actionNavigationTimeoutMs);
     return;
   }
 
@@ -186,11 +189,13 @@ export function createApiServer(env: NodeJS.ProcessEnv = process.env): Server {
   // a missing token fails startup clearly rather than the process quietly serving an
   // API that can never authenticate anyone.
   const authConfig = readApiAuthConfig(env);
-  // Same fail-fast-at-startup posture for INITIAL_NAVIGATION_TIMEOUT_MS: an invalid value
-  // aborts server creation clearly rather than surfacing as an opaque per-run failure.
+  // Same fail-fast-at-startup posture for INITIAL_NAVIGATION_TIMEOUT_MS /
+  // ACTION_NAVIGATION_TIMEOUT_MS: an invalid value aborts server creation clearly rather
+  // than surfacing as an opaque per-run failure.
   const initialNavigationTimeoutMs = readInitialNavigationTimeoutMs(env);
+  const actionNavigationTimeoutMs = readActionNavigationTimeoutMs(env);
   return createServer((req, res) => {
-    void handleRequest(req, res, authConfig, initialNavigationTimeoutMs).catch(() => {
+    void handleRequest(req, res, authConfig, initialNavigationTimeoutMs, actionNavigationTimeoutMs).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: "An unexpected error occurred." });
       } else {

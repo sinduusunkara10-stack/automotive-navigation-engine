@@ -276,6 +276,14 @@ as not-yet-built rather than removed from the plan — see §11.
     loop.ts               # navigate -> observe -> decide -> act -> check-success iteration
     state.ts              # run state: step count, backtrack count, visited-state history
     successEvaluator.ts    # evaluates successCriteria against the live page
+    initialNavigation.ts   # the engine's one-off first page.goto(), via robustNavigation.ts
+    robustNavigation.ts    # shared domcontentloaded-first goto + timeout-recovery logic,
+                            # used by initialNavigation.ts and by src/actions/navigate.ts
+                            # and click.ts for in-loop action navigation
+
+  /config                 # env-based configuration, read once and fail-fast at startup
+    initialNavigationConfig.ts # INITIAL_NAVIGATION_TIMEOUT_MS
+    actionNavigationConfig.ts  # ACTION_NAVIGATION_TIMEOUT_MS (navigate action / clicks that navigate)
 
   /actions                # controlled action vocabulary, one deterministic executor each
     click.ts
@@ -375,10 +383,11 @@ and the default configuration still never make a network call to Claude, n8n, or
 website. See `docs/v1-scope.md` for the full scope boundary. Deliberately not built yet:
 
 - The HTTP API surface for n8n (`/api`) exists as a local proof of concept only (see
-  README.md "Local HTTP API"); a browser session manager (`/browser`), structured per-run
-  logging beyond the response's `steps` array plus `ClaudeReasoningProvider`'s in-memory
-  decision log (`/logging`), and a general env/config loading module (`/config` — only
-  `src/reasoning/config.ts` exists so far, scoped to the reasoning provider) remain unbuilt.
+  README.md "Local HTTP API"); a browser session manager (`/browser`) and structured
+  per-run logging beyond the response's `steps` array plus `ClaudeReasoningProvider`'s
+  in-memory decision log (`/logging`) remain unbuilt. A general env/config loading module
+  now exists at `src/config` (`initialNavigationConfig.ts`, `actionNavigationConfig.ts`),
+  alongside the reasoning-provider-scoped `src/reasoning/config.ts`.
 - Computing a monetary cost from reasoning-provider token usage — `diagnostics.reasoningProvider`
   reports raw token counts (see §6) so cost can be computed downstream against whatever pricing
   applies at query time; the engine deliberately never hardcodes a per-token price.

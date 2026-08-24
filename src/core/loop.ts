@@ -34,8 +34,9 @@ export async function runStep(params: {
   state: RunState;
   captures: Captures;
   reasoning: ReasoningProvider;
+  actionNavigationTimeoutMs: number;
 }): Promise<LoopStepOutcome> {
-  const { page, task, state, captures, reasoning } = params;
+  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs } = params;
   const stepIndex = state.stepCount;
 
   const observation = await buildObservation(page);
@@ -158,6 +159,8 @@ export async function runStep(params: {
     captures,
     stepIndex,
     captureModules: task.captureModules,
+    allowedDomains: task.allowedDomains,
+    actionNavigationTimeoutMs,
   });
 
   if (!actionResult.success && task.captureModules.includes("errors")) {
