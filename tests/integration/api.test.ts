@@ -13,6 +13,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "..", "fixtures");
 const schemaPath = join(__dirname, "..", "..", "schemas", "task-response.schema.json");
 
+// A fixed test-only bearer token — never a real credential. Set before any test creates
+// an API server so every createApiServer() call in this file authenticates against it.
+const TEST_API_TOKEN = "test-only-navigation-engine-token-do-not-use-in-prod";
+process.env.NAVIGATION_ENGINE_API_TOKEN = TEST_API_TOKEN;
+const AUTH_HEADERS = { Authorization: `Bearer ${TEST_API_TOKEN}` };
+
 const require = createRequire(import.meta.url);
 const Ajv2020 = require("ajv/dist/2020.js");
 const addFormats = require("ajv-formats");
@@ -66,7 +72,7 @@ function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules:
 async function pollUntilTerminal(apiBaseUrl: string, runId: string, timeoutMs = 30000): Promise<any> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const res = await fetch(`${apiBaseUrl}/v1/tasks/${runId}`);
+    const res = await fetch(`${apiBaseUrl}/v1/tasks/${runId}`, { headers: AUTH_HEADERS });
     const body = await res.json();
     if (body.status === "completed" || body.status === "failed") {
       return body;
@@ -76,15 +82,85 @@ async function pollUntilTerminal(apiBaseUrl: string, runId: string, timeoutMs = 
   throw new Error(`Run ${runId} did not reach a terminal state within ${timeoutMs}ms`);
 }
 
-test("GET /v1/health reports availability without leaking environment details", async () => {
+test("GET /v1/health reports availability without authentication and without leaking environment details", async () => {
   const api = await startApiServer();
   try {
     const res = await fetch(`${api.baseUrl}/v1/health`);
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.status, "ok");
-    assert.equal(typeof body.time, "string");
-    assert.equal(Object.keys(body).sort().join(","), "service,status,time");
+    assert.equal(body.service, "navigation-engine");
+    assert.equal(typeof body.version, "string");
+    assert.equal(Object.keys(body).sort().join(","), "service,status,version");
+  } finally {
+    await api.close();
+  }
+});
+
+test("POST /v1/tasks rejects a request with no Authorization header with 401", async () => {
+  const fixtures = await startStaticServer(fixturesDir);
+  const api = await startApiServer();
+  try {
+    const task = buildValidTask(fixtures.baseUrl, "api-poc-no-auth");
+    const res = await fetch(`${api.baseUrl}/v1/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(task),
+    });
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.equal(body.error, "unauthorized");
+    const rawBody = JSON.stringify(body);
+    assert.ok(!rawBody.includes(TEST_API_TOKEN));
+  } finally {
+    await api.close();
+    await fixtures.close();
+  }
+});
+
+test("POST /v1/tasks rejects a request with an invalid bearer token with 401", async () => {
+  const fixtures = await startStaticServer(fixturesDir);
+  const api = await startApiServer();
+  try {
+    const task = buildValidTask(fixtures.baseUrl, "api-poc-bad-auth");
+    const res = await fetch(`${api.baseUrl}/v1/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer not-the-right-token" },
+      body: JSON.stringify(task),
+    });
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.equal(body.error, "unauthorized");
+  } finally {
+    await api.close();
+    await fixtures.close();
+  }
+});
+
+test("POST /v1/tasks rejects a malformed Authorization header (missing Bearer scheme) with 401", async () => {
+  const fixtures = await startStaticServer(fixturesDir);
+  const api = await startApiServer();
+  try {
+    const task = buildValidTask(fixtures.baseUrl, "api-poc-malformed-auth");
+    const res = await fetch(`${api.baseUrl}/v1/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: TEST_API_TOKEN },
+      body: JSON.stringify(task),
+    });
+    assert.equal(res.status, 401);
+  } finally {
+    await api.close();
+    await fixtures.close();
+  }
+});
+
+test("GET /v1/tasks/:runId requires authentication", async () => {
+  const api = await startApiServer();
+  try {
+    const res = await fetch(`${api.baseUrl}/v1/tasks/run_does-not-exist`);
+    assert.equal(res.status, 401);
+    const body = await res.json();
+    assert.equal(body.error, "unauthorized");
   } finally {
     await api.close();
   }
@@ -103,7 +179,7 @@ test("POST /v1/tasks accepts a valid task request and GET /v1/tasks/:runId retur
 
     const createRes = await fetch(`${api.baseUrl}/v1/tasks`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...AUTH_HEADERS },
       body: JSON.stringify(task),
     });
     assert.equal(createRes.status, 202);
@@ -133,18 +209,22 @@ test("POST /v1/tasks accepts a valid task request and GET /v1/tasks/:runId retur
     assert.equal(reasoningDiagnostics.totalOutputTokens, 0);
 
     await validateAgainstResponseSchema(finalBody.result);
+
+    // Credentials must never leak into a response body, on success or otherwise.
+    assert.ok(!JSON.stringify(created).includes(TEST_API_TOKEN));
+    assert.ok(!JSON.stringify(finalBody).includes(TEST_API_TOKEN));
   } finally {
     await api.close();
     await fixtures.close();
   }
 });
 
-test("POST /v1/tasks rejects malformed JSON with 400", async () => {
+test("POST /v1/tasks rejects malformed JSON with 400 once authenticated", async () => {
   const api = await startApiServer();
   try {
     const res = await fetch(`${api.baseUrl}/v1/tasks`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...AUTH_HEADERS },
       body: "{ this is not valid json",
     });
     assert.equal(res.status, 400);
@@ -155,12 +235,12 @@ test("POST /v1/tasks rejects malformed JSON with 400", async () => {
   }
 });
 
-test("POST /v1/tasks rejects a task request that fails schema validation with 400", async () => {
+test("POST /v1/tasks rejects a task request that fails schema validation with 400 once authenticated", async () => {
   const api = await startApiServer();
   try {
     const res = await fetch(`${api.baseUrl}/v1/tasks`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...AUTH_HEADERS },
       body: JSON.stringify({ taskId: "missing-required-fields" }),
     });
     assert.equal(res.status, 400);
@@ -172,12 +252,12 @@ test("POST /v1/tasks rejects a task request that fails schema validation with 40
   }
 });
 
-test("POST /v1/tasks rejects an unsupported content type with 415", async () => {
+test("POST /v1/tasks rejects an unsupported content type with 415 once authenticated", async () => {
   const api = await startApiServer();
   try {
     const res = await fetch(`${api.baseUrl}/v1/tasks`, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/plain", ...AUTH_HEADERS },
       body: "not json",
     });
     assert.equal(res.status, 415);
@@ -186,10 +266,10 @@ test("POST /v1/tasks rejects an unsupported content type with 415", async () => 
   }
 });
 
-test("GET /v1/tasks/:runId returns 404 for an unknown runId", async () => {
+test("GET /v1/tasks/:runId returns 404 for an unknown runId once authenticated", async () => {
   const api = await startApiServer();
   try {
-    const res = await fetch(`${api.baseUrl}/v1/tasks/run_does-not-exist`);
+    const res = await fetch(`${api.baseUrl}/v1/tasks/run_does-not-exist`, { headers: AUTH_HEADERS });
     assert.equal(res.status, 404);
     const body = await res.json();
     assert.equal(body.error, "not_found");

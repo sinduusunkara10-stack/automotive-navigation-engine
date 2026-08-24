@@ -5,12 +5,13 @@ BigQuery, and reporting. The navigation engine's job is narrow and mechanical: a
 validated task, run the navigate/observe/decide/act loop, and return a validated result. This
 document describes the HTTP contract between the two.
 
-**Current status:** a minimal local HTTP server implementing this contract now exists
-(`src/api`, see `README.md` §"Local HTTP API"), but it is a **local proof of concept only**. It
-still runs the mock reasoning provider against local fixtures/target URLs, stores runs
-in-memory only, and has **no authentication** — it is not wired up to a real n8n instance, and
-must not be pointed at one, or exposed on any shared/deployed network, until an auth mechanism
-(§5) is added.
+**Current status:** a minimal HTTP server implementing this contract exists (`src/api`, see
+`README.md` §"Local HTTP API"), with a Docker image for deployment (see `README.md` §"Docker").
+It defaults to the mock reasoning provider against local fixtures/target URLs, and requires a
+bearer token on both task endpoints (§5). It still stores runs **in-memory only** — see §8 —
+so before pointing a real n8n instance at a deployed instance, confirm that limitation is
+acceptable for your workflow (typically: short-lived runs, one engine instance, and n8n polling
+promptly enough that a restart between submit and poll is unlikely/acceptable).
 
 ## 1. Roles
 
@@ -62,12 +63,13 @@ the response schema: `success`, `blocked`, `failure`, `max_steps_reached`,
 ```
 GET /v1/health
 ```
-Basic liveness/readiness check for n8n to gate scheduled workflows on. Returns only
-`{ status, service, time }` — no environment details or secrets.
+Basic liveness/readiness check for n8n to gate scheduled workflows on, and what the container's
+`HEALTHCHECK` calls. Unauthenticated by design. Returns only `{ status, service, version }` — no
+environment details, dependency versions, filesystem paths, or secrets.
 
-**Not yet implemented:** authentication (§5), a durable task store (runs are in-memory and lost
-on restart — see `README.md`), queues, webhooks, dashboards, cloud deployment, Docker, API
-keys, and rate limiting. None of these are wired up in this phase.
+**Not yet implemented:** a durable/shared task store (runs are in-memory and lost on restart —
+see §8 and `README.md`), queues, webhooks, dashboards, cloud-vendor-specific deployment files,
+and rate limiting. None of these are wired up in this phase.
 
 ### Sync vs. async (resolved for the local proof of concept)
 
@@ -91,22 +93,33 @@ mechanism, not a contract change. Not implemented in this phase.
   than only a bare HTTP `500`. A `500` is reserved for cases where no response body could be
   constructed at all.
 
-## 5. Authentication (open decision — mandatory before any deployed or n8n-accessible environment)
+## 5. Authentication
 
-No auth mechanism is implemented yet (see `docs/v1-scope.md`, open decision #1), and the
-current `src/api` implementation is unauthenticated by design — it is a local proof of concept
-meant to run only on a developer's own machine against local fixtures. **Do not point a real
-n8n instance at this API, and do not deploy it to any shared, networked, or production
-environment, until an authentication mechanism from the candidates below (or an equivalent) is
-implemented and reviewed.** Candidates:
+`POST /v1/tasks` and `GET /v1/tasks/:runId` require a shared-secret bearer token
+(`src/api/auth.ts`), resolving open decision #1 in `docs/v1-scope.md`. Configure it via the
+`NAVIGATION_ENGINE_API_TOKEN` environment variable on the engine side, and have the n8n HTTP
+Request node send the same value:
 
-- A shared-secret bearer token, provided to n8n and the engine via environment variables on
-  each side — never committed to source control.
-- Network-level trust (engine only reachable from n8n's own network/VPC), with no
-  application-level auth.
+```
+Authorization: Bearer <NAVIGATION_ENGINE_API_TOKEN>
+```
 
-Whichever is chosen, **no credential of any kind is stored in this repository**. Both n8n and
-the engine read secrets from their own runtime environment/secret store.
+In n8n, store the token as an n8n credential (or environment-backed expression), never as a
+literal value pasted into the workflow JSON, and set that credential's header on both the
+`POST /v1/tasks` and `GET /v1/tasks/:runId` HTTP Request nodes. `GET /v1/health` needs no
+header.
+
+Missing, malformed, or incorrect credentials get `401` — the comparison is constant-time and
+the response body/logs never reveal whether a submitted token was close to correct. The engine
+process itself refuses to start if `NAVIGATION_ENGINE_API_TOKEN` is unset outside its test
+suite, so a misconfigured deployment fails at boot rather than serving a route nothing can
+authenticate against.
+
+**No credential of any kind is stored in this repository.** Both n8n and the engine read
+`NAVIGATION_ENGINE_API_TOKEN`/`ANTHROPIC_API_KEY` from their own runtime environment — in a
+real deployment, **from the hosting platform's own secret manager** (e.g. its
+environment/secret store), never from a file baked into the Docker image or committed to
+source. See `README.md` §"Docker" for how the token is passed into a container at run time.
 
 ## 6. What n8n is expected to own downstream of the engine
 
@@ -136,3 +149,22 @@ response contract's `schemaVersion` and the request's `outputSchemaVersion` from
 field was removed or renamed, and `diagnostics.reasoningProvider` is itself independently
 versioned (see README "Reasoning provider usage diagnostics") so it can evolve again without
 necessarily forcing another top-level `schemaVersion` bump.
+
+## 8. Task store and instance limitations
+
+Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
+
+- **All run state is lost when the process/container restarts.** A run n8n submitted and hasn't
+  polled to completion yet disappears on restart; n8n sees `404` on the next poll and should
+  treat that as "unknown/lost run", not retry the same `runId`.
+- **Run one engine instance.** Because the store isn't shared, a second instance behind a load
+  balancer would never see runs created on the first — `POST /v1/tasks` and the later
+  `GET /v1/tasks/:runId` poll must land on the same instance.
+- **Before scaling to multiple instances**, add a persistent or shared task store (e.g. a
+  database or shared cache keyed by `runId`) that every instance reads and writes — this is a
+  known, deliberate v1 gap, not an oversight, and out of scope for this phase (see
+  `docs/v1-scope.md`).
+
+n8n workflows built against this engine should assume runs are ephemeral: poll promptly after
+submission, and design for an occasional lost run (engine restart, deploy) the same way they'd
+handle any other transient infrastructure failure.
