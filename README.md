@@ -164,6 +164,25 @@ needed to prove the integration end to end). It only ever navigates the local fi
 under `tests/fixtures/` — **no real website, n8n, Google Sheets, or BigQuery is involved**. If
 either env var is unset, the script prints a message and exits without making any call.
 
+**This is a one-decision provider smoke test, not a complete journey test.** Its only job is to
+prove that exactly one real Claude decision comes back safe and usable — it never attempts to
+complete the fixture's full multi-page journey. Pass/fail is judged against
+`ClaudeReasoningProvider`'s decision log (see `evaluateSmokeTestAcceptance` in
+`tests/manual/smokeTestAcceptance.ts`), and the test **passes** when all of the following hold:
+
+- exactly one Claude decision-log entry exists, from provider `"claude"`, with outcome
+  `"accepted"` on attempt `0` (so no retry occurred);
+- the resulting action is schema-valid, drawn from the controlled action vocabulary, and any
+  target element id it requires was actually present in that step's observation;
+- no raw secret or API key shows up anywhere in the logged output.
+
+With `maxSteps: 1`, the engine is expected to end the run with status `max_steps_reached`
+immediately after that one accepted decision (the safety layer's limits guard forces a stop step
+without ever calling Claude a second time) — **that alone does not fail this smoke test.** It
+still fails if no Claude decision was produced, more than one API decision was made, the decision
+was rejected/malformed, the provider wasn't Claude, a retry occurred, or the API call itself
+failed.
+
 ### Running the smoke test in GitHub Actions
 
 [`.github/workflows/manual-claude-smoke-test.yml`](.github/workflows/manual-claude-smoke-test.yml)
@@ -186,9 +205,11 @@ variables → Actions**.
 
 **How to check pass/fail:** open the workflow run under the **Actions** tab. A green run means
 typecheck, schema validation, the automated test suite, and the single Claude smoke-test call
-all succeeded (look for `OK: produced exactly one schema-valid, real Claude decision.` in the
-last step's log). A red run means one of those steps failed — expand the failing step's log for
-the reason; the log never contains the API key, raw request/response bodies, or full prompts.
+all succeeded (look for a line starting `OK:` in the last step's log). A red run means one of
+those steps failed — expand the failing step's log for the reason; the log never contains the API
+key, raw request/response bodies, or full prompts. A run that logs `OK:` and then reports final
+engine status `max_steps_reached` is a **pass**, not a failure — see "one-decision provider smoke
+test, not a complete journey test" above.
 
 **Spending protection:** because each run bills one Claude API call, leave any "auto-reload"
 billing setting on your Anthropic account **off**, and only trigger this workflow intentionally.
