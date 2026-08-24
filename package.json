@@ -9,12 +9,13 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/integration/local-poc.test.ts tests/integration/errors-capture.test.ts tests/integration/api.test.ts tests/integration/reasoningProviderDiagnostics.test.ts tests/unit/promptBuilder.test.ts tests/unit/validateClaudeDecision.test.ts tests/unit/claudeReasoningProvider.test.ts tests/unit/reasoningProviderDiagnostics.test.ts tests/unit/providerFactory.test.ts tests/unit/manualClaudeSmokeTestWorkflow.test.ts tests/unit/manualClaudeSmokeTestAcceptance.test.ts",
+    "test": "node --import tsx --test tests/integration/local-poc.test.ts tests/integration/errors-capture.test.ts tests/integration/api.test.ts tests/integration/reasoningProviderDiagnostics.test.ts tests/integration/claudeFullLocalJourney.test.ts tests/unit/promptBuilder.test.ts tests/unit/validateClaudeDecision.test.ts tests/unit/claudeReasoningProvider.test.ts tests/unit/reasoningProviderDiagnostics.test.ts tests/unit/providerFactory.test.ts tests/unit/manualClaudeSmokeTestWorkflow.test.ts tests/unit/manualClaudeSmokeTestAcceptance.test.ts tests/unit/manualClaudeFullLocalJourneyAcceptance.test.ts tests/unit/manualClaudeFullLocalJourneyWorkflow.test.ts",
     "test:api": "node --import tsx --test tests/integration/api.test.ts",
     "start:api": "tsx src/api/main.ts",
     "validate:schemas": "ajv validate --spec=draft2020 -c ajv-formats -s schemas/task-request.schema.json -d \"examples/*.json\"",
     "check": "npm run typecheck && npm run validate:schemas && npm run test",
-    "smoke:claude": "tsx tests/manual/claudeReasoningProviderSmokeTest.ts"
+    "smoke:claude": "tsx tests/manual/claudeReasoningProviderSmokeTest.ts",
+    "fulljourney:claude": "tsx tests/manual/claudeFullLocalJourneyTest.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",

@@ -243,6 +243,81 @@ test, not a complete journey test" above.
 **Spending protection:** because each run bills one Claude API call, leave any "auto-reload"
 billing setting on your Anthropic account **off**, and only trigger this workflow intentionally.
 
+### Manual full local-journey test (opt-in, up to 3 real API calls) — final pre-deployment check
+
+Separate again from both the automated tests and the one-decision smoke test above,
+`tests/manual/claudeFullLocalJourneyTest.ts` proves the real `ClaudeReasoningProvider` can drive
+the engine through the **complete** three-page local fictional journey —
+`start.html -> step2.html -> success.html` — reusing the existing engine (`src/core/engine.ts`)
+and fixtures, not a reimplementation. Run it explicitly with:
+
+```
+REASONING_PROVIDER=claude ANTHROPIC_API_KEY=sk-ant-... npm run fulljourney:claude
+```
+
+**Usage and cost warning:** this makes **up to three real, billed** calls to the Claude API — one
+per page (`tests/manual/fullJourneyTask.ts` caps the task at `maxSteps: 3`, a hard ceiling enforced
+by the engine's own limits guard, so a journey that cannot complete in three decisions is stopped
+safely without ever making a fourth call). It only ever navigates the local fictional fixture under
+`tests/fixtures/` — **no real website, n8n, Google Sheets, or BigQuery is involved**. If either env
+var is unset, the script prints a message and exits without making any call.
+
+The test **passes** when all of the following hold, evaluated by `evaluateFullJourneyAcceptance`
+(`tests/manual/fullJourneyAcceptance.ts`) against `ClaudeReasoningProvider`'s decision log and the
+completed `TaskResponse`:
+
+- Claude selected a valid, schema-conformant, in-vocabulary action on `start.html`, and Playwright
+  reached `step2.html`; Claude then selected a valid action there, and Playwright reached
+  `success.html`;
+- the run's normal success criteria were satisfied and the final engine status is `"success"`;
+- the completed `TaskResponse` validates against `schemas/task-response.schema.json` version
+  `1.1.0`;
+- `diagnostics.reasoningProvider` is present, `provider` is `"claude"`, `callCount` equals the
+  actual number of real provider calls made (at most 3), `acceptedDecisionCount` equals
+  `callCount`, and `rejectedDecisionCount`, `fallbackDecisionCount`, and `retryCount` are all zero;
+- `totalInputTokens` and `totalOutputTokens` are both greater than zero;
+- no raw secret or API key shows up anywhere in the logged output.
+
+**Deterministic, network-free coverage of the same acceptance criteria** lives in
+`tests/unit/manualClaudeFullLocalJourneyAcceptance.test.ts` (pure pass/fail logic) and
+`tests/integration/claudeFullLocalJourney.test.ts` (a real `ClaudeReasoningProvider` driven by a
+fake, in-memory model client through the actual fixture journey) — both run as part of `npm test`
+and never touch the network or `ANTHROPIC_API_KEY`.
+
+**Running it in GitHub Actions:**
+[`.github/workflows/manual-claude-full-local-journey.yml`](.github/workflows/manual-claude-full-local-journey.yml)
+wraps the same test for CI, with the same safety posture as the one-decision smoke-test workflow:
+
+- **Manually triggered only** — its sole trigger is `workflow_dispatch`; it never runs on push,
+  pull request, a schedule, or any other automatic event.
+- **At most 3 billed Claude API calls, never a 4th** — `maxSteps: 3` in
+  `tests/manual/fullJourneyTask.ts` is a hard ceiling enforced by the engine's own limits guard,
+  independent of the workflow's env tuning.
+- `CLAUDE_MAX_RETRIES=0` — a failed call is never retried within this run.
+- A small `CLAUDE_MAX_OUTPUT_TOKENS` (256) — enough for one structured navigation decision, no
+  more.
+- **Uses only the local fictional fixture** under `tests/fixtures/` — no real website, n8n, Google
+  Sheets, or BigQuery, and it never starts the local HTTP API (`src/api`).
+- A single-run `concurrency` group so a second manual trigger can never overlap with (and
+  double-bill) an in-flight run, and a conservative 15-minute job timeout.
+- The `ANTHROPIC_API_KEY` secret is supplied only to the one real-call step via
+  `${{ secrets.ANTHROPIC_API_KEY }}`, is never echoed/logged, and the job fails clearly (without
+  printing the key) if the repository secret isn't configured.
+- Automated string-level checks on both the workflow file and the capped task
+  (`tests/unit/manualClaudeFullLocalJourneyWorkflow.test.ts`) verify all of the above — manual
+  trigger only, correct secret reference, no literal key, the call ceiling, no retry, and that the
+  real full-journey script (`npm run fulljourney:claude`) appears exactly once.
+
+**How to run it:** in this repository on GitHub, go to **Actions → Manual Claude Full Local
+Journey Test → Run workflow**, pick the branch, and confirm. Requires the same
+`ANTHROPIC_API_KEY` repository secret as the one-decision smoke test.
+
+**Expected successful output:** a green run, ending with a safe summary log (status, step count,
+provider, model, call count, accepted/rejected/fallback counts, total input/output tokens, total
+latency, retry count — never prompts, raw responses, HTML, env vars, headers, cookies, request
+bodies, or credentials) and a line starting `OK:` reporting final status `"success"` in 3 or fewer
+real Claude calls, all accepted on the first attempt.
+
 ## The generic loop
 
 Every task, regardless of use case, runs the same loop:
