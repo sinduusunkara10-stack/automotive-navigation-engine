@@ -10,6 +10,14 @@
  * real website, n8n, Google Sheets, or BigQuery); and it caps the task at maxSteps: 1
  * so it makes exactly one Claude API call — the minimum needed to prove the real
  * integration (prompt -> structured decision -> validated SelectedAction) end to end.
+ *
+ * This proves ONE Claude decision works safely; it does not attempt the full multi-page
+ * fictional journey. Pass/fail is judged against ClaudeReasoningProvider's decision log
+ * (exactly one accepted, schema-valid, in-vocabulary decision with no retry and no leaked
+ * secret — see evaluateSmokeTestAcceptance in ./smokeTestAcceptance.ts), not against the
+ * engine's final run status: with maxSteps: 1, the engine is expected to end the run with
+ * status "max_steps_reached" right after that one accepted decision, and that is not a
+ * failure of this smoke test.
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +28,7 @@ import { createReasoningProvider } from "../../src/reasoning/providerFactory.js"
 import { ClaudeReasoningProvider } from "../../src/reasoning/claudeReasoningProvider.js";
 import type { TaskRequest } from "../../src/types/task-request.js";
 import { startStaticServer } from "../helpers/staticServer.js";
+import { evaluateSmokeTestAcceptance } from "./smokeTestAcceptance.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(__dirname, "..", "fixtures");
@@ -86,13 +95,25 @@ async function main(): Promise<void> {
       console.log("decision:", firstStep.decision);
       console.log("selectedAction:", JSON.stringify(firstStep.selectedAction));
     }
-    console.log("decision log:", JSON.stringify(reasoning.getDecisionLog(), null, 2));
+    const decisionLog = reasoning.getDecisionLog();
+    console.log("decision log:", JSON.stringify(decisionLog, null, 2));
+    console.log("final engine status:", result.status, `(finishReason: ${result.diagnostics.finishReason})`);
     console.log("----------------------------------------------------\n");
 
-    if (result.steps.length !== 1) {
-      throw new Error(`Expected exactly one step (one Claude call); got ${result.steps.length}.`);
+    const acceptance = evaluateSmokeTestAcceptance({
+      decisionLog,
+      steps: result.steps,
+      allowedActions: task.safety.allowedActions,
+      secretValue: process.env.ANTHROPIC_API_KEY,
+    });
+    if (!acceptance.ok) {
+      throw new Error(`Smoke test acceptance failed: ${acceptance.reason}`);
     }
-    console.log("OK: produced exactly one schema-valid, real Claude decision.");
+    console.log(`OK: ${acceptance.reason}.`);
+    console.log(
+      `(Final engine status "${result.status}" after the one accepted decision is expected under ` +
+        "maxSteps: 1 and is not itself a failure of this one-decision smoke test.)",
+    );
   } finally {
     await page.close();
     await browser.close();
