@@ -83,9 +83,9 @@ Explicitly out of scope for v1 (candidate for v2+):
 
 ## Unresolved decisions (need a decision before or during v1 implementation)
 
-1. **Auth model for the HTTP API.** Shared secret header, mTLS, or network-level trust (e.g.
-   engine only reachable from n8n's network)? Not decided; see `docs/n8n-integration.md` for
-   the placeholder approach.
+1. ~~**Auth model for the HTTP API.**~~ **Resolved:** a shared-secret bearer token
+   (`NAVIGATION_ENGINE_API_TOKEN`), enforced on `POST /v1/tasks` and `GET /v1/tasks/:runId` by
+   `src/api/auth.ts`. See `docs/n8n-integration.md` §5 and `README.md` §"Authentication".
 2. **Screenshot/artifact storage backend.** Local disk, S3-compatible bucket, or something
    n8n already manages? Affects what `ref` values look like in `captures.screenshots`.
 3. **Sync vs. async task execution.** A configurator journey may take minutes; does n8n call

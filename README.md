@@ -338,49 +338,73 @@ Task-specific extraction (dataLayer evidence, GA4 network events, CTA/offer capt
 screenshots) happens in pluggable **capture modules**, kept separate from this core loop. See
 `docs/architecture.md` for the full design.
 
-## Local HTTP API (proof of concept, not production-ready)
+## Local HTTP API
 
-`src/api` exposes a minimal HTTP boundary around the engine described above, against local
-fixtures/target URLs you supply — nothing here talks to n8n, Google Sheets, BigQuery, or
-Browserless. It uses `MockReasoningProvider` by default; setting `REASONING_PROVIDER=claude`
-(see "Reasoning provider selection" above) makes it use the real Claude API for navigation
-decisions instead — still a local proof of concept, not a production deployment.
+`src/api` exposes a minimal, authenticated HTTP boundary around the engine described above,
+against local fixtures/target URLs you supply — nothing here talks to n8n, Google Sheets,
+BigQuery, or Browserless. It uses `MockReasoningProvider` by default; setting
+`REASONING_PROVIDER=claude` (see "Reasoning provider selection" above) makes it use the real
+Claude API for navigation decisions instead.
 
 ```
 npm run start:api   # starts the API on http://127.0.0.1:3000 (override with PORT=xxxx)
 npm run test:api    # runs the API integration tests in isolation
 ```
 
+### Required environment variables
+
+| Variable | Required | Notes |
+|---|---|---|
+| `PORT` | No | HTTP port, default `3000`. |
+| `NODE_ENV` | No | `development`/`production` for normal use. `test` is reserved for the automated test suite. |
+| `NAVIGATION_ENGINE_API_TOKEN` | **Yes** (outside `NODE_ENV=test`) | Bearer token required on `POST /v1/tasks` and `GET /v1/tasks/:runId`. The server refuses to start without it (see "Authentication" below). |
+| `REASONING_PROVIDER` | No | `mock` (default) or `claude`. |
+| `ANTHROPIC_API_KEY` | Only when `REASONING_PROVIDER=claude` | See "Reasoning provider selection" above. |
+| `CLAUDE_MODEL`, `CLAUDE_MAX_OUTPUT_TOKENS`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_RETRIES`, `CLAUDE_MIN_CONFIDENCE` | No | Existing Claude tuning, unchanged — see `src/reasoning/config.ts`. |
+
+Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is gitignored).
+**In any deployed environment, all of the above come from the hosting platform's own secret
+manager** (e.g. its environment/secret store), never from a file baked into the image or
+checked into source.
+
+### Authentication
+
+`POST /v1/tasks` and `GET /v1/tasks/:runId` require:
+
+```
+Authorization: Bearer <NAVIGATION_ENGINE_API_TOKEN>
+```
+
+`GET /v1/health` stays unauthenticated by design, so orchestrators and container health checks
+can probe liveness with no credential. Requests to the two task endpoints are rejected with
+`401` when the header is missing, malformed (not exactly `Bearer <token>`), or carries a token
+that doesn't match — the comparison is constant-time and the response/logs never reveal
+whether a submitted token was close to correct. The server itself refuses to start if
+`NAVIGATION_ENGINE_API_TOKEN` is unset outside `NODE_ENV=test`, so a misconfigured deployment
+fails immediately and loudly rather than serving an API nobody can authenticate against.
+
 Endpoints:
 
-- `GET /v1/health` — liveness check.
+- `GET /v1/health` — unauthenticated liveness check. Returns only `{ status, service, version }`
+  — never environment variables, dependency versions, filesystem paths, secrets, or other
+  configuration.
 - `POST /v1/tasks` — accepts a `task-request.schema.json`-shaped body, starts a run in the
   background, and immediately returns `{ taskId, runId, status: "accepted" }`.
 - `GET /v1/tasks/:runId` — returns `{ status: "running" }` while the run is in progress, or the
   completed/failed result once it finishes.
 
-Sample request (`POST /v1/tasks`):
+Sample authenticated requests (placeholder token — substitute your own):
 
-```json
-{
-  "schemaVersion": "1.0.0",
-  "taskId": "example-run-0001",
-  "objective": "Reach the fixture's success page by following the visible continue control.",
-  "startUrl": "http://127.0.0.1:4173/start.html",
-  "allowedDomains": ["127.0.0.1"],
-  "successCriteria": [
-    {
-      "id": "reached_success_page",
-      "type": "url_pattern",
-      "description": "The current page URL matches the success fixture.",
-      "config": { "pattern": "http://127.0.0.1:4173/success.html" }
-    }
-  ],
-  "captureModules": ["page_visits", "cta_clicks", "journey_path"],
-  "limits": { "maxSteps": 5, "maxBacktracks": 0 },
-  "safety": { "allowedActions": ["click", "wait", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-  "outputSchemaVersion": "1.1.0"
-}
+```bash
+curl http://127.0.0.1:3000/v1/health
+
+curl -X POST http://127.0.0.1:3000/v1/tasks \
+  -H "Authorization: Bearer <NAVIGATION_ENGINE_API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d @examples/configurator-task.json
+
+curl http://127.0.0.1:3000/v1/tasks/run_5f2c... \
+  -H "Authorization: Bearer <NAVIGATION_ENGINE_API_TOKEN>"
 ```
 
 Sample response (`GET /v1/tasks/:runId` once complete):
@@ -429,17 +453,56 @@ below), alongside `result.diagnostics.stepCount`/`totalDurationMs`/etc.; it is n
 **Current limitations:**
 
 - Runs are stored in an in-memory `Map` only (`src/api/taskStore.ts`) — **all run state is lost
-  when the process restarts**. This is a local proof of concept, not durable storage.
-- No authentication of any kind is implemented. **The API must not be exposed to any deployed,
-  shared, or n8n-accessible environment until authentication is added** (see
-  `docs/n8n-integration.md` §5).
-- No queues, database, webhooks, dashboard, cloud deployment, Docker packaging, API keys, or
-  rate limiting — deliberately out of scope for this task.
+  when the process restarts.** The container is meant to run as **one service instance**; a
+  persistent or shared task store is required before scaling to multiple instances (a second
+  instance would never see runs created on the first).
+- No queues, database, webhooks, dashboard, cloud-vendor-specific deployment files, or rate
+  limiting — deliberately out of scope for this phase.
 - One task runs at a time per browser instance launched; there is no concurrency/queueing
   layer.
-- Basic protections that are in place: a JSON body size limit, `Content-Type: application/json`
-  enforcement, no permissive CORS headers, generic (non-leaking) error responses, and graceful
-  shutdown on `SIGINT`/`SIGTERM`.
+- Basic protections that are in place: bearer-token authentication (above), a JSON body size
+  limit, `Content-Type: application/json` enforcement, no permissive CORS headers, generic
+  (non-leaking) error responses, and graceful shutdown on `SIGINT`/`SIGTERM`.
+
+## Docker
+
+A `Dockerfile` builds a deployable image: a `node:20-slim` builder stage compiles the
+TypeScript with `tsc`, and the runtime stage is based on the official
+`mcr.microsoft.com/playwright` image (matching the pinned `playwright` version in
+`package.json`) so Chromium and its OS dependencies are already present. The runtime stage
+installs only production dependencies (`npm ci --omit=dev`), runs as the image's pre-created
+non-root `pwuser`, exposes only the application port, and declares a container `HEALTHCHECK`
+against `GET /v1/health`. `.dockerignore` keeps `.env`, `.git`/`.github`, `node_modules`,
+`tests`, `test-artifacts`, and docs out of the build context and the image.
+
+Build and run locally:
+
+```bash
+docker build -t navigation-engine .
+
+docker run --rm -p 3000:3000 \
+  -e NAVIGATION_ENGINE_API_TOKEN=<a-long-random-secret> \
+  -e REASONING_PROVIDER=mock \
+  navigation-engine
+```
+
+For `REASONING_PROVIDER=claude`, also pass `-e ANTHROPIC_API_KEY=...`. **Never bake either
+secret into the image or a committed file** — pass them at `docker run` time via `-e`/
+`--env-file`, or, in a real deployment, whatever secret-injection mechanism the hosting
+platform provides (e.g. its environment/secret manager). Verify the container:
+
+```bash
+curl http://127.0.0.1:3000/v1/health
+curl -i -X POST http://127.0.0.1:3000/v1/tasks   # no Authorization header -> 401
+curl -X POST http://127.0.0.1:3000/v1/tasks \
+  -H "Authorization: Bearer <a-long-random-secret>" \
+  -H "Content-Type: application/json" \
+  -d @examples/configurator-task.json
+```
+
+There is no `docker-compose.yml` — a single `docker run` plus the local fixture server used by
+`npm test` is sufficient to validate the image, and this repo intentionally adds no
+cloud-vendor-specific deployment files (see `docs/v1-scope.md`).
 
 ## Example task JSONs
 

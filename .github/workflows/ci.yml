@@ -1,0 +1,56 @@
+name: CI
+
+# Runs automatically on every pull request and every push to main. Deliberately free:
+# no Claude API calls, no ANTHROPIC_API_KEY, and it never triggers either manually
+# dispatched paid Claude workflow (manual-claude-smoke-test.yml,
+# manual-claude-full-local-journey.yml) — both keep workflow_dispatch as their only
+# trigger, untouched by this file.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Typecheck, schema validation, automated tests, Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Matches package.json "engines.node": ">=20".
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Validate task schemas
+        run: npm run validate:schemas
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      # Uses only MockReasoningProvider / a deterministic fake Claude model client and
+      # local fixtures under tests/fixtures — no real website, no real Claude API call,
+      # and REASONING_PROVIDER/ANTHROPIC_API_KEY are never set anywhere in this job.
+      - name: Run automated tests (mock reasoning provider only)
+        run: npm test
+
+      - name: Build Docker image (validation only, not pushed anywhere)
+        run: docker build -t navigation-engine:ci .

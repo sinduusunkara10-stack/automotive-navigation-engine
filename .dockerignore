@@ -1,0 +1,29 @@
+.git
+.github
+
+node_modules
+dist
+*.tsbuildinfo
+
+# Secrets — never baked into the image. Real config comes from the hosting platform's
+# secret manager / -e / --env-file at `docker run` time, never from a baked-in .env.
+.env
+.env.*
+!.env.example
+
+# Tests, fixtures, generated test artefacts (screenshots, diagnostics) — dev-only.
+tests
+test-artifacts
+coverage
+.nyc_output
+
+# Docs, examples, and repo metadata — not needed to run the service.
+docs
+examples
+*.md
+.vscode-test
+
+# Local editor/OS cruft.
+.DS_Store
+*.log
+npm-debug.log*

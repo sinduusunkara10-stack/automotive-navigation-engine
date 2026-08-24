@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { validateTaskRequest, validateTaskResponse } from "./validation.js";
 import { executeTaskAsync } from "./runner.js";
 import * as taskStore from "./taskStore.js";
+import { isAuthorized, readApiAuthConfig, type ApiAuthConfig } from "./auth.js";
+import { API_VERSION } from "./version.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -54,7 +56,16 @@ async function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
 }
 
 function handleHealth(res: ServerResponse): void {
-  sendJson(res, 200, { status: "ok", service: "navigation-engine", time: new Date().toISOString() });
+  // Deliberately minimal: status, service name, API version only — never environment
+  // variables, dependency versions, filesystem paths, secrets, or other configuration.
+  sendJson(res, 200, { status: "ok", service: "navigation-engine", version: API_VERSION });
+}
+
+function handleUnauthorized(res: ServerResponse): void {
+  sendJson(res, 401, {
+    error: "unauthorized",
+    message: "A valid Authorization: Bearer <token> header is required.",
+  });
 }
 
 async function handleCreateTask(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -130,7 +141,7 @@ function handleGetTask(res: ServerResponse, runId: string): void {
   });
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleRequest(req: IncomingMessage, res: ServerResponse, authConfig: ApiAuthConfig): Promise<void> {
   const url = new URL(req.url ?? "/", "http://internal.invalid");
 
   if (req.method === "GET" && url.pathname === "/v1/health") {
@@ -139,12 +150,20 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   }
 
   if (req.method === "POST" && url.pathname === "/v1/tasks") {
+    if (!isAuthorized(req.headers.authorization, authConfig)) {
+      handleUnauthorized(res);
+      return;
+    }
     await handleCreateTask(req, res);
     return;
   }
 
   const runMatch = /^\/v1\/tasks\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && runMatch) {
+    if (!isAuthorized(req.headers.authorization, authConfig)) {
+      handleUnauthorized(res);
+      return;
+    }
     handleGetTask(res, decodeURIComponent(runMatch[1] ?? ""));
     return;
   }
@@ -152,9 +171,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   sendJson(res, 404, { error: "not_found", message: "Unknown route." });
 }
 
-export function createApiServer(): Server {
+export function createApiServer(env: NodeJS.ProcessEnv = process.env): Server {
+  // Read (and, outside test mode, enforce) the bearer token once at server creation —
+  // a missing token fails startup clearly rather than the process quietly serving an
+  // API that can never authenticate anyone.
+  const authConfig = readApiAuthConfig(env);
   return createServer((req, res) => {
-    void handleRequest(req, res).catch(() => {
+    void handleRequest(req, res, authConfig).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: "An unexpected error occurred." });
       } else {
