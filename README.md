@@ -164,6 +164,35 @@ needed to prove the integration end to end). It only ever navigates the local fi
 under `tests/fixtures/` — **no real website, n8n, Google Sheets, or BigQuery is involved**. If
 either env var is unset, the script prints a message and exits without making any call.
 
+### Running the smoke test in GitHub Actions
+
+[`.github/workflows/manual-claude-smoke-test.yml`](.github/workflows/manual-claude-smoke-test.yml)
+wraps the same smoke test above for CI. Key points:
+
+- **Manually triggered only** — its sole trigger is `workflow_dispatch`. It never runs on push,
+  pull request, a schedule, or any other automatic event.
+- **Performs exactly one billed Claude API call** — it runs `npm run smoke:claude` exactly once,
+  with `CLAUDE_MAX_RETRIES=0`, so a failed call is not retried.
+- **Uses only the local fictional fixture** under `tests/fixtures/` — no real website, n8n,
+  Google Sheets, or BigQuery, and it never starts the local HTTP API (`src/api`).
+- The `ANTHROPIC_API_KEY` secret is supplied only to that one step via
+  `${{ secrets.ANTHROPIC_API_KEY }}`, is never echoed/logged, and the job fails clearly (without
+  printing the key) if the repository secret isn't configured.
+
+**How to run it:** in this repository on GitHub, go to **Actions → Manual Claude Reasoning
+Provider Smoke Test → Run workflow**, pick the branch, and confirm. This requires the
+`ANTHROPIC_API_KEY` repository secret to already be configured under **Settings → Secrets and
+variables → Actions**.
+
+**How to check pass/fail:** open the workflow run under the **Actions** tab. A green run means
+typecheck, schema validation, the automated test suite, and the single Claude smoke-test call
+all succeeded (look for `OK: produced exactly one schema-valid, real Claude decision.` in the
+last step's log). A red run means one of those steps failed — expand the failing step's log for
+the reason; the log never contains the API key, raw request/response bodies, or full prompts.
+
+**Spending protection:** because each run bills one Claude API call, leave any "auto-reload"
+billing setting on your Anthropic account **off**, and only trigger this workflow intentionally.
+
 ## The generic loop
 
 Every task, regardless of use case, runs the same loop:
