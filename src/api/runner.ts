@@ -12,14 +12,18 @@ import * as taskStore from "./taskStore.js";
  * REASONING_PROVIDER (mock by default; see docs/architecture.md §6 and README.md) —
  * never touches a real website, n8n, Google Sheets, or BigQuery regardless of provider.
  */
-export async function executeTaskAsync(runId: string, task: TaskRequest): Promise<void> {
+export async function executeTaskAsync(
+  runId: string,
+  task: TaskRequest,
+  initialNavigationTimeoutMs?: number,
+): Promise<void> {
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   try {
     const reasoning = createReasoningProvider();
     browser = await chromium.launch();
     const page = await browser.newPage();
     try {
-      const result = await runTask({ page, task, reasoning });
+      const result = await runTask({ page, task, reasoning, initialNavigationTimeoutMs });
       taskStore.completeRun(runId, result);
     } finally {
       await page.close();

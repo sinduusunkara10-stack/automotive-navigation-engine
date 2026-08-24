@@ -5,6 +5,7 @@ import { executeTaskAsync } from "./runner.js";
 import * as taskStore from "./taskStore.js";
 import { isAuthorized, readApiAuthConfig, type ApiAuthConfig } from "./auth.js";
 import { API_VERSION } from "./version.js";
+import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -68,7 +69,11 @@ function handleUnauthorized(res: ServerResponse): void {
   });
 }
 
-async function handleCreateTask(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleCreateTask(
+  req: IncomingMessage,
+  res: ServerResponse,
+  initialNavigationTimeoutMs: number,
+): Promise<void> {
   if (!hasJsonContentType(req)) {
     sendJson(res, 415, {
       error: "unsupported_media_type",
@@ -97,7 +102,7 @@ async function handleCreateTask(req: IncomingMessage, res: ServerResponse): Prom
   const runId = `run_${randomUUID()}`;
   taskStore.createRun(runId, task.taskId);
 
-  void executeTaskAsync(runId, task);
+  void executeTaskAsync(runId, task, initialNavigationTimeoutMs);
 
   sendJson(res, 202, { taskId: task.taskId, runId, status: "accepted" });
 }
@@ -141,7 +146,12 @@ function handleGetTask(res: ServerResponse, runId: string): void {
   });
 }
 
-async function handleRequest(req: IncomingMessage, res: ServerResponse, authConfig: ApiAuthConfig): Promise<void> {
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  authConfig: ApiAuthConfig,
+  initialNavigationTimeoutMs: number,
+): Promise<void> {
   const url = new URL(req.url ?? "/", "http://internal.invalid");
 
   if (req.method === "GET" && url.pathname === "/v1/health") {
@@ -154,7 +164,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, authConf
       handleUnauthorized(res);
       return;
     }
-    await handleCreateTask(req, res);
+    await handleCreateTask(req, res, initialNavigationTimeoutMs);
     return;
   }
 
@@ -176,8 +186,11 @@ export function createApiServer(env: NodeJS.ProcessEnv = process.env): Server {
   // a missing token fails startup clearly rather than the process quietly serving an
   // API that can never authenticate anyone.
   const authConfig = readApiAuthConfig(env);
+  // Same fail-fast-at-startup posture for INITIAL_NAVIGATION_TIMEOUT_MS: an invalid value
+  // aborts server creation clearly rather than surfacing as an opaque per-run failure.
+  const initialNavigationTimeoutMs = readInitialNavigationTimeoutMs(env);
   return createServer((req, res) => {
-    void handleRequest(req, res, authConfig).catch(() => {
+    void handleRequest(req, res, authConfig, initialNavigationTimeoutMs).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: "An unexpected error occurred." });
       } else {
