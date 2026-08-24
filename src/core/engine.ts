@@ -8,6 +8,8 @@ import { runStep, type TerminalStatus } from "./loop.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
+import { navigateInitialPage } from "./initialNavigation.js";
+import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -15,6 +17,7 @@ export async function runTask(params: {
   page: Page;
   task: TaskRequest;
   reasoning?: ReasoningProvider;
+  initialNavigationTimeoutMs?: number;
 }): Promise<TaskResponse> {
   const { page, task } = params;
   const state = new RunState();
@@ -23,6 +26,10 @@ export async function runTask(params: {
   // provider instance -- and therefore its decision log -- is used for every step, which
   // diagnostics.reasoningProvider aggregation below depends on.
   const reasoning = params.reasoning ?? new MockReasoningProvider();
+  // Overridable per-call for tests; the real API server resolves this once at startup
+  // (src/api/server.ts) from INITIAL_NAVIGATION_TIMEOUT_MS so a misconfigured value fails
+  // clearly at boot rather than per-run.
+  const initialNavigationTimeoutMs = params.initialNavigationTimeoutMs ?? readInitialNavigationTimeoutMs();
 
   if (!checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
     if (task.captureModules.includes("errors")) {
@@ -59,15 +66,20 @@ export async function runTask(params: {
     : undefined;
 
   try {
-    try {
-      await page.goto(task.startUrl, { timeout: 15000 });
-    } catch (error) {
+    const initialNavigation = await navigateInitialPage({
+      page,
+      startUrl: task.startUrl,
+      allowedDomains: task.allowedDomains,
+      timeoutMs: initialNavigationTimeoutMs,
+    });
+
+    if (initialNavigation.status === "failed") {
       if (task.captureModules.includes("errors")) {
         recordDiagnosticError(captures, {
           category: "navigation_failure",
           severity: "critical",
           pageUrl: task.startUrl,
-          message: error instanceof Error ? error.message : String(error),
+          message: initialNavigation.message ?? "Initial navigation failed.",
           recoverable: false,
           stoppedRun: true,
         });
@@ -79,9 +91,20 @@ export async function runTask(params: {
         steps: [],
         status: "failure",
         finishReason: "initial_navigation_error",
-        statusReason: error instanceof Error ? error.message : String(error),
-        finalUrl: task.startUrl,
+        statusReason: initialNavigation.message ?? "Initial navigation failed.",
+        finalUrl: initialNavigation.url,
         reasoning,
+      });
+    }
+
+    if (initialNavigation.status === "recovered" && task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        category: "navigation_failure",
+        severity: "warning",
+        pageUrl: initialNavigation.url,
+        message: initialNavigation.message ?? "Initial navigation timed out but recovered.",
+        recoverable: true,
+        stoppedRun: false,
       });
     }
 
