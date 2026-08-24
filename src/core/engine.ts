@@ -2,6 +2,7 @@ import type { Page } from "playwright";
 import type { TaskRequest } from "../types/task-request.js";
 import type { Captures, EngineAssessment, StepLog, TaskResponse } from "../types/task-response.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
+import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { checkNavigationAllowed } from "../safety/index.js";
@@ -18,6 +19,10 @@ export async function runTask(params: {
   const { page, task } = params;
   const state = new RunState();
   const captures: Captures = {};
+  // Resolved once per run (rather than left to loop.ts's per-step default) so the same
+  // provider instance -- and therefore its decision log -- is used for every step, which
+  // diagnostics.reasoningProvider aggregation below depends on.
+  const reasoning = params.reasoning ?? new MockReasoningProvider();
 
   if (!checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
     if (task.captureModules.includes("errors")) {
@@ -39,6 +44,7 @@ export async function runTask(params: {
       finishReason: "domain_blocked",
       statusReason: "startUrl is outside allowedDomains",
       finalUrl: task.startUrl,
+      reasoning,
     });
   }
 
@@ -75,6 +81,7 @@ export async function runTask(params: {
         finishReason: "initial_navigation_error",
         statusReason: error instanceof Error ? error.message : String(error),
         finalUrl: task.startUrl,
+        reasoning,
       });
     }
 
@@ -83,7 +90,7 @@ export async function runTask(params: {
     let finishReason = "loop_exhausted";
 
     while (!terminal) {
-      const outcome = await runStep({ page, task, state, captures, reasoning: params.reasoning });
+      const outcome = await runStep({ page, task, state, captures, reasoning });
       steps.push(outcome.stepLog);
       if (outcome.terminal) {
         terminal = outcome.terminal;
@@ -101,6 +108,7 @@ export async function runTask(params: {
       finishReason,
       statusReason: finishReason,
       finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
+      reasoning,
     });
   } finally {
     detachGa4Capture?.();
@@ -117,8 +125,9 @@ function buildTerminalResponse(params: {
   finishReason: string;
   statusReason: string;
   finalUrl: string;
+  reasoning: ReasoningProvider;
 }): TaskResponse {
-  const { task, state, captures, steps, status, finishReason, statusReason, finalUrl } = params;
+  const { task, state, captures, steps, status, finishReason, statusReason, finalUrl, reasoning } = params;
   const lastStep = steps[steps.length - 1];
   const objectiveAchieved = status === "success";
 
@@ -131,8 +140,10 @@ function buildTerminalResponse(params: {
     ...(lastStep ? { satisfiedSuccessCriteriaIds: lastStep.progress.satisfiedCriteriaIds } : {}),
   };
 
+  const reasoningProviderDiagnostics = reasoning.getUsageDiagnostics?.();
+
   return {
-    schemaVersion: "1.0.0",
+    schemaVersion: "1.1.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -147,6 +158,7 @@ function buildTerminalResponse(params: {
       totalDurationMs: Date.now() - state.startedAtMs,
       finishReason,
       engineVersion: ENGINE_VERSION,
+      ...(reasoningProviderDiagnostics ? { reasoningProvider: reasoningProviderDiagnostics } : {}),
     },
   };
 }

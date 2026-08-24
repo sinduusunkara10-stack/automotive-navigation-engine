@@ -173,16 +173,52 @@ export interface EngineAssessment {
   notes?: string;
 }
 
+export type ReasoningProviderDecisionOutcome = "accepted" | "rejected" | "error" | "fallback";
+
+export interface ReasoningProviderDecisionSummary {
+  stepIndex?: number;
+  attempt: number;
+  outcome: ReasoningProviderDecisionOutcome;
+  confidence?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  latencyMs: number;
+}
+
+/**
+ * Versioned separately from TaskResponse.schemaVersion (see REASONING_PROVIDER_DIAGNOSTICS_VERSION
+ * in src/reasoning/reasoningProvider.ts) so this sub-structure can evolve on its own. Aggregated
+ * from a reasoning provider's own decision log (never a second usage-tracking mechanism) and
+ * intentionally limited to safe metadata: no prompts, raw model responses, page content, request
+ * bodies, API keys, headers, or credentials. Token counts are reported as-is (not converted to a
+ * monetary cost) so cost can be computed downstream against whatever pricing applies later.
+ */
+export interface ReasoningProviderDiagnostics {
+  version: "1.0.0";
+  provider: string;
+  model?: string;
+  callCount: number;
+  acceptedDecisionCount: number;
+  rejectedDecisionCount: number;
+  fallbackDecisionCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalLatencyMs: number;
+  retryCount: number;
+  decisions?: ReasoningProviderDecisionSummary[];
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
   totalDurationMs: number;
   finishReason: string;
   engineVersion?: string;
+  reasoningProvider?: ReasoningProviderDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.0.0";
+  schemaVersion: "1.1.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

@@ -82,9 +82,9 @@
     },
     "outputSchemaVersion": {
       "type": "string",
-      "description": "Version of the task-response contract the caller expects back, e.g. \"1.0.0\".",
+      "description": "Version of the task-response contract the caller expects back, e.g. \"1.1.0\". Bumped alongside task-response.schema.json's schemaVersion for the additive diagnostics.reasoningProvider structure.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "metadata": {
       "type": "object",

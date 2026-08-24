@@ -1,4 +1,6 @@
 import type { Decision, ReasoningContext, ReasoningProvider } from "./reasoningProvider.js";
+import { REASONING_PROVIDER_DIAGNOSTICS_VERSION } from "./reasoningProvider.js";
+import type { ReasoningProviderDiagnostics } from "../types/task-response.js";
 
 /**
  * Deterministic stand-in for the Claude reasoning client. It selects only from the
@@ -6,6 +8,23 @@ import type { Decision, ReasoningContext, ReasoningProvider } from "./reasoningP
  * markup — only the compact Observation the core loop already built.
  */
 export class MockReasoningProvider implements ReasoningProvider {
+  // Never calls a real API, so usage is always reported as zero -- this must never be
+  // mistaken for real Claude API usage (see task requirement #5).
+  getUsageDiagnostics(): ReasoningProviderDiagnostics {
+    return {
+      version: REASONING_PROVIDER_DIAGNOSTICS_VERSION,
+      provider: "mock",
+      callCount: 0,
+      acceptedDecisionCount: 0,
+      rejectedDecisionCount: 0,
+      fallbackDecisionCount: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLatencyMs: 0,
+      retryCount: 0,
+    };
+  }
+
   async decide(context: ReasoningContext): Promise<Decision> {
     const { observation, successCriteria, allowedActions, recentActions, satisfiedCriteriaIds } = context;
 

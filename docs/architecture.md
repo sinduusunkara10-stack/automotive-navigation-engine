@@ -141,10 +141,26 @@ decision:
 Per-decision usage metadata (input/output tokens, model, latency, retry count, accept/reject/
 error/fallback outcome) is recorded on an in-memory decision log
 (`ClaudeReasoningProvider#getDecisionLog()`), never under `captures.*` (raw website evidence)
-or `engineAssessment` (engine classification) — see the separation rule in CLAUDE.md. Wiring
-this log into `TaskResponse`/`diagnostics` would be a `task-response.schema.json` contract
-change and is deliberately left for a follow-up (see README "What's deliberately not
-implemented").
+or `engineAssessment` (engine classification) — see the separation rule in CLAUDE.md.
+
+`ClaudeReasoningProvider#getUsageDiagnostics()` (part of the optional
+`ReasoningProvider.getUsageDiagnostics?()` hook) aggregates that same decision log — never a
+second usage-tracking mechanism — into the safe, per-run summary the engine attaches at
+`TaskResponse.diagnostics.reasoningProvider`: `provider`, `model`, `callCount`,
+`acceptedDecisionCount`, `rejectedDecisionCount` (validation failures and provider/API errors
+folded together), `fallbackDecisionCount`, `totalInputTokens`, `totalOutputTokens`,
+`totalLatencyMs`, `retryCount`, and an optional per-decision `decisions[]` breakdown (step
+index where available, attempt, outcome, confidence, input/output tokens, latency). It never
+carries prompts, raw model responses, page content, request bodies, API keys, headers, or
+credentials, and it reports token counts rather than a computed monetary cost, since model
+pricing can change independently of this engine. `MockReasoningProvider#getUsageDiagnostics()`
+always reports `provider: "mock"` with every count at zero, so mock runs can never be mistaken
+for real Claude API usage. `src/core/engine.ts` resolves one `ReasoningProvider` instance per
+run (rather than defaulting per step) precisely so this aggregation reflects the whole run, and
+calls `getUsageDiagnostics()` once after the loop ends. See `schemas/task-response.schema.json`
+`$defs/reasoningProviderDiagnostics` / `$defs/reasoningProviderDecisionSummary`, and
+`TaskResponse.schemaVersion` "1.1.0" (bumped from "1.0.0" for this additive change — no
+existing field was removed or renamed).
 
 Configuration (`src/reasoning/config.ts`): `ANTHROPIC_API_KEY` (required, read only from this
 env var, never logged), `CLAUDE_MODEL` (default `claude-sonnet-5` — this provider is called
@@ -363,9 +379,13 @@ website. See `docs/v1-scope.md` for the full scope boundary. Deliberately not bu
   logging beyond the response's `steps` array plus `ClaudeReasoningProvider`'s in-memory
   decision log (`/logging`), and a general env/config loading module (`/config` — only
   `src/reasoning/config.ts` exists so far, scoped to the reasoning provider) remain unbuilt.
-- Wiring `ClaudeReasoningProvider`'s per-decision usage metadata (tokens, latency, retries) into
-  `TaskResponse`/`diagnostics` — that is a `task-response.schema.json` contract change, not
-  attempted in this change (see §6). The metadata is recorded, just not surfaced there yet.
+- Computing a monetary cost from reasoning-provider token usage — `diagnostics.reasoningProvider`
+  reports raw token counts (see §6) so cost can be computed downstream against whatever pricing
+  applies at query time; the engine deliberately never hardcodes a per-token price.
+- Using `TaskRequest.outputSchemaVersion` to change what shape of response the engine returns —
+  it is validated at intake but the engine always returns the current `TaskResponse.schemaVersion`
+  ("1.1.0") regardless of what a caller declares it expects; version-negotiated response shapes
+  are not built.
 - Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
   `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, `journey_path`, and
   `errors` (`offer_extraction` remains a reserved name, not yet built).

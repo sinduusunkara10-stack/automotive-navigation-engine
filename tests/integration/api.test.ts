@@ -59,7 +59,7 @@ function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules:
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.0.0",
+    outputSchemaVersion: "1.1.0",
   };
 }
 
@@ -121,6 +121,16 @@ test("POST /v1/tasks accepts a valid task request and GET /v1/tasks/:runId retur
     assert.ok(finalBody.result.captures.cta_clicks?.length > 0);
     assert.ok(finalBody.result.captures.journey_path?.length > 0);
     assert.ok(finalBody.result.captures.finish_page_ctas?.length > 0);
+
+    // Task requirement #9: the completed task result includes the reasoning-provider
+    // usage diagnostics. The API defaults to REASONING_PROVIDER unset, i.e. the mock
+    // provider, so usage must be clearly zero and never mistaken for real Claude usage.
+    const reasoningDiagnostics = finalBody.result.diagnostics.reasoningProvider;
+    assert.ok(reasoningDiagnostics, "expected diagnostics.reasoningProvider on the completed result");
+    assert.equal(reasoningDiagnostics.provider, "mock");
+    assert.equal(reasoningDiagnostics.callCount, 0);
+    assert.equal(reasoningDiagnostics.totalInputTokens, 0);
+    assert.equal(reasoningDiagnostics.totalOutputTokens, 0);
 
     await validateAgainstResponseSchema(finalBody.result);
   } finally {

@@ -84,10 +84,11 @@ that stopped the run, with no cookies, auth headers, request bodies, credentials
 raw stack traces included.
 
 `npm test` also runs `tests/unit/*.test.ts`, which cover the Claude reasoning provider (prompt
-construction, decision validation, retry/fallback behavior, provider selection) entirely
-against a deterministic fake model client — no network access, no `ANTHROPIC_API_KEY`, and no
-Claude usage. See "Reasoning provider selection" below for the real provider and its separate,
-opt-in manual smoke test.
+construction, decision validation, retry/fallback behavior, provider selection, and usage
+diagnostics aggregation) entirely against a deterministic fake model client — no network
+access, no `ANTHROPIC_API_KEY`, and no Claude usage. See "Reasoning provider selection" below
+for the real provider and its separate, opt-in manual smoke test, and "Reasoning provider usage
+diagnostics" below for what's reported in `TaskResponse.diagnostics.reasoningProvider`.
 
 ## Reasoning provider selection
 
@@ -148,6 +149,34 @@ Optional tuning (defaults shown; see `src/reasoning/config.ts`):
 - API errors are reduced to a small sanitised category (e.g. `rate_limited`,
   `authentication_failed`, `timeout`) before being recorded anywhere; the API key and raw SDK
   error text never cross that boundary.
+
+### Reasoning provider usage diagnostics
+
+Every `TaskResponse` carries a versioned `diagnostics.reasoningProvider` structure
+(`schemas/task-response.schema.json` `$defs/reasoningProviderDiagnostics`, `TaskResponse.schemaVersion`
+"1.1.0") summarising how much of the run's decision-making came from a real Claude call versus
+elsewhere, regardless of which `ReasoningProvider` was selected:
+
+| Field | Meaning |
+|---|---|
+| `provider` | `"claude"` or `"mock"`. |
+| `model` | Model id used, when applicable. Absent for the mock provider. |
+| `callCount` | Real provider calls made this run, **each counted once** — a retried decision counts as 2 calls (the original attempt plus the retry), not 1. Always `0` for the mock provider, which never calls a real API. |
+| `acceptedDecisionCount` / `rejectedDecisionCount` / `fallbackDecisionCount` | How many of the provider's decisions were accepted, rejected (by engine-side validation or a provider/API error), or fell back to a safe `stop_blocked` because no valid decision could be produced. |
+| `totalInputTokens` / `totalOutputTokens` | Summed token usage across every real call this run — **reported as raw counts, not a computed monetary cost**, because model pricing can change independently of this engine; compute cost downstream from these numbers against whatever pricing applies at query time. |
+| `totalLatencyMs` | Summed wall-clock time across every real call. |
+| `retryCount` | How many attempts beyond each decision's first attempt occurred this run (`CLAUDE_MAX_RETRIES`, hard-capped at 1 per decision — see above — so this is at most one per decision, summed across the run). |
+| `decisions` | Optional per-attempt breakdown (step index where available, attempt number, outcome, confidence where available, input/output tokens, latency) for finer-grained inspection. |
+
+This is aggregated directly from `ClaudeReasoningProvider`'s existing in-memory decision log
+(`getDecisionLog()`/the same log `getUsageDiagnostics()` reads) — there is no second,
+independent usage-tracking mechanism to keep in sync. It never contains prompts, raw model
+responses, page content, request bodies, API keys, headers, or credentials — only the aggregate
+and per-decision numbers/outcome codes above (see `tests/unit/reasoningProviderDiagnostics.test.ts`
+and `tests/integration/reasoningProviderDiagnostics.test.ts`). n8n (or any other caller of the
+HTTP API) finds this at `result.diagnostics.reasoningProvider` in the `GET /v1/tasks/:runId`
+response (see "Local HTTP API" below) — it is kept out of `captures` (raw website evidence) and
+`engineAssessment` (engine classification) per the separation rule in `CLAUDE.md`.
 
 ### Manual local-fixture smoke test (opt-in, real API call)
 
@@ -275,7 +304,7 @@ Sample request (`POST /v1/tasks`):
   "captureModules": ["page_visits", "cta_clicks", "journey_path"],
   "limits": { "maxSteps": 5, "maxBacktracks": 0 },
   "safety": { "allowedActions": ["click", "wait", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-  "outputSchemaVersion": "1.0.0"
+  "outputSchemaVersion": "1.1.0"
 }
 ```
 
@@ -287,7 +316,7 @@ Sample response (`GET /v1/tasks/:runId` once complete):
   "taskId": "example-run-0001",
   "status": "completed",
   "result": {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "taskId": "example-run-0001",
     "status": "success",
     "startUrl": "http://127.0.0.1:4173/start.html",
@@ -295,10 +324,32 @@ Sample response (`GET /v1/tasks/:runId` once complete):
     "steps": ["..."],
     "captures": { "page_visits": ["..."], "cta_clicks": ["..."], "journey_path": ["..."] },
     "engineAssessment": { "objectiveAchieved": true, "confidence": 1, "summary": "..." },
-    "diagnostics": { "stepCount": 2, "backtrackCount": 0, "totalDurationMs": 812, "finishReason": "stop_success_action" }
+    "diagnostics": {
+      "stepCount": 2,
+      "backtrackCount": 0,
+      "totalDurationMs": 812,
+      "finishReason": "stop_success_action",
+      "reasoningProvider": {
+        "version": "1.0.0",
+        "provider": "mock",
+        "callCount": 0,
+        "acceptedDecisionCount": 0,
+        "rejectedDecisionCount": 0,
+        "fallbackDecisionCount": 0,
+        "totalInputTokens": 0,
+        "totalOutputTokens": 0,
+        "totalLatencyMs": 0,
+        "retryCount": 0
+      }
+    }
   }
 }
 ```
+
+n8n reads this same completed-result JSON returned from `GET /v1/tasks/:runId` -- reasoning-provider
+usage lives at `result.diagnostics.reasoningProvider` (see "Reasoning provider usage diagnostics"
+below), alongside `result.diagnostics.stepCount`/`totalDurationMs`/etc.; it is never mixed into
+`result.captures` (raw website evidence) or `result.engineAssessment` (engine classification).
 
 **Current limitations:**
 

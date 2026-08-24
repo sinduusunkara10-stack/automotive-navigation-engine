@@ -1,6 +1,11 @@
 import type { ActionType, SelectedAction } from "../types/actions.js";
 import type { SuccessCriterion } from "../types/task-request.js";
-import type { Observation } from "../types/task-response.js";
+import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
+
+// Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
+// implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
+// independent of TaskResponse.schemaVersion.
+export const REASONING_PROVIDER_DIAGNOSTICS_VERSION = "1.0.0" as const;
 
 export interface Decision {
   action: SelectedAction;
@@ -27,4 +32,12 @@ export interface ReasoningContext {
 
 export interface ReasoningProvider {
   decide(context: ReasoningContext): Promise<Decision>;
+  /**
+   * Safe, per-run aggregated usage diagnostics for this provider (call counts, accept/
+   * reject/fallback outcomes, token/latency totals, retries), surfaced under
+   * TaskResponse.diagnostics.reasoningProvider. Optional so a provider with nothing to
+   * report (or a future provider that hasn't implemented this yet) need not supply it;
+   * the engine only attaches diagnostics.reasoningProvider when this returns a value.
+   */
+  getUsageDiagnostics?(): ReasoningProviderDiagnostics;
 }
