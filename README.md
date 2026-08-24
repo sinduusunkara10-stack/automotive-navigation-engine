@@ -359,6 +359,7 @@ npm run test:api    # runs the API integration tests in isolation
 | `NODE_ENV` | No | `development`/`production` for normal use. `test` is reserved for the automated test suite. |
 | `NAVIGATION_ENGINE_API_TOKEN` | **Yes** (outside `NODE_ENV=test`) | Bearer token required on `POST /v1/tasks` and `GET /v1/tasks/:runId`. The server refuses to start without it (see "Authentication" below). |
 | `INITIAL_NAVIGATION_TIMEOUT_MS` | No | Timeout (ms) for the engine's initial page navigation, which waits only for `domcontentloaded` — never `load`/networkidle. Default `30000`, must be a positive integer, capped at a hard maximum. An invalid value fails server startup clearly (see `src/config/initialNavigationConfig.ts`). |
+| `ACTION_NAVIGATION_TIMEOUT_MS` | No | Timeout (ms) for navigation triggered by in-loop actions — the `navigate` action and link clicks that cause a document navigation — also waiting only for `domcontentloaded`, never `load`/networkidle. Default `30000`, must be a positive integer, capped at a hard maximum. An invalid value fails server startup clearly (see `src/config/actionNavigationConfig.ts`). |
 | `REASONING_PROVIDER` | No | `mock` (default) or `claude`. |
 | `ANTHROPIC_API_KEY` | Only when `REASONING_PROVIDER=claude` | See "Reasoning provider selection" above. |
 | `CLAUDE_MODEL`, `CLAUDE_MAX_OUTPUT_TOKENS`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_RETRIES`, `CLAUDE_MIN_CONFIDENCE` | No | Existing Claude tuning, unchanged — see `src/reasoning/config.ts`. |
