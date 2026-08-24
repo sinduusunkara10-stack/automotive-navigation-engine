@@ -1,0 +1,73 @@
+name: Manual Claude Reasoning Provider Smoke Test
+
+# workflow_dispatch is the ONLY trigger, deliberately. This workflow makes one real,
+# billed call to the Claude API (see tests/manual/claudeReasoningProviderSmokeTest.ts) and
+# must never fire automatically on push, pull_request, schedule, or any other event.
+on:
+  workflow_dispatch: {}
+
+# Repository-wide minimal token permissions: this workflow only needs to read the repo.
+permissions:
+  contents: read
+
+# Only one manual Claude smoke-test run at a time, across all branches/refs, so a second
+# manual trigger can never overlap with (and double-bill) an in-flight run. New dispatches
+# queue behind an in-flight run rather than cancelling it.
+concurrency:
+  group: manual-claude-smoke-test
+  cancel-in-progress: false
+
+jobs:
+  smoke-test:
+    name: Claude smoke test (local fictional fixture only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Matches package.json "engines.node": ">=20".
+          node-version: "20.x"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Validate task schemas
+        run: npm run validate:schemas
+
+      - name: Run automated tests (mock reasoning provider only, no Claude API calls)
+        run: npm test
+
+      # ANTHROPIC_API_KEY and the rest of the Claude tuning env vars are scoped to this
+      # single step only — no other step, job, or workflow-level env references them. The
+      # secret is read exclusively via ${{ secrets.ANTHROPIC_API_KEY }}; it is never placed
+      # in a command-line argument, written to a file, or logged. The shell check below only
+      # tests whether the value is empty (`-z`) and never prints, measures, or echoes it.
+      - name: Run Claude reasoning provider smoke test (one real, billed Claude API call)
+        env:
+          REASONING_PROVIDER: claude
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Conservative tuning for a single structured navigation decision against the
+          # local fictional fixture (see src/reasoning/config.ts for defaults/ceilings).
+          CLAUDE_MODEL: claude-sonnet-5
+          CLAUDE_MAX_OUTPUT_TOKENS: "512"
+          CLAUDE_TIMEOUT_MS: "20000"
+          # Hard requirement: no retry on failure for this workflow run.
+          CLAUDE_MAX_RETRIES: "0"
+          CLAUDE_MIN_CONFIDENCE: "0.5"
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "::error::Required repository secret ANTHROPIC_API_KEY is not configured. Add it under Settings > Secrets and variables > Actions, then re-run this workflow. (No key was logged.)"
+            exit 1
+          fi
+          npm run smoke:claude
