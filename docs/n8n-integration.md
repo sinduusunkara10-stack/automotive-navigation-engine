@@ -128,3 +128,11 @@ should be treated by n8n as a distinct integration to test, not an in-place upgr
 backward-compatible fields (e.g. a new optional capture module) can ship under the same major
 version once the project adopts semantic versioning conventions for the schemas — not yet
 formalized in v1.
+
+**Example (already applied):** adding `diagnostics.reasoningProvider` to the response bumped the
+response contract's `schemaVersion` and the request's `outputSchemaVersion` from `"1.0.0"` to
+`"1.1.0"` (both are still exact-match `const`s, not a range, so an n8n workflow pinned to
+`"1.0.0"` must update the value it sends). The change itself is additive — no existing response
+field was removed or renamed, and `diagnostics.reasoningProvider` is itself independently
+versioned (see README "Reasoning provider usage diagnostics") so it can evolve again without
+necessarily forcing another top-level `schemaVersion` bump.

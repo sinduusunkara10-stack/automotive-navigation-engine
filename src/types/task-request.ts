@@ -42,6 +42,6 @@ export interface TaskRequest {
   captureModules: CaptureModuleName[];
   limits: Limits;
   safety: Safety;
-  outputSchemaVersion: "1.0.0";
+  outputSchemaVersion: "1.1.0";
   metadata?: Record<string, string | number | boolean>;
 }

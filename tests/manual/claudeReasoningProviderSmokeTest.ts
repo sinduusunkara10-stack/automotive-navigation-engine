@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       // is the minimum number of real model calls needed to prove the integration.
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "wait", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.0.0",
+      outputSchemaVersion: "1.1.0",
     };
 
     const result = await runTask({ page, task, reasoning });

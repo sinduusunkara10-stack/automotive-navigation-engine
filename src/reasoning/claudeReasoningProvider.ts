@@ -1,15 +1,18 @@
 import type { Decision, ReasoningContext, ReasoningProvider } from "./reasoningProvider.js";
+import { REASONING_PROVIDER_DIAGNOSTICS_VERSION } from "./reasoningProvider.js";
 import { ReasoningModelError, type ReasoningModelClient } from "./reasoningModelClient.js";
 import { buildClaudeDecisionSchema, type ClaudeDecisionPayload } from "./claudeDecisionSchema.js";
 import { buildReasoningPrompt } from "./promptBuilder.js";
 import { validateClaudeDecision } from "./validateClaudeDecision.js";
 import { readClaudeReasoningConfig, type ClaudeReasoningConfig } from "./config.js";
 import { createAnthropicReasoningModelClient } from "./anthropicReasoningModelClient.js";
+import type { ReasoningProviderDiagnostics, ReasoningProviderDecisionSummary } from "../types/task-response.js";
 
 export interface ClaudeDecisionLogEntry {
   timestamp: string;
   provider: "claude";
   model: string;
+  stepIndex?: number;
   attempt: number;
   outcome: "accepted" | "rejected" | "error" | "fallback";
   reason?: string;
@@ -23,16 +26,27 @@ export interface ClaudeReasoningProviderOptions {
   modelClient?: ReasoningModelClient;
   /**
    * Optional sink for per-decision usage/outcome metadata (input/output tokens,
-   * provider, model, latency, retry count — see task requirement #15). Deliberately
-   * not wired into TaskResponse/captures: that would be a task-response.schema.json
-   * contract change, out of scope for this task (see README "deliberately
-   * unimplemented"). Callers that want this metadata (e.g. the API runner, or a test)
-   * can pass a sink here, or read getDecisionLog() after a run.
+   * provider, model, latency, retry count — see task requirement #15). Callers that want
+   * this metadata (e.g. a test) can pass a sink here, or read getDecisionLog() after a
+   * run. The same log also backs getUsageDiagnostics(), which is what the engine
+   * aggregates into TaskResponse.diagnostics.reasoningProvider.
    */
   onDecisionLogged?: (entry: ClaudeDecisionLogEntry) => void;
 }
 
 const FALLBACK_ACTION_TYPE = "stop_blocked";
+
+function toDecisionSummary(entry: ClaudeDecisionLogEntry): ReasoningProviderDecisionSummary {
+  return {
+    ...(entry.stepIndex !== undefined ? { stepIndex: entry.stepIndex } : {}),
+    attempt: entry.attempt,
+    outcome: entry.outcome,
+    ...(entry.confidence !== undefined ? { confidence: entry.confidence } : {}),
+    ...(entry.usage?.inputTokens !== undefined ? { inputTokens: entry.usage.inputTokens } : {}),
+    ...(entry.usage?.outputTokens !== undefined ? { outputTokens: entry.usage.outputTokens } : {}),
+    latencyMs: entry.latencyMs,
+  };
+}
 
 /**
  * Real, Claude-backed ReasoningProvider. Selects an action from context.allowedActions
@@ -60,8 +74,10 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
   }
 
   async decide(context: ReasoningContext): Promise<Decision> {
+    const stepIndex = context.limits.stepsUsed;
+
     if (context.allowedActions.length === 0) {
-      return this.fallback("no_allowed_actions");
+      return this.fallback("no_allowed_actions", stepIndex);
     }
 
     const schema = buildClaudeDecisionSchema(context.allowedActions);
@@ -84,7 +100,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
 
         if (!result.parsedOutput) {
           lastReason = result.stopReason === "refusal" ? "refusal" : "malformed_output";
-          this.log({ attempt, outcome: "rejected", reason: lastReason, latencyMs, usage: result.usage });
+          this.log({ stepIndex, attempt, outcome: "rejected", reason: lastReason, latencyMs, usage: result.usage });
           continue;
         }
 
@@ -92,6 +108,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
         if (!validation.valid) {
           lastReason = validation.reason;
           this.log({
+            stepIndex,
             attempt,
             outcome: "rejected",
             reason: lastReason,
@@ -102,7 +119,14 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
           continue;
         }
 
-        this.log({ attempt, outcome: "accepted", confidence: validation.confidence, latencyMs, usage: result.usage });
+        this.log({
+          stepIndex,
+          attempt,
+          outcome: "accepted",
+          confidence: validation.confidence,
+          latencyMs,
+          usage: result.usage,
+        });
         return {
           action: validation.action,
           rationale: `${validation.reason} (Claude confidence ${validation.confidence.toFixed(2)})`,
@@ -110,15 +134,44 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
       } catch (error) {
         const latencyMs = Date.now() - startedAt;
         lastReason = error instanceof ReasoningModelError ? error.category : "provider_error";
-        this.log({ attempt, outcome: "error", reason: lastReason, latencyMs });
+        this.log({ stepIndex, attempt, outcome: "error", reason: lastReason, latencyMs });
       }
     }
 
-    return this.fallback(lastReason);
+    return this.fallback(lastReason, stepIndex);
   }
 
-  private fallback(reason: string): Decision {
-    this.log({ attempt: -1, outcome: "fallback", reason, latencyMs: 0 });
+  /**
+   * Aggregates the existing decision log (never a second usage-tracking mechanism) into
+   * the safe, per-run summary surfaced at TaskResponse.diagnostics.reasoningProvider.
+   * "error" outcomes are folded into rejectedDecisionCount for the aggregate counts
+   * (both represent a discarded attempt), while the per-decision `decisions` array keeps
+   * the original outcome for full fidelity.
+   */
+  getUsageDiagnostics(): ReasoningProviderDiagnostics {
+    const entries = this.decisionLog;
+    const realCalls = entries.filter((entry) => entry.attempt >= 0);
+    const retries = entries.filter((entry) => entry.attempt >= 1);
+
+    return {
+      version: REASONING_PROVIDER_DIAGNOSTICS_VERSION,
+      provider: "claude",
+      model: this.config.model,
+      callCount: realCalls.length,
+      acceptedDecisionCount: entries.filter((entry) => entry.outcome === "accepted").length,
+      rejectedDecisionCount: entries.filter((entry) => entry.outcome === "rejected" || entry.outcome === "error")
+        .length,
+      fallbackDecisionCount: entries.filter((entry) => entry.outcome === "fallback").length,
+      totalInputTokens: entries.reduce((sum, entry) => sum + (entry.usage?.inputTokens ?? 0), 0),
+      totalOutputTokens: entries.reduce((sum, entry) => sum + (entry.usage?.outputTokens ?? 0), 0),
+      totalLatencyMs: entries.reduce((sum, entry) => sum + entry.latencyMs, 0),
+      retryCount: retries.length,
+      ...(entries.length > 0 ? { decisions: entries.map(toDecisionSummary) } : {}),
+    };
+  }
+
+  private fallback(reason: string, stepIndex: number): Decision {
+    this.log({ stepIndex, attempt: -1, outcome: "fallback", reason, latencyMs: 0 });
     return {
       action: { type: FALLBACK_ACTION_TYPE },
       rationale: `Claude reasoning provider could not produce a valid decision (${reason}); stopping safely.`,

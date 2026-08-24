@@ -4,7 +4,6 @@ import type { Captures, ErrorCategory, StepLog } from "../types/task-response.js
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation } from "../observation/observationBuilder.js";
-import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { checkLimitsBreach, validateDecision } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
@@ -34,10 +33,9 @@ export async function runStep(params: {
   task: TaskRequest;
   state: RunState;
   captures: Captures;
-  reasoning?: ReasoningProvider;
+  reasoning: ReasoningProvider;
 }): Promise<LoopStepOutcome> {
-  const { page, task, state, captures } = params;
-  const reasoning = params.reasoning ?? new MockReasoningProvider();
+  const { page, task, state, captures, reasoning } = params;
   const stepIndex = state.stepCount;
 
   const observation = await buildObservation(page);

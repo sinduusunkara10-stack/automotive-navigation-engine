@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.0.0\".",
+      "description": "Version of this task-response contract, e.g. \"1.1.0\". Bumped from \"1.0.0\" to \"1.1.0\" for the additive diagnostics.reasoningProvider structure (see $defs/reasoningProviderDiagnostics) -- no existing field was removed or renamed.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "taskId": {
       "type": "string",
@@ -787,6 +787,133 @@
         "engineVersion": {
           "type": "string",
           "description": "Version of the navigation engine build that produced this response."
+        },
+        "reasoningProvider": {
+          "$ref": "#/$defs/reasoningProviderDiagnostics"
+        }
+      }
+    },
+    "reasoningProviderDecisionSummary": {
+      "type": "object",
+      "description": "Safe per-decision usage summary for one reasoning-provider attempt. Never includes prompts, raw model responses, page content, request bodies, API keys, headers, or credentials.",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "outcome",
+        "latencyMs"
+      ],
+      "properties": {
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Step index this decision was made for, when available (absent for a decision made before any step is known, e.g. an immediate fallback when no actions are allowed)."
+        },
+        "attempt": {
+          "type": "integer",
+          "description": "Attempt number within this decision: 0 is the first try, 1 is the single allowed retry, -1 marks a fallback produced without a model call."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected",
+            "error",
+            "fallback"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Model-reported confidence for this decision, when available."
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latencyMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "reasoningProviderDiagnostics": {
+      "type": "object",
+      "description": "Aggregated, per-run reasoning-provider usage diagnostics, derived from the provider's own decision log (never a second usage-tracking mechanism). Contains only safe aggregate/per-decision metadata -- never prompts, raw model responses, page content, request bodies, API keys, headers, or credentials. Reports token usage as source data for cost calculation downstream, not a computed monetary cost, since model pricing can change independently of this engine. Versioned independently of the top-level schemaVersion so this structure can evolve on its own.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "provider",
+        "callCount",
+        "acceptedDecisionCount",
+        "rejectedDecisionCount",
+        "fallbackDecisionCount",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalLatencyMs",
+        "retryCount"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Version of this reasoning-provider diagnostics structure, e.g. \"1.0.0\".",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "const": "1.0.0"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Reasoning provider that produced this run's decisions, e.g. \"claude\" or \"mock\"."
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier used by the provider, when applicable. Absent for the mock provider."
+        },
+        "callCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of real provider calls made this run, each counted once. Excludes immediate safe fallbacks produced without a call. Always 0 for the mock provider."
+        },
+        "acceptedDecisionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectedDecisionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decisions rejected by engine-side validation or by a provider/API error."
+        },
+        "fallbackDecisionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decisions where the provider could not produce a valid decision and returned a safe stop_blocked fallback instead."
+        },
+        "totalInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalOutputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalLatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of retry attempts (beyond each decision's first attempt) made this run."
+        },
+        "decisions": {
+          "type": "array",
+          "description": "Optional per-decision usage summary, one entry per attempt recorded in the provider's decision log.",
+          "items": {
+            "$ref": "#/$defs/reasoningProviderDecisionSummary"
+          }
         }
       }
     }
