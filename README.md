@@ -83,6 +83,16 @@ target intercepted so the action itself fails) and asserts each is captured unde
 that stopped the run, with no cookies, auth headers, request bodies, credentials, tokens, or
 raw stack traces included.
 
+`npm test` also runs `tests/integration/actionExecutionConsistency.test.ts` against a bespoke
+local server, covering the observation -> reasoning -> execution pipeline's generic
+consistency guarantees end to end: a hidden duplicate element is never offered as a click
+candidate; a stable element id survives a DOM reorder; a target that goes stale (removed,
+hidden, disabled, covered) between being observed and being acted on triggers re-observation
+and a fresh decision rather than a blind click; and a click that still fails for a recoverable
+reason falls back to a generic, safety-checked `destinationUrl` navigation (with the fallback
+correctly rejected for a URL outside `allowedDomains`, an unsafe protocol, or no
+`destinationUrl` at all). See `docs/architecture.md` §5 ("Action-execution consistency").
+
 `npm test` also runs `tests/unit/*.test.ts`, which cover the Claude reasoning provider (prompt
 construction, decision validation, retry/fallback behavior, provider selection, and usage
 diagnostics aggregation) entirely against a deterministic fake model client — no network
