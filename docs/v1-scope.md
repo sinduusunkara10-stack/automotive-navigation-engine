@@ -100,7 +100,14 @@ Explicitly out of scope for v1 (candidate for v2+):
    site terms) for competitor-offers-style monitoring tasks — not yet specified in the safety
    schema beyond the existing step/duration/backtrack limits.
 6. **Multi-locale/multi-market task variants** — whether locale is part of `metadata` (advisory
-   only) or needs to become a first-class, engine-relevant field.
+   only) or needs to become a first-class, engine-relevant field. Partially informs the
+   `semantic_page_match` success-criteria type (`docs/n8n-integration.md` §9): it is a
+   literal-vocabulary overlap between `objective` and page text, not translation, so it will
+   not reliably recognise a page written in a language different from the objective. `locale`/
+   `language` remain optional, engine-blind reporting metadata (`metadata` only) rather than a
+   field the engine reads — an operator who knows a target site's language in advance should
+   author `objective` (and a `semantic_page_match` criterion's `description`) in that language
+   rather than expect the engine to translate.
 7. **Retention policy** for captured evidence (dataLayer payloads, screenshots, network
    events) — this repo does not currently define how long artifacts are kept or where.
 

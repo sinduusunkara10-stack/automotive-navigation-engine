@@ -349,6 +349,21 @@ Task-specific extraction (dataLayer evidence, GA4 network events, CTA/offer capt
 screenshots) happens in pluggable **capture modules**, kept separate from this core loop. See
 `docs/architecture.md` for the full design.
 
+## Generic success criteria
+
+`successCriteria[].type` (`src/core/successEvaluator.ts`) supports `url_pattern` and
+`element_present` (both require the caller to already know a destination URL shape or CSS
+selector on the target site) and, as of request `schemaVersion` `"1.2.0"`,
+**`semantic_page_match`** — a generic, brand/language-agnostic criterion that scores how much
+of the task's `objective` (plus the criterion's own `description`) shows up in the live page's
+title, headings, and interactive-element text, using the same token-overlap approach
+`src/discovery/relevance.ts` already uses for preflight domain discovery. It needs no selector,
+URL pattern, hostname, brand, or CTA label — only `startUrl`, `objective`, and (optionally)
+`journeyType`, the fields an orchestrator's form trigger can supply for a site it has never
+crawled before. See `docs/n8n-integration.md` §9-§11 for the full evaluation model, its known
+literal-vocabulary/language limitation, and how an n8n Build node should construct
+`successCriteria` generically instead of falling back to per-brand values.
+
 ## Preflight domain discovery
 
 Before that loop starts, a deterministic **preflight phase** (`src/discovery`) runs once: it
@@ -551,8 +566,11 @@ cloud-vendor-specific deployment files (see `docs/v1-scope.md`).
   competitor offers page and capture offer text, model, displayed price, visible validity
   information, and evidence screenshots.
 - [`examples/minimal-preflight-discovery-task.json`](examples/minimal-preflight-discovery-task.json)
-  — the same configurator journey as above, but supplying only `startUrl`, `objective`, and
-  `journeyType`; preflight domain discovery (see above) determines `allowedDomains` on its own.
+  — a fully generic configurator-entry task: only `startUrl`, `objective`, and `journeyType`
+  describe the target site (no `allowedDomains`, hostname, CSS selector, or brand/market
+  value anywhere); preflight domain discovery determines `allowedDomains` on its own, and its
+  `semantic_page_match` success criterion (see "Generic success criteria" above) recognises
+  the target state from `objective` and live page text alone.
 
 All three validate against
 [`schemas/task-request.schema.json`](schemas/task-request.schema.json).

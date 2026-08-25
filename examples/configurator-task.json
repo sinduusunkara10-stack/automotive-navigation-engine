@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.1.0",
+  "schemaVersion": "1.2.0",
   "taskId": "example-configurator-journey-0001",
   "objective": "Starting from the homepage, find and enter the vehicle configurator, proceed through the configuration steps to a finish or summary state, and capture the journey taken along with GA4 and dataLayer evidence.",
   "startUrl": "https://www.example-automotive-oem.com/",

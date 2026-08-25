@@ -38,7 +38,7 @@ test("errors capture module records page JS errors, console errors, failed netwo
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.1.0",
+      schemaVersion: "1.2.0",
       taskId: "errors-capture-diagnostics",
       objective: "Attempt to reach an unreachable success state on a fixture that emits fictional failures.",
       startUrl: `${baseUrl}/errors-start.html`,
@@ -127,7 +127,7 @@ test("errors capture module records a limit_stop diagnostic when maxSteps is rea
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.1.0",
+      schemaVersion: "1.2.0",
       taskId: "errors-capture-limit-stop",
       objective: "Reach an unreachable success state so the step ceiling is exercised.",
       startUrl: `${baseUrl}/start.html`,
@@ -173,7 +173,7 @@ test("errors capture module records nothing when not requested, even on a page t
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.1.0",
+      schemaVersion: "1.2.0",
       taskId: "errors-capture-not-requested",
       objective: "Attempt to reach an unreachable success state on a fixture that emits fictional failures.",
       startUrl: `${baseUrl}/errors-start.html`,

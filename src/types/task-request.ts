@@ -5,6 +5,7 @@ export type SuccessCriterionType =
   | "url_pattern"
   | "element_present"
   | "element_text_match"
+  | "semantic_page_match"
   | "data_layer_event"
   | "network_event"
   | "custom";
@@ -33,7 +34,7 @@ export interface Safety {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.1.0";
+  schemaVersion: "1.2.0";
   taskId: string;
   objective: string;
   startUrl: string;

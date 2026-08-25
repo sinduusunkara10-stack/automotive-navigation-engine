@@ -9,7 +9,7 @@ const STOPWORDS = new Set([
   "will", "can", "should", "which", "each", "any", "all", "not",
 ]);
 
-function tokenize(text: string): string[] {
+export function tokenize(text: string): string[] {
   return text
     .toLowerCase()
     .split(/[^a-z0-9]+/)
@@ -36,6 +36,34 @@ export function objectiveRelevanceScore(objectiveText: string, candidateText: st
     }
   }
   return overlap / candidateTokens.size;
+}
+
+/**
+ * Fraction of the objective's distinct tokens that also appear somewhere in the page text --
+ * the inverse direction from objectiveRelevanceScore above. That function scores a short
+ * candidate (an anchor's text) from the candidate's own perspective, which is right for
+ * ranking many small candidates against one objective. Recognising a page's semantic state
+ * needs the opposite direction: a page has far more vocabulary than a short objective, so
+ * asking "what fraction of the page's words are in the objective" would always be near zero.
+ * Asking "what fraction of the objective's words showed up on the page" is the generic,
+ * domain-agnostic signal src/core/semanticPageMatch.ts builds on.
+ */
+export function objectiveTokenCoverage(objectiveText: string, pageText: string): number {
+  const objectiveTokens = new Set(tokenize(objectiveText));
+  if (objectiveTokens.size === 0) {
+    return 0;
+  }
+  const pageTokens = new Set(tokenize(pageText));
+  if (pageTokens.size === 0) {
+    return 0;
+  }
+  let hits = 0;
+  for (const token of objectiveTokens) {
+    if (pageTokens.has(token)) {
+      hits += 1;
+    }
+  }
+  return hits / objectiveTokens.size;
 }
 
 export function rankByObjectiveRelevance<T>(

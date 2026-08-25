@@ -38,7 +38,7 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
 
 function buildTask(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.1.0",
+    schemaVersion: "1.2.0",
     taskId: "reasoning-diagnostics-claude",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${baseUrl}/start.html`,
