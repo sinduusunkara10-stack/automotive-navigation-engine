@@ -1,6 +1,12 @@
 import type { Page } from "playwright";
-import type { TaskRequest } from "../types/task-request.js";
-import type { Captures, EngineAssessment, StepLog, TaskResponse } from "../types/task-response.js";
+import type { ResolvedTaskRequest, TaskRequest } from "../types/task-request.js";
+import type {
+  Captures,
+  DomainDiscoveryDiagnostics,
+  EngineAssessment,
+  StepLog,
+  TaskResponse,
+} from "../types/task-response.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import { RunState } from "./state.js";
@@ -8,11 +14,32 @@ import { runStep, type TerminalStatus } from "./loop.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
-import { navigateInitialPage } from "./initialNavigation.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
+import { assessUrlSafety } from "../discovery/hostSafety.js";
+import { runDomainDiscovery, type DomainDiscoveryResult } from "../discovery/domainDiscovery.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
+
+function toDomainDiscoveryDiagnostics(
+  discovery: DomainDiscoveryResult,
+  allowedDomainsUsed: string[],
+): DomainDiscoveryDiagnostics {
+  return {
+    version: "1.0.0",
+    startHostname: discovery.startHostname,
+    startRegistrableDomain: discovery.startRegistrableDomain,
+    finalUrl: discovery.finalUrl,
+    redirectChain: discovery.redirectChain,
+    ...(discovery.canonicalUrl ? { canonicalUrl: discovery.canonicalUrl } : {}),
+    trustedDomains: discovery.trustedDomains,
+    ...(discovery.externalCandidates.length > 0 ? { externalCandidates: discovery.externalCandidates } : {}),
+    ...(discovery.rejectedCandidates.length > 0 ? { rejectedCandidates: discovery.rejectedCandidates } : {}),
+    proposedAllowedDomains: discovery.proposedAllowedDomains,
+    allowedDomainsUsed,
+    ...(discovery.blockedReason ? { blockedReason: discovery.blockedReason } : {}),
+  };
+}
 
 export async function runTask(params: {
   page: Page;
@@ -34,7 +61,44 @@ export async function runTask(params: {
   const initialNavigationTimeoutMs = params.initialNavigationTimeoutMs ?? readInitialNavigationTimeoutMs();
   const actionNavigationTimeoutMs = params.actionNavigationTimeoutMs ?? readActionNavigationTimeoutMs();
 
-  if (!checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
+  // startUrl is always required to be http/https and parseable, defense-in-depth alongside
+  // the request schema's own "format": "uri" check (this engine can be called directly, as
+  // the test suite does, bypassing schema validation entirely). The caller's own explicit
+  // startUrl is exempt from the localhost/loopback/link-local rejections below -- those exist
+  // to stop preflight from being fooled into trusting a host it *discovers* (a redirect, a
+  // canonical tag, a page link), not to forbid a deliberate local/dev target the caller
+  // chose on purpose (this repo's own fixtures run on 127.0.0.1). See discovery/hostSafety.ts.
+  const startUrlSafety = assessUrlSafety(task.startUrl, { allowLoopbackAndLinkLocal: true });
+  if (!startUrlSafety.safe) {
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        category: "safety_guard_stop",
+        severity: "critical",
+        pageUrl: task.startUrl,
+        message: `startUrl is unsafe (${startUrlSafety.reason}); run blocked before navigation.`,
+        recoverable: false,
+        stoppedRun: true,
+      });
+    }
+    return buildTerminalResponse({
+      task,
+      state,
+      captures,
+      steps: [],
+      status: "blocked",
+      finishReason: "domain_blocked",
+      statusReason: `startUrl is unsafe (${startUrlSafety.reason})`,
+      finalUrl: task.startUrl,
+      reasoning,
+    });
+  }
+
+  // A caller who explicitly supplies allowedDomains is still held to it immediately: if
+  // startUrl itself isn't covered, the run is blocked before ever opening a page, same as
+  // before preflight discovery existed. When allowedDomains is omitted, there is nothing to
+  // check yet -- discovery (below) determines the initial trusted set from the navigation
+  // itself.
+  if (task.allowedDomains && task.allowedDomains.length > 0 && !checkNavigationAllowed(task.startUrl, task.allowedDomains)) {
     if (task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         category: "safety_guard_stop",
@@ -69,20 +133,28 @@ export async function runTask(params: {
     : undefined;
 
   try {
-    const initialNavigation = await navigateInitialPage({
+    // Deterministic preflight domain discovery (src/discovery) runs before the Claude-driven
+    // navigation loop: it performs the engine's one-off initial navigation itself (so it can
+    // inspect the actual redirect chain), then proposes a trusted allowedDomains set from the
+    // exact start host, the redirect landing host, and any hostname sharing their PSL
+    // registrable domain found via the canonical URL or on-page links -- never from an
+    // external-domain link alone. See docs/architecture.md "Preflight domain discovery".
+    const { navigation, discovery } = await runDomainDiscovery({
       page,
       startUrl: task.startUrl,
-      allowedDomains: task.allowedDomains,
+      objective: task.objective,
+      journeyType: task.journeyType,
+      callerAllowedDomains: task.allowedDomains,
       timeoutMs: initialNavigationTimeoutMs,
     });
 
-    if (initialNavigation.status === "failed") {
+    if (navigation.status === "failed") {
       if (task.captureModules.includes("errors")) {
         recordDiagnosticError(captures, {
           category: "navigation_failure",
           severity: "critical",
           pageUrl: task.startUrl,
-          message: initialNavigation.message ?? "Initial navigation failed.",
+          message: navigation.message ?? "Initial navigation failed.",
           recoverable: false,
           stoppedRun: true,
         });
@@ -94,29 +166,58 @@ export async function runTask(params: {
         steps: [],
         status: "failure",
         finishReason: "initial_navigation_error",
-        statusReason: initialNavigation.message ?? "Initial navigation failed.",
-        finalUrl: initialNavigation.url,
+        statusReason: navigation.message ?? "Initial navigation failed.",
+        finalUrl: navigation.url,
         reasoning,
       });
     }
 
-    if (initialNavigation.status === "recovered" && task.captureModules.includes("errors")) {
+    if (navigation.status === "recovered" && task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         category: "navigation_failure",
         severity: "warning",
-        pageUrl: initialNavigation.url,
-        message: initialNavigation.message ?? "Initial navigation timed out but recovered.",
+        pageUrl: navigation.url,
+        message: navigation.message ?? "Initial navigation timed out but recovered.",
         recoverable: true,
         stoppedRun: false,
       });
     }
+
+    if (!discovery || discovery.blockedReason) {
+      const reason = discovery?.blockedReason ?? "Preflight domain discovery could not be completed.";
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          category: "safety_guard_stop",
+          severity: "critical",
+          pageUrl: navigation.url,
+          message: reason,
+          recoverable: false,
+          stoppedRun: true,
+        });
+      }
+      return buildTerminalResponse({
+        task,
+        state,
+        captures,
+        steps: [],
+        status: "blocked",
+        finishReason: "domain_blocked",
+        statusReason: reason,
+        finalUrl: navigation.url,
+        reasoning,
+        domainDiscovery: discovery,
+      });
+    }
+
+    const allowedDomainsUsed = discovery.trustedDomains.map((entry) => entry.hostname);
+    const effectiveTask: ResolvedTaskRequest = { ...task, allowedDomains: allowedDomainsUsed };
 
     const steps: StepLog[] = [];
     let terminal: TerminalStatus | undefined;
     let finishReason = "loop_exhausted";
 
     while (!terminal) {
-      const outcome = await runStep({ page, task, state, captures, reasoning, actionNavigationTimeoutMs });
+      const outcome = await runStep({ page, task: effectiveTask, state, captures, reasoning, actionNavigationTimeoutMs });
       steps.push(outcome.stepLog);
       if (outcome.terminal) {
         terminal = outcome.terminal;
@@ -126,7 +227,7 @@ export async function runTask(params: {
 
     const lastStep = steps[steps.length - 1];
     return buildTerminalResponse({
-      task,
+      task: effectiveTask,
       state,
       captures,
       steps,
@@ -135,6 +236,7 @@ export async function runTask(params: {
       statusReason: finishReason,
       finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
       reasoning,
+      domainDiscovery: discovery,
     });
   } finally {
     detachGa4Capture?.();
@@ -152,8 +254,10 @@ function buildTerminalResponse(params: {
   statusReason: string;
   finalUrl: string;
   reasoning: ReasoningProvider;
+  domainDiscovery?: DomainDiscoveryResult;
 }): TaskResponse {
-  const { task, state, captures, steps, status, finishReason, statusReason, finalUrl, reasoning } = params;
+  const { task, state, captures, steps, status, finishReason, statusReason, finalUrl, reasoning, domainDiscovery } =
+    params;
   const lastStep = steps[steps.length - 1];
   const objectiveAchieved = status === "success";
 
@@ -167,9 +271,12 @@ function buildTerminalResponse(params: {
   };
 
   const reasoningProviderDiagnostics = reasoning.getUsageDiagnostics?.();
+  const domainDiscoveryDiagnostics = domainDiscovery
+    ? toDomainDiscoveryDiagnostics(domainDiscovery, task.allowedDomains ?? domainDiscovery.proposedAllowedDomains)
+    : undefined;
 
   return {
-    schemaVersion: "1.1.0",
+    schemaVersion: "1.2.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -185,6 +292,7 @@ function buildTerminalResponse(params: {
       finishReason,
       engineVersion: ENGINE_VERSION,
       ...(reasoningProviderDiagnostics ? { reasoningProvider: reasoningProviderDiagnostics } : {}),
+      ...(domainDiscoveryDiagnostics ? { domainDiscovery: domainDiscoveryDiagnostics } : {}),
     },
   };
 }

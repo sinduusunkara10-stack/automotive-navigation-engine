@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.1.0\". Bumped from \"1.0.0\" to \"1.1.0\" for the additive diagnostics.reasoningProvider structure (see $defs/reasoningProviderDiagnostics) -- no existing field was removed or renamed.",
+      "description": "Version of this task-response contract, e.g. \"1.2.0\". Bumped from \"1.1.0\" to \"1.2.0\" for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics), reporting the preflight domain-discovery phase's proposed allowedDomains and the evidence behind them -- no existing field was removed or renamed.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "taskId": {
       "type": "string",
@@ -790,6 +790,9 @@
         },
         "reasoningProvider": {
           "$ref": "#/$defs/reasoningProviderDiagnostics"
+        },
+        "domainDiscovery": {
+          "$ref": "#/$defs/domainDiscoveryDiagnostics"
         }
       }
     },
@@ -914,6 +917,154 @@
           "items": {
             "$ref": "#/$defs/reasoningProviderDecisionSummary"
           }
+        }
+      }
+    },
+    "trustedDomainEntry": {
+      "type": "object",
+      "description": "One hostname the run trusted for navigation, and why.",
+      "additionalProperties": false,
+      "required": ["hostname", "reason"],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["caller_supplied", "exact_start_host", "redirect_landing_host", "same_registrable_domain_subdomain"]
+        },
+        "evidenceType": {
+          "type": "string",
+          "enum": ["redirect_landing_host", "canonical_url", "visible_anchor", "nav_anchor", "objective_candidate_anchor"]
+        },
+        "sourceUrl": {
+          "type": "string",
+          "description": "The URL this trust decision was derived from, when applicable (absent for caller_supplied)."
+        }
+      }
+    },
+    "externalDomainCandidate": {
+      "type": "object",
+      "description": "A hostname discovered during preflight on a different registrable domain than the site being navigated. Never auto-trusted -- surfaced here so a caller/operator can review and explicitly add it to the task's allowedDomains if the run is meant to cross into it.",
+      "additionalProperties": false,
+      "required": ["hostname", "registrableDomain", "evidenceType", "sourceUrl", "reason"],
+      "properties": {
+        "hostname": {
+          "type": "string"
+        },
+        "registrableDomain": {
+          "type": ["string", "null"]
+        },
+        "evidenceType": {
+          "type": "string",
+          "enum": ["redirect_landing_host", "canonical_url", "visible_anchor", "nav_anchor", "objective_candidate_anchor"]
+        },
+        "sourceUrl": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable explanation of why this candidate was not auto-trusted."
+        }
+      }
+    },
+    "rejectedDomainCandidate": {
+      "type": "object",
+      "description": "A URL considered during preflight and rejected outright by the conservative candidate-validation policy (unsupported protocol, localhost, loopback, or link-local address).",
+      "additionalProperties": false,
+      "required": ["url", "evidenceType", "reason"],
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "evidenceType": {
+          "type": "string",
+          "enum": [
+            "redirect_landing_host",
+            "redirect_hop",
+            "canonical_url",
+            "visible_anchor",
+            "nav_anchor",
+            "objective_candidate_anchor"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": ["unsupported_protocol", "unparseable_url", "localhost", "loopback_address", "link_local_address"]
+        }
+      }
+    },
+    "domainDiscoveryDiagnostics": {
+      "type": "object",
+      "description": "Diagnostics from the engine's deterministic preflight domain-discovery phase, which runs before the Claude-driven navigation loop and proposes an allowedDomains set so a caller need not enumerate every domain/subdomain a journey might use. See docs/architecture.md 'Preflight domain discovery' for the full conservative validation policy this reflects.",
+      "additionalProperties": false,
+      "required": ["version", "startHostname", "finalUrl", "redirectChain", "trustedDomains", "proposedAllowedDomains", "allowedDomainsUsed"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "const": "1.0.0"
+        },
+        "startHostname": {
+          "type": "string"
+        },
+        "startRegistrableDomain": {
+          "type": ["string", "null"],
+          "description": "Registrable (eTLD+1) domain of the start hostname, resolved via a maintained Public Suffix List-backed library. Null for hosts with no PSL-registrable domain (bare IPs, \"localhost\", or a hostname that is itself only a public suffix)."
+        },
+        "finalUrl": {
+          "type": "string",
+          "description": "URL the initial navigation actually landed on, after following any HTTP redirects from startUrl."
+        },
+        "redirectChain": {
+          "type": "array",
+          "description": "Ordered list of URLs visited following a redirect from startUrl through to finalUrl (inclusive of both ends).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "canonicalUrl": {
+          "type": "string",
+          "description": "The landed page's <link rel=\"canonical\"> URL, when present."
+        },
+        "trustedDomains": {
+          "type": "array",
+          "description": "Every hostname trusted for this run, and why -- the union of caller-supplied allowedDomains and everything preflight discovery proposed.",
+          "items": {
+            "$ref": "#/$defs/trustedDomainEntry"
+          }
+        },
+        "externalCandidates": {
+          "type": "array",
+          "description": "Hostnames discovered on a different registrable domain than the site being navigated, never auto-trusted.",
+          "items": {
+            "$ref": "#/$defs/externalDomainCandidate"
+          }
+        },
+        "rejectedCandidates": {
+          "type": "array",
+          "description": "URLs rejected outright during preflight discovery by the conservative candidate-validation policy.",
+          "items": {
+            "$ref": "#/$defs/rejectedDomainCandidate"
+          }
+        },
+        "proposedAllowedDomains": {
+          "type": "array",
+          "description": "Hostnames preflight discovery itself proposed (excludes hostnames the caller already supplied explicitly).",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowedDomainsUsed": {
+          "type": "array",
+          "description": "The final allowedDomains set actually enforced for this run: caller-supplied allowedDomains (if any) unioned with proposedAllowedDomains.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blockedReason": {
+          "type": "string",
+          "description": "Present only when preflight discovery itself blocked the run (e.g. the initial navigation redirected to an unsafe host)."
         }
       }
     }

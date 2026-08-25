@@ -208,6 +208,69 @@ export interface ReasoningProviderDiagnostics {
   decisions?: ReasoningProviderDecisionSummary[];
 }
 
+export type DomainTrustReason =
+  | "caller_supplied"
+  | "exact_start_host"
+  | "redirect_landing_host"
+  | "same_registrable_domain_subdomain";
+
+export type DomainCandidateEvidenceType =
+  | "redirect_landing_host"
+  | "canonical_url"
+  | "visible_anchor"
+  | "nav_anchor"
+  | "objective_candidate_anchor";
+
+export type DomainRejectionReason =
+  | "unsupported_protocol"
+  | "unparseable_url"
+  | "localhost"
+  | "loopback_address"
+  | "link_local_address";
+
+export interface TrustedDomainEntry {
+  hostname: string;
+  reason: DomainTrustReason;
+  evidenceType?: DomainCandidateEvidenceType;
+  sourceUrl?: string;
+}
+
+export interface ExternalDomainCandidate {
+  hostname: string;
+  registrableDomain: string | null;
+  evidenceType: DomainCandidateEvidenceType;
+  sourceUrl: string;
+  reason: string;
+}
+
+export interface RejectedDomainCandidate {
+  url: string;
+  evidenceType: DomainCandidateEvidenceType | "redirect_hop";
+  reason: DomainRejectionReason;
+}
+
+/**
+ * Versioned separately from TaskResponse.schemaVersion, same pattern as
+ * ReasoningProviderDiagnostics above. Reports the deterministic preflight domain-discovery
+ * phase's findings: what it trusted and why, what it saw but declined to trust, and what it
+ * rejected outright -- see docs/architecture.md "Preflight domain discovery" for the
+ * conservative validation policy this reflects.
+ */
+export interface DomainDiscoveryDiagnostics {
+  version: "1.0.0";
+  startHostname: string;
+  startRegistrableDomain?: string | null;
+  finalUrl: string;
+  redirectChain: string[];
+  canonicalUrl?: string;
+  trustedDomains: TrustedDomainEntry[];
+  externalCandidates?: ExternalDomainCandidate[];
+  rejectedCandidates?: RejectedDomainCandidate[];
+  proposedAllowedDomains: string[];
+  allowedDomainsUsed: string[];
+  blockedReason?: string;
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
@@ -215,10 +278,11 @@ export interface Diagnostics {
   finishReason: string;
   engineVersion?: string;
   reasoningProvider?: ReasoningProviderDiagnostics;
+  domainDiscovery?: DomainDiscoveryDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.1.0";
+  schemaVersion: "1.2.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

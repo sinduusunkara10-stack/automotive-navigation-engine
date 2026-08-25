@@ -64,6 +64,24 @@ export interface RobustGotoOutcome {
   status: "ok" | "recovered" | "failed";
   url: string;
   message?: string;
+  /**
+   * Ordered list of every URL visited following an HTTP redirect from the requested `url`
+   * through to the final landed URL (inclusive of both ends). Only populated on "ok" --
+   * Playwright's Response/Request chain isn't reliably available after a "recovered" timeout
+   * or a "failed" navigation, and preflight domain discovery (src/discovery) only needs this
+   * for a normal successful navigation.
+   */
+  redirectChain?: string[];
+}
+
+function buildRedirectChain(response: import("playwright").Response): string[] {
+  const chain: string[] = [];
+  let request: import("playwright").Request | null = response.request();
+  while (request) {
+    chain.unshift(request.url());
+    request = request.redirectedFrom();
+  }
+  return chain;
 }
 
 /**
@@ -84,9 +102,13 @@ export async function robustGoto(params: {
   const { page, url, allowedDomains, timeoutMs } = params;
 
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page.waitForTimeout(PAGE_SETTLE_DELAY_MS);
-    return { status: "ok", url: page.url() };
+    return {
+      status: "ok",
+      url: page.url(),
+      ...(response ? { redirectChain: buildRedirectChain(response) } : {}),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!/timeout/i.test(message)) {

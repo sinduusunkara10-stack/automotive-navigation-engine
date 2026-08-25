@@ -86,7 +86,7 @@ function successSteps(): StepLog[] {
 
 function successResult(overrides: Partial<TaskResponse> = {}): TaskResponse {
   return {
-    schemaVersion: "1.1.0",
+    schemaVersion: "1.2.0",
     taskId: "claude-full-local-journey",
     status: "success",
     startUrl: `${BASE_URL}/start.html`,
@@ -135,9 +135,9 @@ test("passes: three accepted decisions complete the full local journey", () => {
   assert.equal(result.ok, true, result.reason);
 });
 
-test("fails: schemaVersion is not 1.1.0", () => {
+test("fails: schemaVersion is not 1.2.0", () => {
   const result = evaluateFullJourneyAcceptance({
-    result: successResult({ schemaVersion: "1.0.0" as TaskResponse["schemaVersion"] }),
+    result: successResult({ schemaVersion: "1.1.0" as TaskResponse["schemaVersion"] }),
     decisionLog: successDecisionLog(),
     allowedActions: ALLOWED_ACTIONS,
     baseUrl: BASE_URL,
