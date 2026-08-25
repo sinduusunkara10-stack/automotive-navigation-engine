@@ -277,6 +277,13 @@ export interface Diagnostics {
   totalDurationMs: number;
   finishReason: string;
   engineVersion?: string;
+  /**
+   * Ids of required success criteria (successCriteria entries with required !== false)
+   * that were never satisfied by the time the run ended. Present only when non-empty --
+   * absent for a successful run (enforced empty by src/core/loop.ts before stop_success
+   * is honoured) and for any task with no required criteria at all.
+   */
+  missingRequiredCriteriaIds?: string[];
   reasoningProvider?: ReasoningProviderDiagnostics;
   domainDiscovery?: DomainDiscoveryDiagnostics;
 }

@@ -11,6 +11,7 @@ import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
+import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
@@ -259,14 +260,21 @@ function buildTerminalResponse(params: {
   const { task, state, captures, steps, status, finishReason, statusReason, finalUrl, reasoning, domainDiscovery } =
     params;
   const lastStep = steps[steps.length - 1];
-  const objectiveAchieved = status === "success";
+  // Independently verified, never derived from status alone: objectiveAchieved must
+  // reflect that every required success criterion (schema default: required) was
+  // actually satisfied, re-checked here against the run's own accumulated
+  // satisfiedCriteriaIds rather than trusted from the terminal status the loop reported.
+  const missingRequiredCriteriaIds = getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds);
+  const objectiveAchieved = status === "success" && missingRequiredCriteriaIds.length === 0;
 
   const engineAssessment: EngineAssessment = {
     objectiveAchieved,
     confidence: objectiveAchieved ? 1 : 0,
     summary: objectiveAchieved
       ? "The engine reached a step where all required success criteria were satisfied and selected stop_success."
-      : `The run ended with status "${status}" (${finishReason}).`,
+      : status === "success"
+        ? "The engine selected stop_success but independent verification found required success criteria still unsatisfied; the objective is not treated as achieved."
+        : `The run ended with status "${status}" (${finishReason}).`,
     ...(lastStep ? { satisfiedSuccessCriteriaIds: lastStep.progress.satisfiedCriteriaIds } : {}),
   };
 
@@ -291,6 +299,7 @@ function buildTerminalResponse(params: {
       totalDurationMs: Date.now() - state.startedAtMs,
       finishReason,
       engineVersion: ENGINE_VERSION,
+      ...(missingRequiredCriteriaIds.length > 0 ? { missingRequiredCriteriaIds } : {}),
       ...(reasoningProviderDiagnostics ? { reasoningProvider: reasoningProviderDiagnostics } : {}),
       ...(domainDiscoveryDiagnostics ? { domainDiscovery: domainDiscoveryDiagnostics } : {}),
     },

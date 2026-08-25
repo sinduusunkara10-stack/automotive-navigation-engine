@@ -28,6 +28,23 @@ export async function evaluateSuccessCriteria(
   return satisfied;
 }
 
+/**
+ * A criterion is required unless explicitly marked `required: false` -- matches the
+ * request schema's own `default: true` for successCriterion.required, which is never
+ * applied by ajv (no useDefaults) so callers omitting the field must be treated as
+ * required here explicitly. Returns the ids of every required criterion not present in
+ * satisfiedCriteriaIds; empty when every required criterion is satisfied, and always
+ * empty for a task where every criterion is explicitly optional.
+ */
+export function getMissingRequiredCriteriaIds(
+  criteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIds: ReadonlySet<string>,
+): string[] {
+  return criteria.filter((criterion) => criterion.required !== false && !satisfiedCriteriaIds.has(criterion.id)).map(
+    (criterion) => criterion.id,
+  );
+}
+
 async function evaluateSingle(page: Page, criterion: SuccessCriterion, objective: string): Promise<boolean> {
   switch (criterion.type) {
     case "url_pattern": {

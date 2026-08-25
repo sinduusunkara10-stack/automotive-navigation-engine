@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chromium, type Page } from "playwright";
 
-import { evaluateSuccessCriteria } from "../../src/core/successEvaluator.js";
+import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "../../src/core/successEvaluator.js";
+import { gatherSemanticPageSignals, scoreSemanticPageMatch } from "../../src/core/semanticPageMatch.js";
 import type { SuccessCriterion } from "../../src/types/task-request.js";
 
 /**
@@ -279,5 +280,111 @@ test("element_present: absent selector is correctly not satisfied", async () => 
     };
     const satisfied = await evaluateSuccessCriteria(page, [criterion], "objective");
     assert.ok(!satisfied.includes("success-marker-present"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// getMissingRequiredCriteriaIds: the gate src/core/loop.ts consults before honouring
+// stop_success. Pure logic, no page needed.
+// ---------------------------------------------------------------------------------------
+
+test("getMissingRequiredCriteriaIds: an omitted `required` defaults to required (matches the schema's declared default)", () => {
+  const criteria: SuccessCriterion[] = [{ id: "a", type: "url_pattern", description: "d" }];
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set()), ["a"]);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: multiple required criteria are each tracked independently", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d", required: true },
+    { id: "b", type: "element_present", description: "d", required: true },
+    { id: "c", type: "element_present", description: "d", required: true },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a"])), ["b", "c"]);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a", "b"])), ["c"]);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a", "b", "c"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: an unsatisfied optional criterion is never reported as missing", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "required-one", type: "url_pattern", description: "d", required: true },
+    { id: "optional-one", type: "element_present", description: "d", required: false },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["required-one"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: a task with no required criteria always returns empty, regardless of what's satisfied", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "optional-one", type: "url_pattern", description: "d", required: false },
+    { id: "optional-two", type: "element_present", description: "d", required: false },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set()), []);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["optional-one"])), []);
+});
+
+// ---------------------------------------------------------------------------------------
+// semantic_page_match: exact boundary behaviour of the minScore comparison (>=), since
+// the enforcement gate's correctness depends on satisfied/unsatisfied being decided
+// precisely at the configured threshold, not just "roughly around" it.
+// ---------------------------------------------------------------------------------------
+
+test("semantic_page_match: a score below minScore does not satisfy the criterion", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const html = page_(
+    "<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>",
+    "Configure Your Vehicle",
+  );
+  await withPage(html, async (page) => {
+    const signals = await gatherSemanticPageSignals(page);
+    const { overall } = scoreSemanticPageMatch(objective, signals, ["title", "headings", "interactiveElements"]);
+    const criterion: SuccessCriterion = {
+      id: "reached-configurator",
+      type: "semantic_page_match",
+      description: "",
+      config: { minScore: overall + 0.05 },
+    };
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective);
+    assert.ok(!satisfied.includes("reached-configurator"));
+  });
+});
+
+test("semantic_page_match: a score exactly at minScore satisfies the criterion (>= is inclusive)", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const html = page_(
+    "<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>",
+    "Configure Your Vehicle",
+  );
+  await withPage(html, async (page) => {
+    const signals = await gatherSemanticPageSignals(page);
+    const { overall } = scoreSemanticPageMatch(objective, signals, ["title", "headings", "interactiveElements"]);
+    assert.ok(overall > 0, "fixture must produce a nonzero score for this boundary test to be meaningful");
+    const criterion: SuccessCriterion = {
+      id: "reached-configurator",
+      type: "semantic_page_match",
+      description: "",
+      config: { minScore: overall },
+    };
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+});
+
+test("semantic_page_match: a score above minScore satisfies the criterion", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const html = page_(
+    "<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>",
+    "Configure Your Vehicle",
+  );
+  await withPage(html, async (page) => {
+    const signals = await gatherSemanticPageSignals(page);
+    const { overall } = scoreSemanticPageMatch(objective, signals, ["title", "headings", "interactiveElements"]);
+    const criterion: SuccessCriterion = {
+      id: "reached-configurator",
+      type: "semantic_page_match",
+      description: "",
+      config: { minScore: overall - 0.05 },
+    };
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective);
+    assert.ok(satisfied.includes("reached-configurator"));
   });
 });

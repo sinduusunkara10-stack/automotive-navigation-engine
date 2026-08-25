@@ -11,7 +11,7 @@ import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
-import { evaluateSuccessCriteria } from "./successEvaluator.js";
+import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "./successEvaluator.js";
 import type { RunState } from "./state.js";
 
 export type TerminalStatus =
@@ -213,6 +213,19 @@ export async function runStep(params: {
     state.satisfiedCriteriaIds.add(id),
   );
 
+  // A stop_success decision is only ever a *proposal* from the reasoning layer -- the
+  // engine is the sole authority on whether the objective was actually reached. Every
+  // criterion with required: true (the schema default) must be present in
+  // satisfiedCriteriaIds before stop_success is honoured; optional criteria remain
+  // supporting evidence only and never gate this check. A task with no required
+  // criteria (every entry explicitly required: false) always yields an empty list here,
+  // so stop_success is accepted unconditionally -- identical to pre-enforcement behaviour.
+  const missingRequiredCriteriaIds =
+    effectiveAction.type === "stop_success"
+      ? getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds)
+      : [];
+  const stopSuccessRejected = missingRequiredCriteriaIds.length > 0;
+
   const stepLog = buildStepLog({
     stepIndex,
     observation,
@@ -220,12 +233,18 @@ export async function runStep(params: {
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
-    safetyFlags: safetyResult.flags,
+    safetyFlags: stopSuccessRejected ? [...safetyResult.flags, "required_criteria_unsatisfied"] : safetyResult.flags,
   });
   recordJourneyPathEntry(captures, task.captureModules, stepLog);
 
   if (effectiveAction.type === "stop_success") {
-    return { stepLog, terminal: "success", finishReason: "stop_success_action" };
+    if (!stopSuccessRejected) {
+      return { stepLog, terminal: "success", finishReason: "stop_success_action" };
+    }
+    // Rejected: fall through without setting `terminal` so the loop keeps running --
+    // checkLimitsBreach (top of the next runStep call) remains the hard ceiling that
+    // stops the run if the reasoning layer never satisfies the remaining criteria.
+    return { stepLog };
   }
   if (effectiveAction.type === "stop_blocked") {
     return { stepLog, terminal: "blocked", finishReason: safetyResult.flags[0] ?? "stop_blocked_action" };

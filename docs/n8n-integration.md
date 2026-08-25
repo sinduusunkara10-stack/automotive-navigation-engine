@@ -273,22 +273,37 @@ evaluation stays deterministic and cheap to run every step. Concretely:
   `README.md`) — an untrusted domain is still blocked before any criterion, including this one,
   ever runs (`tests/integration/semanticSuccessCriteria.test.ts`).
 
-**How `required` (and `successCriteria` generally) actually gates `stop_success` today** — this
-is unchanged by `semantic_page_match`, but is worth stating precisely since it's easy to
-assume otherwise: `required: true`/`false` on a criterion is **advisory only**. It's threaded
-into the reasoning layer's prompt (`src/reasoning/promptBuilder.ts`) so Claude (or the mock
-provider) knows which criteria it should treat as gating a `stop_success` decision, and
-`MockReasoningProvider` uses it to decide when to stop. But nothing in the safety layer
-(`src/safety/index.ts` `validateDecision`) or the core loop re-checks `satisfiedCriteriaIds`
-against `required` criteria before allowing a `stop_success` action through — a reasoning
-decision to stop is only ever rejected for being outside `allowedActions`, a disallowed
-domain, a repeated/looping action, or a limit breach. `TaskResponse.engineAssessment
-.objectiveAchieved` is simply `status === "success"`, i.e. whichever criteria the selected
-reasoning provider chose to honor when it picked `stop_success` — not a re-verification against
-every `required` criterion. This is a pre-existing engine behaviour, not something this change
-introduces or fixes; `satisfiedSuccessCriteriaIds` on the final step/response is still the
-authoritative record of exactly which criteria were actually satisfied when the run ended, and
-is the field n8n should branch on for a strict pass/fail signal rather than `status` alone.
+**How `required` (and `successCriteria` generally) actually gates `stop_success`.**
+`required: true`/`false` on a criterion is threaded into the reasoning layer's prompt
+(`src/reasoning/promptBuilder.ts`) so Claude (or the mock provider) knows which criteria it
+should treat as gating a `stop_success` decision — but that's only ever a *proposal*. The core
+loop (`src/core/loop.ts`) is the sole authority: before a `stop_success` decision is honoured,
+it independently re-checks `satisfiedCriteriaIds` against every criterion with
+`required !== false` (the schema default is `true`, so an omitted `required` is required). If
+any required criterion is still missing, `stop_success` is **rejected** — the run is not
+terminated, the step is logged with `safetyFlags: ["required_criteria_unsatisfied"]`, and the
+navigation loop continues under the same `maxSteps`/`maxBacktracks`/repeated-action ceilings as
+any other step, exactly as if the reasoning layer had picked a different action. A task with no
+required criteria at all (every entry explicitly `required: false`) is unaffected: there is
+nothing to gate on, so `stop_success` is accepted the moment the reasoning layer selects it,
+identical to the engine's behaviour before this check existed.
+
+`TaskResponse.engineAssessment.objectiveAchieved` is now independently verified rather than
+derived from `status` alone: it is `true` only when `status === "success"` **and** every
+required criterion is present in the run's accumulated `satisfiedCriteriaIds` — which, given the
+loop-level gate above, is guaranteed for every run that actually reaches `status: "success"`.
+When a run ends any other way with required criteria still outstanding,
+`TaskResponse.diagnostics.missingRequiredCriteriaIds` lists exactly which required criterion ids
+were never satisfied. `satisfiedSuccessCriteriaIds` remains available on the final
+step/response for callers who want the full positive evidence list (including satisfied
+*optional* criteria), but n8n can now branch directly on `engineAssessment.objectiveAchieved`
+for a strict pass/fail signal instead of cross-checking `satisfiedSuccessCriteriaIds` itself —
+no change to the n8n Extract/parse node's field paths is required (`status`,
+`engineAssessment.objectiveAchieved`, and `satisfiedSuccessCriteriaIds` all keep their existing
+shapes and meaning), but a workflow that was working around the old advisory-only behaviour by
+re-deriving pass/fail from `satisfiedSuccessCriteriaIds` itself can now simplify to read
+`engineAssessment.objectiveAchieved` directly, and may optionally surface
+`diagnostics.missingRequiredCriteriaIds` for a failed run's operator-facing message.
 
 ## 10. taskId, and brand/market/language as reporting metadata only
 

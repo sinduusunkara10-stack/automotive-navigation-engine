@@ -251,7 +251,7 @@
         },
         "safetyFlags": {
           "type": "array",
-          "description": "Any guardrails that were evaluated and triggered on this step (e.g. domain_blocked, loop_detected, repeated_action, form_submission_blocked).",
+          "description": "Any guardrails that were evaluated and triggered on this step (e.g. domain_blocked, loop_detected, repeated_action, form_submission_blocked, required_criteria_unsatisfied).",
           "items": {
             "type": "string"
           }
@@ -787,6 +787,13 @@
         "engineVersion": {
           "type": "string",
           "description": "Version of the navigation engine build that produced this response."
+        },
+        "missingRequiredCriteriaIds": {
+          "type": "array",
+          "description": "Ids of successCriteria entries with required !== false that were never satisfied by the time the run ended (e.g. a stop_success decision was rejected because required evidence was still missing, or the run stopped for another reason first). Present only when non-empty -- absent for a successful run, since the engine only honours stop_success once every required criterion is satisfied, and absent for any task with no required criteria at all.",
+          "items": {
+            "type": "string"
+          }
         },
         "reasoningProvider": {
           "$ref": "#/$defs/reasoningProviderDiagnostics"
