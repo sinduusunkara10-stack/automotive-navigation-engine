@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import type { TaskRequest } from "../types/task-request.js";
+import type { ResolvedTaskRequest } from "../types/task-request.js";
 import type { Captures, ErrorCategory, Observation, StepLog } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
@@ -30,7 +30,7 @@ export interface LoopStepOutcome {
 
 export async function runStep(params: {
   page: Page;
-  task: TaskRequest;
+  task: ResolvedTaskRequest;
   state: RunState;
   captures: Captures;
   reasoning: ReasoningProvider;
@@ -277,7 +277,7 @@ function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModul
  * -- when the first decision's click target turns out to be stale (see runStep above).
  */
 async function obtainDecision(params: {
-  task: TaskRequest;
+  task: ResolvedTaskRequest;
   state: RunState;
   observation: Observation;
   reasoning: ReasoningProvider;

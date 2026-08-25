@@ -14,7 +14,7 @@ import type { TaskRequest } from "../../src/types/task-request.js";
  */
 export function buildFullJourneyTask(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.0.0",
+    schemaVersion: "1.1.0",
     taskId: "claude-full-local-journey",
     objective:
       "Reach the fixture's success page by following the visible continue control on each page.",
@@ -31,6 +31,6 @@ export function buildFullJourneyTask(baseUrl: string): TaskRequest {
     captureModules: [],
     limits: { maxSteps: 3, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.1.0",
+    outputSchemaVersion: "1.2.0",
   };
 }

@@ -41,7 +41,8 @@ examples/
 ```
 
 `/src` contains a v1 scaffold: the core navigation loop, action executors, observation builder,
-safety guards, and a set of capture modules (`page_visits`, `page_metadata`,
+safety guards, a deterministic **preflight domain-discovery phase** (see "Preflight domain
+discovery" below), and a set of capture modules (`page_visits`, `page_metadata`,
 `data_layer_evidence`, `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`,
 `journey_path`, `errors`), driven by a pluggable reasoning provider: the deterministic
 **mock** provider by default, or the real **Claude-backed** provider opt-in via
@@ -348,6 +349,31 @@ Task-specific extraction (dataLayer evidence, GA4 network events, CTA/offer capt
 screenshots) happens in pluggable **capture modules**, kept separate from this core loop. See
 `docs/architecture.md` for the full design.
 
+## Preflight domain discovery
+
+Before that loop starts, a deterministic **preflight phase** (`src/discovery`) runs once: it
+performs the engine's initial navigation to `startUrl`, then proposes an `allowedDomains` set
+from what it observes there — so a caller need only supply `startUrl`, `objective`, and
+optionally `journeyType`. `allowedDomains` in the task request is now **optional**; when
+present, it's still trusted unconditionally, on top of what preflight discovers. See
+`examples/minimal-preflight-discovery-task.json` for a task that supplies only those three
+fields.
+
+Preflight automatically trusts the exact `startUrl` hostname, the hostname an HTTP redirect
+from `startUrl` actually lands on, and any hostname sharing a **Public Suffix List
+registrable domain** (via the `tldts` library — never string-splitting) with either of those,
+discovered through the canonical URL or on-page links. A hostname on a *different*
+registrable domain is never auto-trusted just because it appears in a link — it's surfaced as
+an `externalCandidates` entry for review instead. Non-http/https protocols, `localhost`,
+loopback addresses, and link-local addresses are always rejected as discovered candidates
+(the caller's own explicit `startUrl` is the one exemption from the last three, since a
+caller may deliberately target a local/dev host). See `docs/architecture.md` §12 for the full
+policy and rationale.
+
+Every run reports what preflight found at `TaskResponse.diagnostics.domainDiscovery`
+(`schemaVersion` `1.2.0`): `trustedDomains`, `externalCandidates`, `rejectedCandidates`,
+`proposedAllowedDomains`, and the final `allowedDomainsUsed` for the run.
+
 ## Local HTTP API
 
 `src/api` exposes a minimal, authenticated HTTP boundary around the engine described above,
@@ -427,7 +453,7 @@ Sample response (`GET /v1/tasks/:runId` once complete):
   "taskId": "example-run-0001",
   "status": "completed",
   "result": {
-    "schemaVersion": "1.1.0",
+    "schemaVersion": "1.2.0",
     "taskId": "example-run-0001",
     "status": "success",
     "startUrl": "http://127.0.0.1:4173/start.html",
@@ -524,8 +550,12 @@ cloud-vendor-specific deployment files (see `docs/v1-scope.md`).
 - [`examples/competitor-offers-task.json`](examples/competitor-offers-task.json) — navigate a
   competitor offers page and capture offer text, model, displayed price, visible validity
   information, and evidence screenshots.
+- [`examples/minimal-preflight-discovery-task.json`](examples/minimal-preflight-discovery-task.json)
+  — the same configurator journey as above, but supplying only `startUrl`, `objective`, and
+  `journeyType`; preflight domain discovery (see above) determines `allowedDomains` on its own.
 
-Both validate against [`schemas/task-request.schema.json`](schemas/task-request.schema.json).
+All three validate against
+[`schemas/task-request.schema.json`](schemas/task-request.schema.json).
 
 ## Contributing / extending
 

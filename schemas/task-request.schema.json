@@ -10,7 +10,6 @@
     "taskId",
     "objective",
     "startUrl",
-    "allowedDomains",
     "successCriteria",
     "captureModules",
     "limits",
@@ -20,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-request contract, e.g. \"1.0.0\". Must be validated by the engine before use.",
+      "description": "Version of this task-request contract, e.g. \"1.1.0\". Must be validated by the engine before use. Bumped from \"1.0.0\" to \"1.1.0\" because allowedDomains is no longer required (see its own description) and the optional journeyType field was added -- both additive/loosening changes, but per this repo's versioning convention every request-contract change bumps this const.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "taskId": {
       "type": "string",
@@ -43,13 +42,19 @@
     },
     "allowedDomains": {
       "type": "array",
-      "description": "Allow-list of hostnames (or hostname patterns) the engine may navigate to. Any navigation attempt outside this list must be blocked by the safety layer.",
+      "description": "Optional allow-list of hostnames (or hostname patterns) the engine may navigate to, in addition to whatever the engine's own preflight domain-discovery phase proposes (see docs/architecture.md 'Preflight domain discovery'). A caller is never required to enumerate every domain/subdomain a journey might use -- when omitted, the engine determines an initial trusted set on its own: the exact startUrl hostname and any hostname sharing its Public Suffix List registrable domain that preflight discovers via redirects, the canonical URL, or on-page links. When present, every listed hostname is trusted unconditionally, on top of that discovery. Any navigation attempt outside the resulting combined set is blocked by the safety layer.",
       "items": {
         "type": "string",
         "minLength": 1
       },
       "minItems": 1,
       "uniqueItems": true
+    },
+    "journeyType": {
+      "type": "string",
+      "description": "Optional free-text hint about the kind of journey this task represents (e.g. \"lead-generation-funnel\", \"pricing-comparison\"). Purely advisory: blended into the same generic objective-relevance text-matching preflight domain discovery uses to rank candidate links, and otherwise not parsed for control flow or any domain-specific branching -- the engine must never special-case a specific journeyType value.",
+      "minLength": 1,
+      "maxLength": 200
     },
     "successCriteria": {
       "type": "array",
@@ -82,9 +87,9 @@
     },
     "outputSchemaVersion": {
       "type": "string",
-      "description": "Version of the task-response contract the caller expects back, e.g. \"1.1.0\". Bumped alongside task-response.schema.json's schemaVersion for the additive diagnostics.reasoningProvider structure.",
+      "description": "Version of the task-response contract the caller expects back, e.g. \"1.2.0\". Bumped alongside task-response.schema.json's schemaVersion for the additive diagnostics.domainDiscovery structure.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "metadata": {
       "type": "object",

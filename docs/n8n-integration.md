@@ -150,6 +150,16 @@ field was removed or renamed, and `diagnostics.reasoningProvider` is itself inde
 versioned (see README "Reasoning provider usage diagnostics") so it can evolve again without
 necessarily forcing another top-level `schemaVersion` bump.
 
+**Example (already applied, again):** adding preflight domain discovery (see
+`docs/architecture.md` "Preflight domain discovery") made the request's `allowedDomains` field
+optional and added an optional `journeyType` field, bumping the request contract's own
+`schemaVersion` from `"1.0.0"` to `"1.1.0"`. The additive `diagnostics.domainDiscovery`
+structure on the response bumped the response contract's `schemaVersion` and the request's
+`outputSchemaVersion` from `"1.1.0"` to `"1.2.0"`, the same way as the reasoningProvider example
+above. An n8n workflow that already sends an explicit `allowedDomains` list keeps working
+unchanged (it is still honored, unioned with whatever preflight discovery itself proposes) —
+only the version strings themselves need updating.
+
 ## 8. Task store and instance limitations
 
 Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:

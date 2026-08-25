@@ -23,6 +23,7 @@ The engine is split into two halves that must never blur:
 | Layer | Knows about | Does not know about |
 |---|---|---|
 | **Core loop** (`src/core`, `src/actions`, `src/observation`, `src/reasoning`, `src/safety`) | Generic navigation state, the fixed action vocabulary, success-criteria evaluation, guardrails | Automotive, GA4, dataLayer, Peugeot/Stellantis, offers, configurators |
+| **Preflight domain discovery** (`src/discovery`) | Generic URL/hostname safety, Public Suffix List registrable-domain matching, redirect/canonical/anchor signal gathering, objective-text overlap scoring | Automotive, GA4, dataLayer, or any brand/site-specific concept -- see §12 |
 | **Capture modules** (`src/capture-modules`) | How to pull a specific kind of evidence off a page (dataLayer contents, GA4 network calls, offer text) | Navigation strategy, when to stop, how to decide the next action |
 
 A new use case (e.g. "capture cookie-consent banners" or "capture stock availability") should
@@ -30,8 +31,14 @@ be addable as a new capture module and a new task JSON, **without touching the c
 
 ## 3. The navigate → observe → decide → act → check-success loop
 
+Before this loop ever starts, a deterministic **preflight domain-discovery phase** runs once
+(see §12): it performs the engine's initial navigation to `startUrl`, and from that navigation
+(and only that navigation -- never a live browser, never the reasoning layer) proposes the
+`allowedDomains` set the rest of the run enforces. A caller is never required to enumerate
+every domain/subdomain a journey might use.
+
 1. **navigate** — Playwright ensures the browser is at the URL the previous action produced
-   (or the task's `startUrl` on step 0).
+   (or the task's `startUrl` on step 0, already reached by preflight discovery).
 2. **observe** — the engine builds a *compact structured observation* of the current page
    (see §5). Raw HTML is never sent to the reasoning layer.
 3. **decide** — the observation, the objective, the success criteria, and the recent step
@@ -215,7 +222,10 @@ selection an application concern, not a core-loop one.
 `src/safety` enforces, independent of what the reasoning layer decides:
 
 - **allowed-domain enforcement** — any `navigate`/redirect target is checked against
-  `allowedDomains`; violations force `stop_blocked`
+  `allowedDomains`; violations force `stop_blocked`. `allowedDomains` itself is the union of
+  whatever the task JSON declared (now optional -- see §12) and whatever preflight domain
+  discovery proposed; `src/safety` enforces that combined set the same way regardless of
+  where each entry came from
 - **maxSteps / maxBacktracks / maxDurationSeconds** — hard ceilings from the task JSON
 - **repeated-action detection** — the same (action type, target) pair repeating beyond
   `maxRepeatedActions` forces a stop rather than spinning
@@ -335,6 +345,15 @@ as not-yet-built rather than removed from the plan — see §11.
   /observation            # compact structured page observation, no raw HTML
     observationBuilder.ts
 
+  /discovery               # deterministic preflight domain discovery (see §12), runs once
+                            # before the Claude-driven loop starts -- no reasoning-layer call
+    registrableDomain.ts    # PSL-backed eTLD+1 lookup (tldts), never string-splitting
+    hostSafety.ts            # protocol/localhost/loopback/link-local URL safety checks
+    relevance.ts              # generic objective-text overlap scoring for candidate links
+    pageSignals.ts             # Playwright: canonical URL + candidate anchors off the live DOM
+    domainDiscovery.ts          # pure computeDomainDiscovery() + runDomainDiscovery() orchestrator
+    index.ts                     # barrel export
+
   /reasoning               # pluggable decision-provider boundary
     reasoningProvider.ts    # ReasoningProvider interface
     mockReasoningProvider.ts # deterministic stand-in; default provider, no Claude API call
@@ -398,8 +417,8 @@ as not-yet-built rather than removed from the plan — see §11.
 
 Key intent behind this layout:
 
-- `core`, `actions`, `observation`, `reasoning`, and `safety` contain **zero** references to
-  automotive/GA4/brand concepts.
+- `core`, `actions`, `observation`, `reasoning`, `safety`, and `discovery` contain **zero**
+  references to automotive/GA4/brand concepts.
 - `capture-modules` is the only directory allowed to know what a "dataLayer event" or an
   "offer card" is, and even there each module only knows its own concern. `page_visits`,
   `page_metadata`, `data_layer_evidence`, `ga4_network_events`, `screenshots`,
@@ -428,7 +447,7 @@ website. See `docs/v1-scope.md` for the full scope boundary. Deliberately not bu
   applies at query time; the engine deliberately never hardcodes a per-token price.
 - Using `TaskRequest.outputSchemaVersion` to change what shape of response the engine returns —
   it is validated at intake but the engine always returns the current `TaskResponse.schemaVersion`
-  ("1.1.0") regardless of what a caller declares it expects; version-negotiated response shapes
+  ("1.2.0") regardless of what a caller declares it expects; version-negotiated response shapes
   are not built.
 - Capture modules beyond `page_visits`, `page_metadata`, `data_layer_evidence`,
   `ga4_network_events`, `screenshots`, `finish_page_ctas`, `cta_clicks`, `journey_path`, and
@@ -438,3 +457,100 @@ website. See `docs/v1-scope.md` for the full scope boundary. Deliberately not bu
 - A `/prompts` directory — the Claude prompt lives in `src/reasoning/promptBuilder.ts` and is
   covered by `tests/unit/promptBuilder.test.ts`, but is not yet split into a separately
   versioned `/prompts` asset.
+
+## 12. Preflight domain discovery
+
+A caller submitting a task should never be required to already know every domain and
+subdomain a journey might touch (e.g. that a configurator lives on a separate
+`configurator.` subdomain from the marketing site's `www.`). `src/discovery` implements a
+**deterministic preflight phase** that runs once, before the Claude-driven navigate → observe
+→ decide → act loop ever starts, and produces the `allowedDomains` set the rest of the run
+enforces. Nothing in this phase calls the reasoning layer, and nothing in it is
+automotive/GA4/brand-specific — see §2's layer table.
+
+### What preflight does
+
+1. **Validates `startUrl` with the standard URL parser** (`new URL(...)`, never string
+   splitting or a regex). A non-http/https protocol, or a URL that doesn't parse at all, is
+   rejected before any navigation is attempted (`src/discovery/hostSafety.ts`,
+   `assessUrlSafety`).
+2. **Performs the engine's one-off initial navigation** to `startUrl` (via
+   `src/core/initialNavigation.ts`, reusing the existing domcontentloaded-first
+   goto + timeout-recovery logic), capturing the actual HTTP **redirect chain**
+   Playwright observed (`src/core/robustNavigation.ts`'s `RobustGotoOutcome.redirectChain`,
+   built from the navigation `Response`'s `request().redirectedFrom()` chain).
+3. **Determines the registrable domain** (eTLD+1) of the start hostname and the redirect
+   landing hostname via `tldts`, a maintained Node.js library backed by the Public Suffix
+   List — never derived by splitting or regexing the last two hostname labels (which breaks
+   on multi-label public suffixes like `co.uk` or `github.io`). See
+   `src/discovery/registrableDomain.ts`.
+4. **Inspects the landed page** (`src/discovery/pageSignals.ts`) for:
+   - its `<link rel="canonical">` URL, when present;
+   - **visible actionable anchors** (any `<a href>` that is actually rendered, same
+     visibility test the observation builder uses);
+   - **relevant navigation anchors** — anchors inside a generic semantic landmark (`<nav>`,
+     `[role="navigation"]`, `<header>`, `<footer>`), never a brand-specific selector;
+   - **candidates likely to help achieve the objective** — anchors whose visible/accessible
+     text shares words with the task's `objective` (and optional `journeyType` hint), via a
+     generic token-overlap score (`src/discovery/relevance.ts`) with no automotive/CTA
+     vocabulary baked in.
+5. **Produces a proposed `allowedDomains` list** (`computeDomainDiscovery` in
+   `src/discovery/domainDiscovery.ts`) *before* the main navigation task begins, per the
+   conservative validation policy below. `src/core/engine.ts` unions this with whatever
+   `allowedDomains` the caller explicitly supplied (if any) into the final set the safety
+   layer (§7) enforces for the whole run, and reports the full picture at
+   `TaskResponse.diagnostics.domainDiscovery` (`schemas/task-response.schema.json`
+   `$defs/domainDiscoveryDiagnostics`).
+
+### Conservative candidate-validation policy
+
+**Automatically trusted**, no caller/operator review needed:
+
+- the **exact `startUrl` hostname** — the caller's own explicit choice;
+- the **redirect-landing hostname**, when it differs from the start hostname — a direct,
+  server-controlled consequence of navigating to the caller-approved `startUrl`, not page
+  content a third party could plant;
+- any hostname — found via the redirect landing, the canonical URL, or any anchor — that
+  shares a **PSL registrable domain** with the start host or the landing host (a
+  same-organization subdomain, e.g. discovering `configurator.example.com` from
+  `www.example.com`).
+
+**Never automatically trusted:** a hostname on a *different* registrable domain, however it
+was discovered — a canonical tag, a nav-landmark link, or even a link whose text closely
+matches the objective. A page's own content (including its `<link rel="canonical">`) is not
+proof that the site owner intends the engine to navigate there; it is surfaced as an
+`externalCandidates` entry, with the evidence that produced it, so a caller/operator can
+review it and add it to the task's `allowedDomains` explicitly if the run is meant to cross
+into it. **A candidate external registrable domain is never trusted merely because it
+appears in a link.**
+
+**Always rejected as a candidate**, regardless of source (redirect, canonical, anchor):
+
+- any protocol other than `http`/`https` (`mailto:`, `tel:`, `javascript:`, `data:`, `ftp:`,
+  ...);
+- `localhost` (and any `.localhost` host);
+- loopback addresses (`127.0.0.0/8`, `::1`);
+- link-local addresses (`169.254.0.0/16`, `fe80::/10`).
+
+The one exemption from the last three checks is the caller's own explicit `startUrl` host
+(`hostSafety.ts`'s `allowLoopbackAndLinkLocal` option) — a caller may deliberately point the
+engine at a local/dev target (this repo's own fixtures run on `127.0.0.1`), and that is the
+caller's choice to make. Every host *discovered* during preflight — a redirect landing on a
+different host, a canonical URL, a page anchor — is always assessed with that exemption left
+off, precisely so a page cannot smuggle in trust for an internal/loopback target (e.g. a
+cloud metadata endpoint) just by linking to it. If the redirect landing host itself (or an
+intermediate redirect hop) fails this check, preflight blocks the run outright
+(`DomainDiscoveryResult.blockedReason`) rather than proceeding with an unsafe navigation.
+
+### What the caller sees
+
+`TaskRequest.allowedDomains` is now **optional** (schema `1.1.0`; previously required with
+`minItems: 1`). When present, every listed hostname is still trusted unconditionally, on top
+of whatever preflight discovers. `TaskRequest.journeyType` is a new optional free-text field,
+purely advisory — blended into the same objective-relevance scoring, never parsed for
+domain-specific control flow. `TaskResponse.diagnostics.domainDiscovery` (schema `1.2.0`)
+reports `trustedDomains` (hostname + reason + evidence), `externalCandidates` (never
+auto-trusted, with the evidence and reason why), `rejectedCandidates` (what was rejected and
+why), `proposedAllowedDomains` (what preflight itself added), and `allowedDomainsUsed` (the
+final enforced set) — see `examples/minimal-preflight-discovery-task.json` for a task that
+supplies only `startUrl`, `objective`, and `journeyType`.
