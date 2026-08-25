@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-request contract, e.g. \"1.1.0\". Must be validated by the engine before use. Bumped from \"1.0.0\" to \"1.1.0\" because allowedDomains is no longer required (see its own description) and the optional journeyType field was added -- both additive/loosening changes, but per this repo's versioning convention every request-contract change bumps this const.",
+      "description": "Version of this task-request contract, e.g. \"1.2.0\". Must be validated by the engine before use. Bumped from \"1.1.0\" to \"1.2.0\" because successCriterion.type gained the additive \"semantic_page_match\" value (see $defs/successCriterion) -- a generic, brand/language-agnostic success signal based on objective-vocabulary overlap with the live page's title/headings/interactive-element text, letting a caller recognise a destination state without supplying a URL pattern or CSS selector. Purely additive (no existing successCriteria.type, config shape, or other field changed), but per this repo's versioning convention every request-contract change bumps this const. Bumped from \"1.0.0\" to \"1.1.0\" earlier because allowedDomains is no longer required (see its own description) and the optional journeyType field was added.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "taskId": {
       "type": "string",
@@ -125,6 +125,7 @@
             "url_pattern",
             "element_present",
             "element_text_match",
+            "semantic_page_match",
             "data_layer_event",
             "network_event",
             "custom"
@@ -133,11 +134,11 @@
         "description": {
           "type": "string",
           "minLength": 1,
-          "description": "Human-readable explanation of what this criterion checks, also usable by the reasoning layer."
+          "description": "Human-readable explanation of what this criterion checks, also usable by the reasoning layer. For semantic_page_match, this text is also blended into the vocabulary the criterion matches against the page (alongside the task's objective) -- keep it a plain description of the target state, not a selector or URL."
         },
         "config": {
           "type": "object",
-          "description": "Type-specific parameters (e.g. { \"pattern\": \"**/summary\" } for url_pattern, { \"selector\": \"...\" } for element_present). Left open to keep new criterion types additive.",
+          "description": "Type-specific parameters (e.g. { \"pattern\": \"**/summary\" } for url_pattern, { \"selector\": \"...\" } for element_present, { \"minScore\": 0.4, \"signals\": [\"title\",\"headings\",\"interactiveElements\"] } for semantic_page_match, both optional -- see docs/n8n-integration.md \"Generic success criteria\"). Left open to keep new criterion types additive.",
           "additionalProperties": true
         },
         "required": {

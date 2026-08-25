@@ -74,7 +74,7 @@ async function startHangingServer(): Promise<{ baseUrl: string; close: () => Pro
 
 function buildTask(params: { startUrl: string; successUrl: string; captureModules?: TaskRequest["captureModules"] }): TaskRequest {
   return {
-    schemaVersion: "1.1.0",
+    schemaVersion: "1.2.0",
     taskId: "initial-navigation-robustness",
     objective: "Reach the fixture's done page by following the visible continue control.",
     startUrl: params.startUrl,

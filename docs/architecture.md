@@ -49,6 +49,11 @@ every domain/subdomain a journey might use.
    executes it deterministically.
 5. **check success** — success criteria from the task JSON are re-evaluated against the new
    page state; active capture modules run if the step warrants a capture; progress is logged.
+   `src/core/successEvaluator.ts` implements `url_pattern`, `element_present`, and the generic,
+   selector/URL-free `semantic_page_match` (objective-vocabulary overlap against page
+   title/headings/interactive-element text, via `src/core/semanticPageMatch.ts`); see
+   `docs/n8n-integration.md` §9 for the full evaluation model and why the other two enum
+   values require destination-specific knowledge a caller may not have in advance.
 6. **repeat** until a `stop_*` action is chosen, a limit is hit, or an unrecoverable error
    occurs.
 
@@ -321,6 +326,8 @@ as not-yet-built rather than removed from the plan — see §11.
     loop.ts               # navigate -> observe -> decide -> act -> check-success iteration
     state.ts              # run state: step count, backtrack count, visited-state history
     successEvaluator.ts    # evaluates successCriteria against the live page
+    semanticPageMatch.ts    # generic objective-vocabulary-overlap scoring for the
+                            # semantic_page_match criterion type, used only by successEvaluator.ts
     initialNavigation.ts   # the engine's one-off first page.goto(), via robustNavigation.ts
     robustNavigation.ts    # shared domcontentloaded-first goto + timeout-recovery logic,
                             # used by initialNavigation.ts and by src/actions/navigate.ts

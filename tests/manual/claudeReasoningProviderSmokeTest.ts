@@ -63,7 +63,7 @@ async function main(): Promise<void> {
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.1.0",
+      schemaVersion: "1.2.0",
       taskId: "claude-provider-smoke-test",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,

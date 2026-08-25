@@ -50,7 +50,9 @@ export async function runStep(params: {
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), dataLayerEntry];
   }
 
-  (await evaluateSuccessCriteria(page, task.successCriteria)).forEach((id) => state.satisfiedCriteriaIds.add(id));
+  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective)).forEach((id) =>
+    state.satisfiedCriteriaIds.add(id),
+  );
 
   const limitsBreach = checkLimitsBreach(
     {
@@ -207,7 +209,9 @@ export async function runStep(params: {
   }
 
   state.recordAction(effectiveAction);
-  (await evaluateSuccessCriteria(page, task.successCriteria)).forEach((id) => state.satisfiedCriteriaIds.add(id));
+  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective)).forEach((id) =>
+    state.satisfiedCriteriaIds.add(id),
+  );
 
   const stepLog = buildStepLog({
     stepIndex,

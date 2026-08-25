@@ -1,17 +1,14 @@
 {
-  "schemaVersion": "1.1.0",
-  "taskId": "example-minimal-preflight-discovery-0001",
-  "objective": "Starting from the homepage, find and enter the vehicle configurator and proceed through the configuration steps to a finish or summary state.",
+  "schemaVersion": "1.2.0",
+  "taskId": "example-automotive-oem-com-configurator_entry-20260825T120000Z",
+  "objective": "Navigate to the official consumer vehicle configurator and stop when vehicle selection or configuration controls are available.",
   "startUrl": "https://www.example-automotive-oem.com/",
-  "journeyType": "configurator-journey",
+  "journeyType": "configurator_entry",
   "successCriteria": [
     {
-      "id": "reached-finish-state",
-      "type": "element_present",
-      "description": "The configurator has reached a finish/summary screen showing the completed build.",
-      "config": {
-        "selector": "[data-testid=\"configurator-summary\"]"
-      },
+      "id": "objective-state-reached",
+      "type": "semantic_page_match",
+      "description": "Vehicle selection or configuration controls are available on the page.",
       "required": true
     }
   ],
