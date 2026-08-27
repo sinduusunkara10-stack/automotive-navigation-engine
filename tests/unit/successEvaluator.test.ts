@@ -4,6 +4,11 @@ import { chromium, type Page } from "playwright";
 
 import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "../../src/core/successEvaluator.js";
 import { gatherSemanticPageSignals, scoreSemanticPageMatch } from "../../src/core/semanticPageMatch.js";
+import type {
+  SemanticCriterionVerifier,
+  SemanticVerificationInput,
+  SemanticVerificationOutcome,
+} from "../../src/reasoning/semanticCriterionVerifier.js";
 import type { SuccessCriterion } from "../../src/types/task-request.js";
 
 /**
@@ -386,5 +391,187 @@ test("semantic_page_match: a score above minScore satisfies the criterion", asyn
     };
     const satisfied = await evaluateSuccessCriteria(page, [criterion], objective);
     assert.ok(satisfied.includes("reached-configurator"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Optional semanticVerifier escalation: evaluateSuccessCriteria/evaluateSemanticPageMatch
+// only ever consult a supplied verifier as a *fallback*, and only for semantic_page_match,
+// and only when the deterministic lexical score already fell short of minScore. This is
+// what fixes the cross-language defect while keeping every other path (including
+// same-language semantic_page_match, url_pattern, element_present) byte-for-byte
+// unchanged when no verifier is supplied -- see the language-in-common tests above, which
+// remain accurate documentation of the deterministic-only evaluator with no verifier.
+// ---------------------------------------------------------------------------------------
+
+function fakeVerifier(
+  handler: (input: SemanticVerificationInput) => SemanticVerificationOutcome,
+): SemanticCriterionVerifier & { calls: SemanticVerificationInput[] } {
+  const calls: SemanticVerificationInput[] = [];
+  return {
+    calls,
+    async verify(input) {
+      calls.push(input);
+      return handler(input);
+    },
+  };
+}
+
+test("semanticVerifier is never consulted once the deterministic lexical score already clears minScore", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_(
+    "<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>" +
+      '<a href="#trim">Select trim level</a><a href="#colour">Choose exterior colour</a>',
+    "Configure Your Vehicle",
+  );
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 1, evidence: "should never be called" }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+  assert.equal(verifier.calls.length, 0, "the deterministic score alone already satisfied the criterion");
+});
+
+test("semanticVerifier is consulted, and its satisfied verdict is honoured, once the deterministic score falls short (the multilingual fix)", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  // French page: the deterministic English-vocabulary evaluator scores this at (or near)
+  // zero -- see the "different language" test above for the no-verifier baseline.
+  const html = page_(
+    "<h1>Configurateur de véhicule</h1><h2>Options de configuration visibles</h2>",
+    "Configurez votre véhicule",
+  );
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.9, evidence: "Configurateur / Options de configuration." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+  assert.equal(verifier.calls.length, 1);
+  assert.equal(verifier.calls[0]?.objective, objective);
+  assert.equal(verifier.calls[0]?.criterionDescription, criterion.description);
+});
+
+test("semanticVerifier is consulted, and its not-satisfied verdict is honoured, for an unrelated page in a different language", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>À propos de notre entreprise</h1><h2>Contactez-nous</h2>", "À propos");
+  const verifier = fakeVerifier(() => ({ satisfied: false, confidence: 0.95, evidence: "No configurator evidence on this page." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(!satisfied.includes("reached-configurator"));
+  });
+  assert.equal(verifier.calls.length, 1);
+});
+
+// ---------------------------------------------------------------------------------------
+// Arbitrary objective-language / page-language pairs (task requirement: handle arbitrary
+// language pairs, not a fixed list) -- each uses a fake verifier standing in for a real
+// multilingual model call, since evaluateSuccessCriteria never itself contains any
+// per-language logic or dictionary; the verifier is the only place language pairing is
+// actually resolved, and it treats every pair identically regardless of which languages
+// are involved.
+// ---------------------------------------------------------------------------------------
+
+test("French objective with an English page is satisfied via semanticVerifier", async () => {
+  const objective = "Atteindre le configurateur de véhicule et s'arrêter une fois les options visibles.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Les options de configuration du véhicule sont visibles.",
+  };
+  const html = page_("<h1>Vehicle Configurator</h1><h2>Configuration Options Visible</h2>", "Configure Your Vehicle");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.9, evidence: "Vehicle Configurator / Configuration Options." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+});
+
+test("English objective with an Italian page is satisfied via semanticVerifier", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>Configuratore ufficiale</h1><h2>Configura la tua auto</h2>", "Configuratore di veicoli");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.88, evidence: "Configuratore ufficiale / Configura la tua auto." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+});
+
+test("German objective with a Spanish page is satisfied via semanticVerifier", async () => {
+  const objective = "Erreiche den Fahrzeugkonfigurator und stoppe, sobald die Konfigurationsoptionen sichtbar sind.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Die Konfigurationsoptionen des Fahrzeugs sind sichtbar.",
+  };
+  const html = page_("<h1>Configurador oficial</h1><h2>Configura tu coche</h2>", "Configurador de vehiculos");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.87, evidence: "Configurador oficial / Configura tu coche." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+});
+
+test("non-Latin-script page (Japanese) with an English objective is satisfied via semanticVerifier", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>公式コンフィギュレーター</h1><h2>車両を設定する</h2>", "コンフィギュレーター");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.85, evidence: "公式コンフィギュレーター / 車両を設定する." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+  // The deterministic evaluator's own tokenizer only matches [a-z0-9] runs (see
+  // src/discovery/relevance.ts), so it cannot itself score non-Latin-script text -- this
+  // confirms the fallback (not the deterministic path) is what makes this case work.
+  assert.equal(verifier.calls.length, 1);
+});
+
+test("url_pattern and element_present never consult semanticVerifier, even when one is supplied", async () => {
+  await withPage(page_('<p data-testid="success-marker">Reached.</p>', "Success"), async (page) => {
+    const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 1, evidence: "should never be called" }));
+    const urlCriterion: SuccessCriterion = {
+      id: "on-success-url",
+      type: "url_pattern",
+      description: "about:blank",
+      config: { pattern: "about:blank" },
+    };
+    const elementCriterion: SuccessCriterion = {
+      id: "success-marker-present",
+      type: "element_present",
+      description: "The success marker element is present.",
+      config: { selector: '[data-testid="success-marker"]' },
+    };
+    await evaluateSuccessCriteria(page, [urlCriterion, elementCriterion], "objective", verifier);
+    assert.equal(verifier.calls.length, 0);
   });
 });

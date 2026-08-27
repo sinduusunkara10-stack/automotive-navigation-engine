@@ -282,7 +282,19 @@ test("a task with no required criteria accepts stop_success unconditionally, mat
   }
 });
 
-test("stop_success is never accepted once the run's step limit is reached before required criteria are met", async () => {
+/**
+ * Never proposes stop_success at all -- always waits instead. Used specifically to
+ * exercise genuine maxSteps exhaustion as distinct from the no-progress stall detector
+ * below (which only ever triggers on two consecutive *stop_success* proposals with
+ * identical evidence).
+ */
+class AlwaysWaitProvider implements ReasoningProvider {
+  async decide(): Promise<Decision> {
+    return { action: { type: "wait", params: { durationMs: 1 } }, rationale: "Never proposes stop_success." };
+  }
+}
+
+test("the run's step limit is reached before required criteria are met, when the reasoning layer never even proposes stop_success", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -299,17 +311,151 @@ test("stop_success is never accepted once the run's step limit is reached before
         },
       ],
       limits: { maxSteps: 2, maxBacktracks: 0, maxRepeatedActions: 10 },
+      safety: {
+        allowedActions: ["wait", "stop_success", "stop_blocked", "stop_failure"],
+        allowFormSubmission: false,
+        allowPaymentOrPurchase: false,
+        allowPersonalDataEntry: false,
+      },
     });
 
-    const response = await runTask({ page, task, reasoning: new AlwaysStopSuccessProvider() });
+    const response = await runTask({ page, task, reasoning: new AlwaysWaitProvider() });
 
     assert.equal(response.status, "max_steps_reached");
     assert.equal(response.diagnostics.finishReason, "max_steps");
     assert.equal(response.engineAssessment.objectiveAchieved, false);
     assert.deepEqual(response.diagnostics.missingRequiredCriteriaIds, ["unreachable"]);
     assert.ok(
-      response.steps.slice(0, -1).every((s) => s.selectedAction.type === "stop_success" && s.safetyFlags?.includes("required_criteria_unsatisfied")),
-      "every stop_success attempt before the forced limit step must have been rejected",
+      response.steps.slice(0, -1).every((s) => s.selectedAction.type === "wait"),
+      "no stop_success was ever proposed in this scenario",
+    );
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// No-progress termination (generic, criterion-type-agnostic staleness guard in
+// src/core/loop.ts): two consecutive rejected stop_success proposals carrying the exact
+// same evidence fingerprint (page URL + satisfied + missing required criteria) end the
+// run deterministically, rather than waiting for maxSteps or the generic repeated-action
+// guard several steps later. See docs/n8n-integration.md "Repeated-decision and cost
+// control" for the full rationale and cost comparison.
+// ---------------------------------------------------------------------------------------
+
+test("no-progress termination stops repeated identical stop_success rejections without waiting for maxSteps or the repeated-action guard", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/start.html`,
+      successCriteria: [
+        {
+          id: "unreachable",
+          type: "url_pattern",
+          description: "A page this run never navigates to.",
+          config: { pattern: `${baseUrl}/never-visited.html` },
+          required: true,
+        },
+      ],
+      // Generous limits that a genuine maxSteps/repeated-action stop would take many more
+      // calls to reach -- proving the no-progress guard is what actually ends this run.
+      limits: { maxSteps: 50, maxBacktracks: 0, maxRepeatedActions: 50 },
+    });
+
+    const response = await runTask({ page, task, reasoning: new AlwaysStopSuccessProvider() });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "no_progress_required_criteria_unmet");
+    assert.equal(response.engineAssessment.objectiveAchieved, false);
+    assert.deepEqual(response.diagnostics.missingRequiredCriteriaIds, ["unreachable"]);
+    // Exactly two stop_success proposals total: one rejection (first time this evidence
+    // was seen) and a second, identical rejection that immediately ends the run -- not
+    // the 50 steps the configured limits would otherwise allow.
+    assert.equal(response.steps.length, 2);
+    assert.ok(response.steps.every((s) => s.selectedAction.type === "stop_success"));
+    assert.ok(response.steps[0]?.safetyFlags?.includes("required_criteria_unsatisfied"));
+    assert.ok(!response.steps[0]?.safetyFlags?.includes("no_progress_detected"));
+    assert.ok(response.steps[1]?.safetyFlags?.includes("no_progress_detected"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+/**
+ * Proposes stop_success prematurely twice, but the two rejections carry genuinely
+ * different evidence (the second happens only once the run has advanced to a page where
+ * one of the two required criteria has newly become satisfied) -- then clicks through to
+ * a real success once both are satisfied.
+ */
+class TwoDifferentRejectionsThenSuccessProvider implements ReasoningProvider {
+  private attemptedFirstStop = false;
+  private attemptedSecondStop = false;
+
+  async decide(context: ReasoningContext): Promise<Decision> {
+    const requiredIds = context.successCriteria.filter((c) => c.required !== false).map((c) => c.id);
+    const allSatisfied = requiredIds.every((id) => context.satisfiedCriteriaIds.includes(id));
+    if (allSatisfied && context.allowedActions.includes("stop_success")) {
+      return { action: { type: "stop_success" }, rationale: "All required criteria now satisfied." };
+    }
+    if (!this.attemptedFirstStop) {
+      this.attemptedFirstStop = true;
+      return { action: { type: "stop_success" }, rationale: "Premature attempt #1: nothing satisfied yet." };
+    }
+    if (!this.attemptedSecondStop && context.satisfiedCriteriaIds.length > 0) {
+      this.attemptedSecondStop = true;
+      return { action: { type: "stop_success" }, rationale: "Premature attempt #2: different (partial) evidence." };
+    }
+    const click = clickByName(context, "continue");
+    if (click) {
+      return click;
+    }
+    return { action: { type: "stop_failure" }, rationale: "No permitted action available." };
+  }
+}
+
+test("changed evidence between two rejected stop_success proposals is never treated as no-progress", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      objective: "Reach the fixture's success page.",
+      startUrl: `${baseUrl}/start.html`,
+      successCriteria: [
+        {
+          id: "step-two-marker-present",
+          type: "element_present",
+          description: "The step-two 'learn more' control is present.",
+          config: { selector: "#learn-more" },
+          required: true,
+        },
+        {
+          id: "reached-success-url",
+          type: "url_pattern",
+          description: "Current page is the success fixture.",
+          config: { pattern: `${baseUrl}/success.html` },
+          required: true,
+        },
+      ],
+    });
+
+    const response = await runTask({ page, task, reasoning: new TwoDifferentRejectionsThenSuccessProvider() });
+
+    assert.equal(response.status, "success");
+    assert.equal(response.diagnostics.finishReason, "stop_success_action");
+    assert.equal(response.diagnostics.missingRequiredCriteriaIds, undefined);
+
+    const rejectedSteps = response.steps.filter((s) => s.safetyFlags?.includes("required_criteria_unsatisfied"));
+    assert.equal(rejectedSteps.length, 2, "expected exactly two distinct rejected stop_success proposals");
+    assert.ok(
+      rejectedSteps.every((s) => !s.safetyFlags?.includes("no_progress_detected")),
+      "two rejections with genuinely different evidence must never be treated as no-progress",
     );
   } finally {
     await page.close();

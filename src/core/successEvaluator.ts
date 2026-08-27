@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
 import type { SuccessCriterion } from "../types/task-request.js";
+import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import {
   ALL_SEMANTIC_SIGNALS,
   gatherSemanticPageSignals,
@@ -14,14 +15,25 @@ import {
 // can tune per-criterion via config.minScore -- see docs/n8n-integration.md.
 const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
 
+/**
+ * `semanticVerifier` is optional and off by default: when omitted, semantic_page_match
+ * stays exactly the deterministic lexical token-overlap check it always was (see
+ * evaluateSemanticPageMatch below) -- same-language behaviour and every non-semantic
+ * criterion type are completely unaffected either way. When supplied, it is only ever
+ * consulted as a fallback for a semantic_page_match criterion the deterministic score
+ * could not already satisfy -- see docs/n8n-integration.md "Generic multilingual
+ * semantic_page_match verification" for why deterministic token overlap alone cannot
+ * safely support arbitrary objective-language/page-language pairs.
+ */
 export async function evaluateSuccessCriteria(
   page: Page,
   criteria: SuccessCriterion[],
   objective: string,
+  semanticVerifier?: SemanticCriterionVerifier,
 ): Promise<string[]> {
   const satisfied: string[] = [];
   for (const criterion of criteria) {
-    if (await evaluateSingle(page, criterion, objective)) {
+    if (await evaluateSingle(page, criterion, objective, semanticVerifier)) {
       satisfied.push(criterion.id);
     }
   }
@@ -45,7 +57,12 @@ export function getMissingRequiredCriteriaIds(
   );
 }
 
-async function evaluateSingle(page: Page, criterion: SuccessCriterion, objective: string): Promise<boolean> {
+async function evaluateSingle(
+  page: Page,
+  criterion: SuccessCriterion,
+  objective: string,
+  semanticVerifier?: SemanticCriterionVerifier,
+): Promise<boolean> {
   switch (criterion.type) {
     case "url_pattern": {
       const pattern = typeof criterion.config?.pattern === "string" ? criterion.config.pattern : undefined;
@@ -59,7 +76,7 @@ async function evaluateSingle(page: Page, criterion: SuccessCriterion, objective
       return (await page.locator(selector).count()) > 0;
     }
     case "semantic_page_match": {
-      return evaluateSemanticPageMatch(page, criterion, objective);
+      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier);
     }
     // data_layer_event / network_event / custom are not evaluated by this generic
     // core evaluator; a capture module or a future criterion handler owns them.
@@ -76,8 +93,20 @@ async function evaluateSingle(page: Page, criterion: SuccessCriterion, objective
  * caller-supplied objective -- never a hardcoded selector, URL pattern, CTA label, or
  * hostname. See src/core/semanticPageMatch.ts for the scoring itself and
  * docs/n8n-integration.md "Generic success criteria" for guidance and known limitations.
+ *
+ * Deterministic lexical token overlap is tried first, always, and stays the source of
+ * truth whenever it already clears minScore -- it is cheap, fully repeatable, and correct
+ * for same-language objective/page pairs. It is not a reliable signal across languages
+ * (see docs/n8n-integration.md "Generic multilingual semantic_page_match verification"),
+ * so when it falls short and a semanticVerifier was supplied, that bounded, cached model
+ * call is consulted as a fallback before concluding the criterion is unsatisfied.
  */
-async function evaluateSemanticPageMatch(page: Page, criterion: SuccessCriterion, objective: string): Promise<boolean> {
+async function evaluateSemanticPageMatch(
+  page: Page,
+  criterion: SuccessCriterion,
+  objective: string,
+  semanticVerifier?: SemanticCriterionVerifier,
+): Promise<boolean> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
     return false;
@@ -94,7 +123,20 @@ async function evaluateSemanticPageMatch(page: Page, criterion: SuccessCriterion
 
   const pageSignals = await gatherSemanticPageSignals(page);
   const score = scoreSemanticPageMatch(anchorText, pageSignals, signals);
-  return score.overall >= minScore;
+  if (score.overall >= minScore) {
+    return true;
+  }
+
+  if (!semanticVerifier) {
+    return false;
+  }
+
+  const verification = await semanticVerifier.verify({
+    objective,
+    criterionDescription: criterion.description,
+    pageEvidence: pageSignals,
+  });
+  return verification.satisfied;
 }
 
 // A NUL character can never legitimately appear in a caller-supplied URL pattern, so it's

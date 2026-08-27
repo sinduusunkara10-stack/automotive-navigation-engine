@@ -255,13 +255,18 @@ evaluation stays deterministic and cheap to run every step. Concretely:
 - It does not privilege English or any other language: an objective written in French scores
   against a French page exactly the same way an English objective scores against an English
   page (`tests/unit/successEvaluator.test.ts` covers both directions).
-- It **will not** reliably recognise a page written in a different language than the
-  objective, because there is no shared vocabulary for it to find (see the "translated page
-  content" tests). If a target site's language is known in advance, write the objective (and
-  this criterion's `description`) in that language — this is exactly the same reason `brand`,
-  `market`, and `language` remain optional reporting metadata rather than engine inputs (see
-  §10): the engine has no use for them as configuration, but a human or an upstream step can
-  still use them to author a better-targeted `objective` string per run.
+- On its own, it **will not** reliably recognise a page written in a different language than
+  the objective, because there is no shared vocabulary for it to find (see the "translated page
+  content" tests). An optional, opt-in fallback for exactly this case is described below in
+  "Generic multilingual `semantic_page_match` verification" — but the deterministic evaluator
+  itself never changes: if no verifier is configured (the default), an objective and a page in
+  different languages behave exactly as described in this paragraph. If a target site's
+  language is known in advance, writing the objective (and this criterion's `description`) in
+  that language remains the cheapest, fully deterministic way to get a same-language match —
+  this is exactly the same reason `brand`, `market`, and `language` remain optional reporting
+  metadata rather than engine inputs (see §10): the engine has no use for them as configuration,
+  but a human or an upstream step can still use them to author a better-targeted `objective`
+  string per run.
 - It does not attempt to detect "blocking" states (cookie walls, session-timeout banners,
   error pages) by pattern-matching against a list of such phrases — any such list would itself
   be exactly the kind of hardcoded, non-generic vocabulary this project's design rule forbids.
@@ -304,6 +309,163 @@ shapes and meaning), but a workflow that was working around the old advisory-onl
 re-deriving pass/fail from `satisfiedSuccessCriteriaIds` itself can now simplify to read
 `engineAssessment.objectiveAchieved` directly, and may optionally surface
 `diagnostics.missingRequiredCriteriaIds` for a failed run's operator-facing message.
+
+## 9a. Generic multilingual `semantic_page_match` verification
+
+**The defect this fixes.** A caller can write `objective`/criterion `description` in one
+language while the destination page (reached via automatic domain discovery, following whatever
+links the site itself presents) is written in a different language — e.g. an English objective
+against a French destination page. Deterministic lexical token overlap (§9 above) has no shared
+vocabulary to find in that case and can never satisfy the criterion, no matter how strong the
+real-world match is. Before this fix, that meant: `satisfiedCriteriaIds` stayed empty,
+`diagnostics.missingRequiredCriteriaIds` listed the criterion, strict required-criteria
+enforcement (§9's `required` section) correctly rejected `stop_success` every time the reasoning
+layer proposed it, and the run eventually ended `blocked` with `finishReason: "repeated_action"`
+once the generic repeated-action safety guard tripped — even though the reasoning layer had
+correctly navigated to, and correctly recognised, the right page.
+`tests/integration/semanticMultilingualEnforcement.test.ts` reproduces this exact scenario
+end-to-end and documents both the pre-fix and post-fix behaviour permanently.
+
+**What was actually implemented, precisely.** `semantic_page_match` stays a two-stage
+evaluation:
+
+1. **Deterministic lexical token overlap** (§9, unchanged) always runs first, on every
+   evaluation, for every task. It is cheap (no network call, no added latency), fully
+   repeatable, and correct whenever the objective and the page share vocabulary — same-language
+   tasks (the overwhelming common case) are unaffected by anything below.
+2. **Optional semantic verification fallback**
+   (`src/reasoning/semanticCriterionVerifier.ts`, `SemanticCriterionVerifier` /
+   `ClaudeSemanticCriterionVerifier`) is consulted **only** when step 1's score falls short of
+   `minScore`, and **only** when a verifier was actually supplied to `runTask(...)`. It is a
+   single, narrowly-scoped, structured-output model call — the same SDK-agnostic
+   `ReasoningModelClient` boundary, bounded single-retry policy, and sanitised-error handling
+   `ClaudeReasoningProvider` already uses for navigation decisions
+   (`src/reasoning/anthropicReasoningModelClient.ts`), but with its own prompt and its own
+   decision log: **navigation decisions and success-criterion verification are never the same
+   model call.** The prompt sends only `objective`, the criterion's `description`, and the same
+   compact page evidence (`title`, `headings`, visible interactive-element text) the
+   deterministic evaluator already reads — never raw HTML, never cookies/storage/headers, and
+   the model is explicitly instructed to compare *meaning*, not literal words, across whatever
+   two languages are involved. This is genuinely cross-language semantic comparison (a real
+   model call reasoning about meaning), not lexical matching, not a translation step, and not
+   embeddings — see "Why not embeddings or translation" below for the alternatives considered.
+
+   **Wiring (opt-in, zero new required configuration).** `runTask({ ..., semanticVerifier })`
+   takes this as an optional parameter; when omitted, behaviour is byte-for-byte identical to
+   before this change existed. The HTTP API (`src/api/runner.ts`) wires one in automatically,
+   with zero new environment variables or task-JSON fields, exactly when
+   `REASONING_PROVIDER=claude` — reusing the *same* `ANTHROPIC_API_KEY`/model/timeout
+   configuration already required for navigation decisions. The mock provider (the default, and
+   every existing test that doesn't set `REASONING_PROVIDER`) gets no verifier at all.
+
+**Why this design, and not a fixed dictionary, embeddings, or translation.**
+
+- **Not a fixed dictionary** (e.g. `configure = configurer = configurare = konfigurieren`).
+  This engine's non-negotiable design rule (`CLAUDE.md`) forbids brand/language/market-specific
+  logic in the core, and a finite dictionary can only ever cover the language pairs and
+  vocabulary its author thought of — it would still fail the very first untranslated word,
+  idiom, or language pair not on the list. Nothing in this fix contains a word list of any kind.
+- **Not embeddings.** Embeddings would add a new external dependency (an embedding model/API
+  this repository doesn't otherwise use), a new runtime cost axis, and a similarity-threshold
+  calibration problem of its own (cosine-similarity thresholds don't transfer cleanly across
+  language pairs or embedding models, and validating one would need its own false-positive
+  corpus). A structured-output reasoning call reuses infrastructure and credentials this engine
+  already depends on (`@anthropic-ai/sdk`, already a direct dependency; no new package was
+  added) and gives an auditable, evidence-citing verdict rather than an opaque distance score.
+- **Not translation.** Translating the objective (or the page) into a common language first
+  would need a translation provider/dictionary of its own, plus its own failure/cost/latency
+  handling, and would still ultimately need *something* to judge whether the translated text
+  matches — i.e. it doesn't remove the need for a semantic comparison step, it just adds one
+  more stage (and one more failure mode) in front of it.
+- **Not globally lowering `minScore`.** This would trade a false-negative problem (real matches
+  missed across languages) for a false-positive problem (irrelevant same-language pages wrongly
+  accepted) — it does not "add" cross-language capability, it just makes the existing lexical
+  check sloppier everywhere, including where it was already working correctly.
+
+**Evidence, confidence, and false-positive protections.** The verifier never grants the
+criterion from a bare boolean:
+
+- It must return `satisfied: true`.
+- **and** `confidence >= 0.7` (`DEFAULT_SEMANTIC_MIN_CONFIDENCE`) — deliberately stricter than
+  `ClaudeReasoningProvider`'s navigation-decision `CLAUDE_MIN_CONFIDENCE` (default `0.5`): this
+  gate grants a *required* success criterion, so a low-confidence "yes" must never quietly pass.
+- **and** a non-empty `evidence` string (min length 1) quoting the specific page signal(s) that
+  support the verdict — required for both a satisfied *and* an unsatisfied verdict, so the model
+  must always ground its answer in the given text rather than asserting a bare boolean. A
+  response missing any of these three, a malformed/unparseable response, or a provider error
+  (after the single allowed retry, same hard cap as navigation decisions) is treated as **not
+  satisfied** — the verifier fails closed; a criterion is never satisfied by an unsupported or
+  failed assertion (`tests/unit/semanticCriterionVerifier.test.ts` covers every one of these
+  cases, plus a full engine-loop test proving a persistently-erroring verifier can never
+  silently turn a run into `status: "success"`). The system prompt also explicitly instructs the
+  model that a single shared generic word (e.g. "vehicle", "continue") is not sufficient
+  evidence by itself — see the false-positive tests in
+  `tests/integration/semanticMultilingualEnforcement.test.ts` and
+  `tests/unit/successEvaluator.test.ts` (unrelated pages, generic-word overlap, conflicting
+  partial evidence).
+
+**This never overrides any safety rule.** The verifier is only ever consulted for a page the
+navigation loop has already been allowed onto — preflight domain discovery's frozen allowlist,
+host-safety validation, redirect controls, `allowFormSubmission`/`allowPaymentOrPurchase`/
+`allowPersonalDataEntry`, and `allowedActions` all run exactly as before and entirely
+independently of this fallback; a "satisfied" verdict from the verifier can never expand
+`allowedDomains` or rescue a run the safety layer has already blocked
+(`tests/integration/semanticMultilingualEnforcement.test.ts`, "can never rescue a run blocked by
+allowedDomains").
+
+**Cost.** Deterministic evaluation (step 1) is always tried first and is free of any model call;
+the verifier is consulted only as a fallback, and only ever once per unique
+`(objective, criterion description, page evidence)` combination for the whole run — an in-memory
+cache means an unchanged page is never re-verified, so repeated `stop_success` proposals against
+the same page cost at most one call total, not one per proposal. In the reproduced regression
+scenario, a full run (start page → French destination page → accepted `stop_success`) costs
+exactly **two** real model calls: one correctly-negative call for the (irrelevant) start page and
+one positive call for the destination page — every later evaluation of either page (including
+the accepted `stop_success` step itself) is a cache hit. Aggregated, safe usage/cost metadata
+(provider, model, real call count, cache-hit count, satisfied/rejected counts, token totals,
+latency, retry count, and optionally a per-call summary with confidence and a short evidence
+excerpt) is reported at `TaskResponse.diagnostics.semanticVerifier` whenever a verifier was
+configured — never prompts, raw model responses, page content, request bodies, API keys,
+headers, or credentials, matching `diagnostics.reasoningProvider`'s existing conventions.
+
+**Known limitation.** Because the fallback triggers whenever the deterministic score falls short
+of `minScore` — not only on the "close but wrong-language" case — a run that visits several
+pages before reaching the true destination can trigger one verifier call per visited page that
+doesn't already clear the lexical threshold, not just one call at the end. Caching bounds this to
+one call per *unique* page evidence (never per step), but does not eliminate calls for genuinely
+irrelevant intermediate pages. This is an inherent tradeoff of catching a real cross-language
+match without being told in advance which page is the destination, not an implementation defect.
+
+## 9b. Repeated-decision and cost control
+
+Independent of language, a reasoning layer can propose `stop_success` again on a page whose
+evidence hasn't changed at all since the last rejection — before this fix, that could only ever
+be stopped by the generic repeated-action safety guard several steps later (by default, after 4
+consecutive identical actions), spending a reasoning-provider call on each intervening attempt
+for no new information.
+
+`src/core/loop.ts` now detects this directly: each rejected `stop_success` is fingerprinted by
+`(page URL, sorted satisfied required criteria ids, sorted missing required criteria ids)`. The
+*first* rejection with a given fingerprint is always allowed to continue the run as before (the
+reasoning layer gets one chance to receive updated `satisfiedCriteriaIds` and try something
+else). If the *very next* `stop_success` proposal carries the **exact same** fingerprint — i.e.
+nothing about the page or the criteria state changed between the two proposals — the run
+terminates immediately with `status: "failure"` and
+`diagnostics.finishReason: "no_progress_required_criteria_unmet"`, instead of waiting for
+`maxSteps` or the repeated-action guard. The terminating step's `safetyFlags` includes
+`"no_progress_detected"` alongside `"required_criteria_unsatisfied"`; the run's final
+`diagnostics.missingRequiredCriteriaIds` still lists exactly what remained unsatisfied. Any
+navigation, or any change to which criteria are satisfied/missing, resets the comparison — two
+rejections with genuinely different evidence are never treated as no-progress
+(`tests/integration/requiredSuccessCriteriaEnforcement.test.ts`, "changed evidence between two
+rejected stop_success proposals is never treated as no-progress").
+
+This bounds the worst case to exactly **two** `stop_success` proposals against unchanging
+evidence, regardless of how large `maxSteps`/`maxRepeatedActions` are configured. In the
+originally reported production run (five steps: one click, three rejected `stop_success`
+proposals, then a repeated-action block), the equivalent scenario now ends after one click and
+two rejected proposals — a reduction from 4 reasoning-provider calls after reaching the
+destination page down to 2.
 
 ## 10. taskId, and brand/market/language as reporting metadata only
 
