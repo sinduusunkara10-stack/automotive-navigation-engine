@@ -9,6 +9,7 @@ import type {
 } from "../types/task-response.js";
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
+import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
@@ -48,8 +49,17 @@ export async function runTask(params: {
   reasoning?: ReasoningProvider;
   initialNavigationTimeoutMs?: number;
   actionNavigationTimeoutMs?: number;
+  /**
+   * Optional, opt-in bounded model call used only as a fallback for a semantic_page_match
+   * criterion the deterministic lexical evaluator could not already satisfy (most notably
+   * across objective-language/page-language pairs) -- see
+   * src/reasoning/semanticCriterionVerifier.ts. Entirely absent by default: every existing
+   * caller that doesn't pass this gets byte-for-byte the same deterministic-only
+   * evaluation as before this parameter existed.
+   */
+  semanticVerifier?: SemanticCriterionVerifier;
 }): Promise<TaskResponse> {
-  const { page, task } = params;
+  const { page, task, semanticVerifier } = params;
   const state = new RunState();
   const captures: Captures = {};
   // Resolved once per run (rather than left to loop.ts's per-step default) so the same
@@ -91,6 +101,7 @@ export async function runTask(params: {
       statusReason: `startUrl is unsafe (${startUrlSafety.reason})`,
       finalUrl: task.startUrl,
       reasoning,
+      semanticVerifier,
     });
   }
 
@@ -120,6 +131,7 @@ export async function runTask(params: {
       statusReason: "startUrl is outside allowedDomains",
       finalUrl: task.startUrl,
       reasoning,
+      semanticVerifier,
     });
   }
 
@@ -170,6 +182,7 @@ export async function runTask(params: {
         statusReason: navigation.message ?? "Initial navigation failed.",
         finalUrl: navigation.url,
         reasoning,
+        semanticVerifier,
       });
     }
 
@@ -206,6 +219,7 @@ export async function runTask(params: {
         statusReason: reason,
         finalUrl: navigation.url,
         reasoning,
+        semanticVerifier,
         domainDiscovery: discovery,
       });
     }
@@ -218,7 +232,15 @@ export async function runTask(params: {
     let finishReason = "loop_exhausted";
 
     while (!terminal) {
-      const outcome = await runStep({ page, task: effectiveTask, state, captures, reasoning, actionNavigationTimeoutMs });
+      const outcome = await runStep({
+        page,
+        task: effectiveTask,
+        state,
+        captures,
+        reasoning,
+        actionNavigationTimeoutMs,
+        semanticVerifier,
+      });
       steps.push(outcome.stepLog);
       if (outcome.terminal) {
         terminal = outcome.terminal;
@@ -237,6 +259,7 @@ export async function runTask(params: {
       statusReason: finishReason,
       finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
       reasoning,
+      semanticVerifier,
       domainDiscovery: discovery,
     });
   } finally {
@@ -256,9 +279,21 @@ function buildTerminalResponse(params: {
   finalUrl: string;
   reasoning: ReasoningProvider;
   domainDiscovery?: DomainDiscoveryResult;
+  semanticVerifier?: SemanticCriterionVerifier;
 }): TaskResponse {
-  const { task, state, captures, steps, status, finishReason, statusReason, finalUrl, reasoning, domainDiscovery } =
-    params;
+  const {
+    task,
+    state,
+    captures,
+    steps,
+    status,
+    finishReason,
+    statusReason,
+    finalUrl,
+    reasoning,
+    domainDiscovery,
+    semanticVerifier,
+  } = params;
   const lastStep = steps[steps.length - 1];
   // Independently verified, never derived from status alone: objectiveAchieved must
   // reflect that every required success criterion (schema default: required) was
@@ -279,6 +314,7 @@ function buildTerminalResponse(params: {
   };
 
   const reasoningProviderDiagnostics = reasoning.getUsageDiagnostics?.();
+  const semanticVerifierDiagnostics = semanticVerifier?.getUsageDiagnostics?.();
   const domainDiscoveryDiagnostics = domainDiscovery
     ? toDomainDiscoveryDiagnostics(domainDiscovery, task.allowedDomains ?? domainDiscovery.proposedAllowedDomains)
     : undefined;
@@ -302,6 +338,7 @@ function buildTerminalResponse(params: {
       ...(missingRequiredCriteriaIds.length > 0 ? { missingRequiredCriteriaIds } : {}),
       ...(reasoningProviderDiagnostics ? { reasoningProvider: reasoningProviderDiagnostics } : {}),
       ...(domainDiscoveryDiagnostics ? { domainDiscovery: domainDiscoveryDiagnostics } : {}),
+      ...(semanticVerifierDiagnostics ? { semanticVerifier: semanticVerifierDiagnostics } : {}),
     },
   };
 }

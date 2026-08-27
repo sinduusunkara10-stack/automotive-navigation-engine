@@ -222,6 +222,39 @@ provider. This is wired in at the API boundary (`src/api/runner.ts`), not in `sr
 — the core loop still just takes whatever `ReasoningProvider` it is given, keeping provider
 selection an application concern, not a core-loop one.
 
+### SemanticCriterionVerifier (multilingual `semantic_page_match` fallback)
+
+`src/reasoning/semanticCriterionVerifier.ts` defines a second, deliberately separate boundary:
+`SemanticCriterionVerifier.verify(input): Promise<SemanticVerificationOutcome>`. This is **not**
+a `ReasoningProvider` and never selects a navigation action — it exists only to adjudicate a
+`semantic_page_match` success criterion (`src/core/successEvaluator.ts`) that the deterministic
+lexical token-overlap evaluator could not already satisfy, most notably when the objective and
+the destination page are written in different languages. `ClaudeSemanticCriterionVerifier`
+reuses the exact same `ReasoningModelClient` boundary, structured-output pattern, and
+hard-capped single-retry policy as `ClaudeReasoningProvider` above (same auth, same model
+config, no new external dependency) but with its own prompt, its own Zod schema
+(`semanticVerificationSchema.ts`), and its own decision log — a navigation decision and a
+success-criterion verification are never the same model call. It fails closed (never satisfied)
+on any malformed output, sub-threshold confidence, missing evidence, or provider error, and
+caches verdicts per `(objective, criterion description, page evidence)` so an unchanged page is
+never re-verified. `runTask({ ..., semanticVerifier })` takes this as an optional parameter,
+omitted by default — every existing caller/task gets byte-for-byte the same deterministic-only
+`semantic_page_match` evaluation as before this component existed. `src/api/runner.ts` wires one
+in automatically (reusing the `claude` reasoning provider's own config) exactly when
+`REASONING_PROVIDER=claude`. Its usage is aggregated the same way as
+`ReasoningProviderDiagnostics` above, at `TaskResponse.diagnostics.semanticVerifier`
+(`$defs/semanticVerifierDiagnostics` in `schemas/task-response.schema.json`). Full design
+rationale, false-positive protections, and cost analysis: `docs/n8n-integration.md` §"Generic
+multilingual semantic_page_match verification".
+
+`src/core/loop.ts` separately guards against a reasoning layer repeatedly proposing
+`stop_success` against page evidence that hasn't changed at all since the last rejection
+(independent of language): a second consecutive rejection with an identical
+`(url, satisfied required criteria, missing required criteria)` fingerprint ends the run
+immediately (`status: "failure"`, `finishReason: "no_progress_required_criteria_unmet"`) rather
+than waiting for `maxSteps` or the repeated-action guard. See `docs/n8n-integration.md`
+§"Repeated-decision and cost control".
+
 ## 7. Safety / guardrail layer
 
 `src/safety` enforces, independent of what the reasoning layer decides:

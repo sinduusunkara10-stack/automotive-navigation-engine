@@ -208,6 +208,46 @@ export interface ReasoningProviderDiagnostics {
   decisions?: ReasoningProviderDecisionSummary[];
 }
 
+export type SemanticVerifierDecisionOutcome = "satisfied" | "not_satisfied" | "error" | "cache_hit";
+
+export interface SemanticVerifierDecisionSummary {
+  attempt: number;
+  outcome: SemanticVerifierDecisionOutcome;
+  confidence?: number;
+  evidence?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  latencyMs: number;
+}
+
+/**
+ * Versioned separately from TaskResponse.schemaVersion, same pattern as
+ * ReasoningProviderDiagnostics. Aggregated from a SemanticCriterionVerifier's own decision
+ * log -- a bounded, structured-output model call used only to adjudicate a
+ * semantic_page_match criterion the deterministic (lexical token-overlap) evaluator could
+ * not resolve, entirely separate from navigation decisions (see
+ * src/reasoning/semanticCriterionVerifier.ts). callCount excludes cacheHitCount: a cached
+ * verdict is reused for identical (criterion, page-evidence) pairs so an unchanged page is
+ * never re-verified. Contains only safe metadata (confidence, a short evidence excerpt
+ * quoted from page signals already visible in Observation, token/latency counts) -- never
+ * prompts, raw model responses, page content, request bodies, API keys, headers, or
+ * credentials.
+ */
+export interface SemanticVerifierDiagnostics {
+  version: "1.0.0";
+  provider: string;
+  model?: string;
+  callCount: number;
+  cacheHitCount: number;
+  satisfiedCount: number;
+  rejectedCount: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalLatencyMs: number;
+  retryCount: number;
+  decisions?: SemanticVerifierDecisionSummary[];
+}
+
 export type DomainTrustReason =
   | "caller_supplied"
   | "exact_start_host"
@@ -286,6 +326,7 @@ export interface Diagnostics {
   missingRequiredCriteriaIds?: string[];
   reasoningProvider?: ReasoningProviderDiagnostics;
   domainDiscovery?: DomainDiscoveryDiagnostics;
+  semanticVerifier?: SemanticVerifierDiagnostics;
 }
 
 export interface TaskResponse {

@@ -800,6 +800,9 @@
         },
         "domainDiscovery": {
           "$ref": "#/$defs/domainDiscoveryDiagnostics"
+        },
+        "semanticVerifier": {
+          "$ref": "#/$defs/semanticVerifierDiagnostics"
         }
       }
     },
@@ -923,6 +926,116 @@
           "description": "Optional per-decision usage summary, one entry per attempt recorded in the provider's decision log.",
           "items": {
             "$ref": "#/$defs/reasoningProviderDecisionSummary"
+          }
+        }
+      }
+    },
+    "semanticVerifierDecisionSummary": {
+      "type": "object",
+      "description": "Safe per-decision usage summary for one SemanticCriterionVerifier attempt. Never includes prompts, raw model responses, page content, request bodies, API keys, headers, or credentials.",
+      "additionalProperties": false,
+      "required": ["attempt", "outcome", "latencyMs"],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "description": "Attempt number within this verification call: 0 is the first try, 1 is the single allowed retry, -1 marks a reused cached verdict (cache_hit)."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["satisfied", "not_satisfied", "error", "cache_hit"]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Model-reported confidence for this verification, when available."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Short evidence excerpt the model cited from the page signals already visible in Observation (title/headings/interactive element text), supporting or explaining its verdict."
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latencyMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "semanticVerifierDiagnostics": {
+      "type": "object",
+      "description": "Aggregated, per-run usage diagnostics for the optional SemanticCriterionVerifier -- a bounded, structured-output model call used only to adjudicate a semantic_page_match criterion the deterministic (lexical token-overlap) evaluator could not resolve (e.g. because the objective and the page are written in different languages), entirely separate from navigation decisions. See src/reasoning/semanticCriterionVerifier.ts and docs/n8n-integration.md 'Generic multilingual semantic_page_match verification'. Absent entirely when no verifier was configured for the run (the deterministic-only default). callCount excludes cacheHitCount: a cached verdict is reused for identical (criterion, page-evidence) pairs so an unchanged page is never re-verified across repeated stop_success attempts. Versioned independently of the top-level schemaVersion so this structure can evolve on its own.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "provider",
+        "callCount",
+        "cacheHitCount",
+        "satisfiedCount",
+        "rejectedCount",
+        "totalInputTokens",
+        "totalOutputTokens",
+        "totalLatencyMs",
+        "retryCount"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "const": "1.0.0"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Provider that produced this run's semantic verifications, e.g. \"claude\"."
+        },
+        "model": {
+          "type": "string"
+        },
+        "callCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of real model calls made this run (excludes cache hits)."
+        },
+        "cacheHitCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of times a cached verdict was reused for unchanged (criterion, page-evidence) evidence instead of making a new model call."
+        },
+        "satisfiedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Verifications that did not satisfy the criterion, including malformed output, low confidence, missing evidence, or a provider/API error -- the verifier fails closed."
+        },
+        "totalInputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalOutputTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalLatencyMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/semanticVerifierDecisionSummary"
           }
         }
       }

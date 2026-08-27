@@ -5,6 +5,7 @@ import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation, readElementState } from "../observation/observationBuilder.js";
 import type { Decision, ReasoningProvider } from "../reasoning/reasoningProvider.js";
+import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import { checkLimitsBreach, validateDecision, type SafetyCheckResult } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -35,8 +36,9 @@ export async function runStep(params: {
   captures: Captures;
   reasoning: ReasoningProvider;
   actionNavigationTimeoutMs: number;
+  semanticVerifier?: SemanticCriterionVerifier;
 }): Promise<LoopStepOutcome> {
-  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs } = params;
+  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs, semanticVerifier } = params;
   const stepIndex = state.stepCount;
 
   let observation = await buildObservation(page);
@@ -50,7 +52,7 @@ export async function runStep(params: {
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), dataLayerEntry];
   }
 
-  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective)).forEach((id) =>
+  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier)).forEach((id) =>
     state.satisfiedCriteriaIds.add(id),
   );
 
@@ -209,7 +211,7 @@ export async function runStep(params: {
   }
 
   state.recordAction(effectiveAction);
-  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective)).forEach((id) =>
+  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier)).forEach((id) =>
     state.satisfiedCriteriaIds.add(id),
   );
 
@@ -226,6 +228,24 @@ export async function runStep(params: {
       : [];
   const stopSuccessRejected = missingRequiredCriteriaIds.length > 0;
 
+  // Generic, criterion-type-agnostic staleness guard: if this rejected stop_success has
+  // the *exact same* evidence fingerprint (page URL + satisfied + missing required
+  // criteria) as the immediately preceding rejected stop_success, nothing changed between
+  // the two proposals -- another reasoning call would just be spent re-asking the same
+  // question against the same evidence. One repeat is always allowed (a provider gets one
+  // chance to receive updated satisfiedCriteriaIds and try again); a second consecutive
+  // proposal with zero new evidence ends the run deterministically instead of waiting for
+  // the generic repeated-action safety guard several steps later. See task requirements on
+  // repeated-decision and cost control.
+  let noProgressDetected = false;
+  if (stopSuccessRejected) {
+    const fingerprint = buildStopSuccessFingerprint(observation.url, missingRequiredCriteriaIds, [
+      ...state.satisfiedCriteriaIds,
+    ]);
+    noProgressDetected = state.lastRejectedStopSuccessFingerprint === fingerprint;
+    state.lastRejectedStopSuccessFingerprint = fingerprint;
+  }
+
   const stepLog = buildStepLog({
     stepIndex,
     observation,
@@ -233,7 +253,13 @@ export async function runStep(params: {
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
-    safetyFlags: stopSuccessRejected ? [...safetyResult.flags, "required_criteria_unsatisfied"] : safetyResult.flags,
+    safetyFlags: stopSuccessRejected
+      ? [
+          ...safetyResult.flags,
+          "required_criteria_unsatisfied",
+          ...(noProgressDetected ? ["no_progress_detected"] : []),
+        ]
+      : safetyResult.flags,
   });
   recordJourneyPathEntry(captures, task.captureModules, stepLog);
 
@@ -241,9 +267,12 @@ export async function runStep(params: {
     if (!stopSuccessRejected) {
       return { stepLog, terminal: "success", finishReason: "stop_success_action" };
     }
-    // Rejected: fall through without setting `terminal` so the loop keeps running --
-    // checkLimitsBreach (top of the next runStep call) remains the hard ceiling that
-    // stops the run if the reasoning layer never satisfies the remaining criteria.
+    if (noProgressDetected) {
+      return { stepLog, terminal: "failure", finishReason: "no_progress_required_criteria_unmet" };
+    }
+    // Rejected, but this is the first time this exact evidence was seen: fall through
+    // without setting `terminal` so the loop keeps running -- checkLimitsBreach (top of
+    // the next runStep call) remains the hard ceiling regardless.
     return { stepLog };
   }
   if (effectiveAction.type === "stop_blocked") {
@@ -284,6 +313,14 @@ function buildStepLog(params: {
     },
     ...(safetyFlags.length > 0 ? { safetyFlags } : {}),
   };
+}
+
+function buildStopSuccessFingerprint(url: string, missingRequiredCriteriaIds: string[], satisfiedCriteriaIds: string[]): string {
+  return JSON.stringify({
+    url,
+    missing: [...missingRequiredCriteriaIds].sort(),
+    satisfied: [...satisfiedCriteriaIds].sort(),
+  });
 }
 
 function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModuleName[], stepLog: StepLog): void {
