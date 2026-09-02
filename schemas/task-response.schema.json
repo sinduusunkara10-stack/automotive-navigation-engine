@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.2.0\". Bumped from \"1.1.0\" to \"1.2.0\" for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics), reporting the preflight domain-discovery phase's proposed allowedDomains and the evidence behind them -- no existing field was removed or renamed.",
+      "description": "Version of this task-response contract, e.g. \"1.3.0\". Bumped from \"1.2.0\" to \"1.3.0\" because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widen the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) add the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.1.0\" to \"1.2.0\" earlier for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.2.0"
+      "const": "1.3.0"
     },
     "taskId": {
       "type": "string",
@@ -193,6 +193,17 @@
               "destinationUrl": {
                 "type": "string",
                 "description": "Destination URL of the element, when available (e.g. an anchor's href), surfaced to the reasoning layer so it can distinguish navigation targets without raw HTML."
+              },
+              "disabled": {
+                "type": "boolean",
+                "description": "True when the element carries a disabled attribute or aria-disabled=\"true\"."
+              },
+              "ariaState": {
+                "type": "object",
+                "description": "Generic ARIA selection/toggle-state attribute values present on this element (aria-selected/aria-checked/aria-pressed/aria-current), read verbatim from the page and never normalised into an engine-defined closed set.",
+                "additionalProperties": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -200,6 +211,13 @@
         "notableText": {
           "type": "array",
           "description": "Short list of salient visible text snippets (headings, prices, banners) surfaced to the reasoning layer without sending full page content.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "progressIndicatorText": {
+          "type": "array",
+          "description": "Generic, brand-agnostic progress-indicator text (e.g. \"Step 2 of 4\"), read from any element the page itself marks up as a progress/step indicator (role=\"progressbar\", aria-valuenow, aria-current=\"step\").",
           "items": {
             "type": "string"
           }
@@ -422,6 +440,10 @@
                 "format": "uri",
                 "description": "Page URL after the click action completed, when known."
               },
+              "resultingTitle": {
+                "type": "string",
+                "description": "Page title read immediately after the click action completed, when the click succeeded."
+              },
               "navigationSucceeded": {
                 "type": "boolean",
                 "description": "Whether the click resulted in the page actually navigating to a new URL."
@@ -433,6 +455,10 @@
               "error": {
                 "type": "string",
                 "description": "Error message when the click action did not succeed."
+              },
+              "actionAnalytics": {
+                "$ref": "#/$defs/actionAnalytics",
+                "description": "Generic, action-attributed analytics evidence for this click, present only when captureModules also requested data_layer_evidence and/or ga4_network_events."
               }
             }
           }
@@ -1034,6 +1060,73 @@
         },
         "decisions": {
           "type": "array",
+          "items": {
+            "$ref": "#/$defs/semanticVerifierDecisionSummary"
+          }
+        }
+      }
+    },
+    "dataLayerDelta": {
+      "type": "object",
+      "description": "Generic, mechanical before/after delta of window.dataLayer's contents around one click -- a cursor/position delta, never a full re-snapshot of either side. See src/capture-modules/dataLayerDelta.ts.",
+      "additionalProperties": false,
+      "required": ["available", "newEntries"],
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "False when no dataLayer array existed on the page either before or after the click. True whenever a dataLayer array exists (even if newEntries is empty, meaning present but unchanged)."
+        },
+        "newEntries": {
+          "type": "array",
+          "description": "Entries pushed to dataLayer since immediately before this click. When replaced is true, this is the entire post-click array (the prior contents no longer form a valid prefix, e.g. a full page navigation or an explicit reset).",
+          "items": {
+            "type": "object"
+          }
+        },
+        "replaced": {
+          "type": "boolean",
+          "description": "True when the dataLayer array was reset or replaced rather than appended to."
+        }
+      }
+    },
+    "actionAnalytics": {
+      "type": "object",
+      "description": "Generic, action-attributed analytics evidence for one click the engine dispatched -- the single mechanism used for every journey, never a per-journey capture. GA4 field naming is deliberately non-causal: a request observed inside the bounded post-click window is temporally correlated with the click, never asserted to have been caused by it.",
+      "additionalProperties": false,
+      "required": ["advancedJourney"],
+      "properties": {
+        "dataLayerDelta": {
+          "$ref": "#/$defs/dataLayerDelta"
+        },
+        "ga4RequestsObservedDuringActionWindow": {
+          "type": "array",
+          "description": "GA4-style requests observed within a short, fixed window after this click. Correlation, not causation.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stepIndex", "requestUrl", "timestamp"],
+            "properties": {
+              "stepIndex": { "type": "integer" },
+              "requestUrl": { "type": "string", "format": "uri" },
+              "timestamp": { "type": "string", "format": "date-time" },
+              "params": { "type": "object" }
+            }
+          }
+        },
+        "advancedJourney": {
+          "type": "boolean",
+          "description": "True iff the URL or title changed, or a success criterion newly became satisfied, as a direct result of this click."
+        },
+        "newlySatisfiedCriteriaIds": {
+          "type": "array",
+          "description": "Ids of success criteria that were unsatisfied before this click and satisfied immediately after it.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verifierDecisions": {
+          "type": "array",
+          "description": "Any semanticVerifier decisions made while evaluating success criteria immediately after this click.",
           "items": {
             "$ref": "#/$defs/semanticVerifierDecisionSummary"
           }

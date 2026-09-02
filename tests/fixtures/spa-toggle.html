@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SPA Toggle</title>
+    <meta
+      name="description"
+      content="Fixture SPA-style page for the local navigation-engine proof of concept: a click that changes visible state and pushes to dataLayer without navigating anywhere."
+    />
+  </head>
+  <body>
+    <h1>Configuration Step</h1>
+    <h2 id="status">No option selected yet.</h2>
+    <button type="button" id="select-option" aria-pressed="false">Select trim level</button>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "spa-toggle", fictionalId: "FIX-SPA-001" });
+
+      document.getElementById("select-option").addEventListener("click", function (btn) {
+        document.getElementById("status").textContent = "Trim level selected: confirmed.";
+        this.setAttribute("aria-pressed", "true");
+        window.dataLayer.push({ event: "option_selected", option: "trim_level", fictionalId: "FIX-SPA-002" });
+
+        var ga4Params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          cid: "555.123456",
+          en: "option_selected",
+          dl: location.href,
+          dt: document.title,
+        });
+        new Image().src = "/g/collect?" + ga4Params.toString();
+      });
+    </script>
+  </body>
+</html>

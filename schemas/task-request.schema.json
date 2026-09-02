@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-request contract, e.g. \"1.2.0\". Must be validated by the engine before use. Bumped from \"1.1.0\" to \"1.2.0\" because successCriterion.type gained the additive \"semantic_page_match\" value (see $defs/successCriterion) -- a generic, brand/language-agnostic success signal based on objective-vocabulary overlap with the live page's title/headings/interactive-element text, letting a caller recognise a destination state without supplying a URL pattern or CSS selector. Purely additive (no existing successCriteria.type, config shape, or other field changed), but per this repo's versioning convention every request-contract change bumps this const. Bumped from \"1.0.0\" to \"1.1.0\" earlier because allowedDomains is no longer required (see its own description) and the optional journeyType field was added.",
+      "description": "Version of this task-request contract, e.g. \"1.3.0\". Must be validated by the engine before use. Bumped from \"1.2.0\" to \"1.3.0\" solely because outputSchemaVersion's required const value moved to \"1.3.0\" to track task-response.schema.json's own schemaVersion bump (see outputSchemaVersion's own description) -- per this repo's versioning convention every request-contract change bumps this const, and a caller sending the old outputSchemaVersion const would now fail validation, which is a real contract change even though no field was added, removed, or reshaped. Bumped from \"1.1.0\" to \"1.2.0\" earlier because successCriterion.type gained the additive \"semantic_page_match\" value (see $defs/successCriterion) -- a generic, brand/language-agnostic success signal based on objective-vocabulary overlap with the live page's title/headings/interactive-element text, letting a caller recognise a destination state without supplying a URL pattern or CSS selector. Bumped from \"1.0.0\" to \"1.1.0\" earlier still because allowedDomains is no longer required (see its own description) and the optional journeyType field was added.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.2.0"
+      "const": "1.3.0"
     },
     "taskId": {
       "type": "string",
@@ -87,9 +87,9 @@
     },
     "outputSchemaVersion": {
       "type": "string",
-      "description": "Version of the task-response contract the caller expects back, e.g. \"1.2.0\". Bumped alongside task-response.schema.json's schemaVersion for the additive diagnostics.domainDiscovery structure.",
+      "description": "Version of the task-response contract the caller expects back, e.g. \"1.3.0\". Always kept equal to task-response.schema.json's own schemaVersion const -- this field's value tracks the response contract, not the request contract this file itself describes (which is why it moves independently of this file's own top-level schemaVersion, above). Bumped from \"1.2.0\" to \"1.3.0\" alongside task-response.schema.json's schemaVersion for the additive captures.cta_clicks[].actionAnalytics/resultingTitle and observation.interactiveElements[].disabled/ariaState/observation.progressIndicatorText structures. Bumped from \"1.1.0\" to \"1.2.0\" earlier for the additive diagnostics.domainDiscovery structure.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.2.0"
+      "const": "1.3.0"
     },
     "metadata": {
       "type": "object",

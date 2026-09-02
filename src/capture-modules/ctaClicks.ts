@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import type { ActionResult, CtaClickCapture } from "../types/task-response.js";
+import type { ActionAnalytics, ActionResult, CtaClickCapture } from "../types/task-response.js";
 import { elementLocatorSelector } from "../observation/observationBuilder.js";
 
 interface ClickedElementDetails {
@@ -41,8 +41,11 @@ export function buildCtaClickCapture(params: {
   sourcePageTitle?: string;
   details?: ClickedElementDetails;
   actionResult: ActionResult;
+  resultingTitle?: string;
+  actionAnalytics?: ActionAnalytics;
 }): CtaClickCapture {
-  const { stepIndex, sourcePageUrl, sourcePageTitle, details, actionResult } = params;
+  const { stepIndex, sourcePageUrl, sourcePageTitle, details, actionResult, resultingTitle, actionAnalytics } =
+    params;
   const resultingUrl = actionResult.resultingUrl;
   const navigationSucceeded = Boolean(actionResult.success && resultingUrl && resultingUrl !== sourcePageUrl);
 
@@ -56,8 +59,10 @@ export function buildCtaClickCapture(params: {
     elementType: details?.elementType ?? "unknown",
     ...(details?.destinationUrl ? { destinationUrl: details.destinationUrl } : {}),
     ...(resultingUrl ? { resultingUrl } : {}),
+    ...(resultingTitle ? { resultingTitle } : {}),
     navigationSucceeded,
     actionSucceeded: actionResult.success,
     ...(actionResult.error ? { error: actionResult.error } : {}),
+    ...(actionAnalytics ? { actionAnalytics } : {}),
   };
 }

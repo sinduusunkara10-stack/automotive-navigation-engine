@@ -148,3 +148,67 @@ test("the prompt sent to the model never includes an action, URL, or selector vo
   const parsedUser = JSON.parse(request.userPrompt) as Record<string, unknown>;
   assert.deepEqual(Object.keys(parsedUser).sort(), ["criterionDescription", "objective", "pageEvidence"]);
 });
+
+// ---------------------------------------------------------------------------------------
+// Widened evidence (ariaState/progressText on pageEvidence, optional lastActionEvidence):
+// every field here is optional and additive -- the tests above (built via buildInput()'s
+// defaults, which never set any of these) prove the payload shape is unchanged when they
+// are absent. These prove they're included, verbatim, when present, and participate in the
+// cache key so no two distinct pieces of evidence are ever conflated.
+// ---------------------------------------------------------------------------------------
+
+test("ariaState and progressText, when present on pageEvidence, are included in the prompt sent to the model", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "Match." })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(
+    buildInput({
+      pageEvidence: {
+        title: "Recapitulatif",
+        headings: ["Configuration terminee"],
+        interactiveText: ["Continuer"],
+        ariaState: ["Continuer (aria-current=step)"],
+        progressText: ["Step 4 of 4"],
+      },
+    }),
+  );
+
+  const request = client.requests[0];
+  assert.ok(request);
+  const parsedUser = JSON.parse(request.userPrompt) as { pageEvidence: Record<string, unknown> };
+  assert.deepEqual(parsedUser.pageEvidence.ariaState, ["Continuer (aria-current=step)"]);
+  assert.deepEqual(parsedUser.pageEvidence.progressIndicatorText, ["Step 4 of 4"]);
+});
+
+test("lastActionEvidence, when present, is included in the prompt sent to the model", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "Match." })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(
+    buildInput({ lastActionEvidence: { ctaText: "Continuer", accessibleName: "Continuer vers le recapitulatif", elementType: "button" } }),
+  );
+
+  const request = client.requests[0];
+  assert.ok(request);
+  const parsedUser = JSON.parse(request.userPrompt) as Record<string, unknown>;
+  assert.deepEqual(parsedUser.lastActionEvidence, {
+    ctaText: "Continuer",
+    accessibleName: "Continuer vers le recapitulatif",
+    elementType: "button",
+  });
+});
+
+test("two calls with identical objective/criterion/pageEvidence but different lastActionEvidence are cached independently (no collision)", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: false, confidence: 0.9, evidence: "Wrong control was clicked." }),
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "Completion control was clicked." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  const first = await verifier.verify(buildInput({ lastActionEvidence: { ctaText: "Voir les offres" } }));
+  const second = await verifier.verify(buildInput({ lastActionEvidence: { ctaText: "Continuer" } }));
+
+  assert.equal(first.satisfied, false);
+  assert.equal(second.satisfied, true);
+  assert.equal(client.requests.length, 2, "different lastActionEvidence must not be served from the same cache entry");
+});

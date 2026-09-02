@@ -14,6 +14,13 @@ export interface InteractiveElement {
   accessibleName: string;
   visible?: boolean;
   destinationUrl?: string;
+  disabled?: boolean;
+  /**
+   * Generic ARIA selection/toggle-state attribute values present on this element (e.g.
+   * {"aria-current": "step"}), read verbatim and never normalised into an engine-defined
+   * closed set -- see src/observation/observationBuilder.ts.
+   */
+  ariaState?: Record<string, string>;
 }
 
 export interface Observation {
@@ -21,6 +28,8 @@ export interface Observation {
   title: string;
   interactiveElements: InteractiveElement[];
   notableText?: string[];
+  /** Generic, brand-agnostic progress-indicator text (e.g. "Step 2 of 4"), when present. */
+  progressIndicatorText?: string[];
 }
 
 export interface ActionResult {
@@ -119,6 +128,47 @@ export interface FinishPageCtaCapture {
   accessibleName?: string;
 }
 
+/**
+ * Generic, mechanical before/after delta of window.dataLayer's contents around one action,
+ * never a full re-snapshot -- see src/capture-modules/dataLayerDelta.ts. `available`
+ * distinguishes "no dataLayer array exists on this page at all" (false) from "it exists but
+ * nothing new was pushed" (true, empty newEntries); `replaced` flags the (rare) case where
+ * the array was reset or its earlier contents no longer form a prefix of the new contents
+ * (e.g. a full page navigation, or a site explicitly reassigning window.dataLayer), in
+ * which case newEntries is the entire post-action array rather than a suffix.
+ */
+export interface DataLayerDelta {
+  available: boolean;
+  newEntries: Record<string, unknown>[];
+  replaced?: boolean;
+}
+
+/**
+ * Generic, action-attributed analytics evidence for one click the engine dispatched --
+ * the single mechanism required by every journey (configurator, test-drive, dealer
+ * locator, ...), never a per-journey capture function. Every field here is either raw,
+ * already-captured evidence (dataLayerDelta, ga4RequestsObservedDuringActionWindow,
+ * resultingTitle) or a mechanically-derived fact (advancedJourney,
+ * newlySatisfiedCriteriaIds) -- never an inference written where raw evidence belongs (see
+ * CLAUDE.md "Keep raw, website-derived evidence... strictly separate from... engine-
+ * generated classification"). GA4 field naming is deliberately non-causal
+ * (`...ObservedDuringActionWindow`, not `...CausedByClick`): a request observed inside the
+ * bounded post-click window is temporally correlated with the click, never asserted to have
+ * been caused by it -- see docs/n8n-integration.md "Generic action-attributed analytics
+ * capture".
+ */
+export interface ActionAnalytics {
+  dataLayerDelta?: DataLayerDelta;
+  /** GA4-style requests observed within a short, fixed window after this click -- correlation, not causation. */
+  ga4RequestsObservedDuringActionWindow?: Ga4NetworkEventCapture[];
+  /** True iff the URL or title changed, or a success criterion newly became satisfied, as a direct result of this click. */
+  advancedJourney: boolean;
+  /** Ids of success criteria that were unsatisfied before this click and satisfied immediately after it. */
+  newlySatisfiedCriteriaIds?: string[];
+  /** Any semanticVerifier decisions made while evaluating success criteria immediately after this click. */
+  verifierDecisions?: SemanticVerifierDecisionSummary[];
+}
+
 export interface CtaClickCapture {
   stepIndex: number;
   timestamp: string;
@@ -129,9 +179,12 @@ export interface CtaClickCapture {
   elementType: string;
   destinationUrl?: string;
   resultingUrl?: string;
+  resultingTitle?: string;
   navigationSucceeded: boolean;
   actionSucceeded: boolean;
   error?: string;
+  /** Present only when captureModules also requests data_layer_evidence and/or ga4_network_events (see loop.ts). */
+  actionAnalytics?: ActionAnalytics;
 }
 
 export interface JourneyPathSelectedElement {
@@ -330,7 +383,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.2.0";
+  schemaVersion: "1.3.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

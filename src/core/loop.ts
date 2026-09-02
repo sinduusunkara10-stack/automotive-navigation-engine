@@ -9,10 +9,13 @@ import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVe
 import { checkLimitsBreach, validateDecision, type SafetyCheckResult } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
+import { diffDataLayer, readDataLayerSnapshot, type DataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
+import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "./successEvaluator.js";
+import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
 
 export type TerminalStatus =
@@ -157,10 +160,21 @@ export async function runStep(params: {
   // Element attributes must be read before the click executes: a click can navigate
   // away, taking the clicked element's DOM node with it.
   const wantsCtaClickCapture = task.captureModules.includes("cta_clicks");
+  const wantsDataLayerDelta = wantsCtaClickCapture && task.captureModules.includes("data_layer_evidence");
+  const wantsGa4Window = wantsCtaClickCapture && task.captureModules.includes("ga4_network_events");
+  const isClick = effectiveAction.type === "click";
   const clickedElementDetails =
-    wantsCtaClickCapture && effectiveAction.type === "click" && effectiveAction.target
+    wantsCtaClickCapture && isClick && effectiveAction.target
       ? await readClickedElementDetails(page, effectiveAction.target)
       : undefined;
+
+  // Generic, action-attributed analytics capture (see docs/n8n-integration.md "Generic
+  // action-attributed analytics capture"): before-state evidence for the dataLayer delta
+  // and GA4 window correlation below is read now, immediately before dispatch, so it
+  // reflects this click's true starting point rather than an earlier step's.
+  const dataLayerBefore: DataLayerSnapshot | undefined =
+    wantsDataLayerDelta && isClick ? await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] })) : undefined;
+  const ga4WindowStartIndex = wantsGa4Window && isClick ? (captures.ga4_network_events?.length ?? 0) : undefined;
 
   const actionResult = await dispatchAction({
     page,
@@ -199,21 +213,80 @@ export async function runStep(params: {
     });
   }
 
-  if (wantsCtaClickCapture && effectiveAction.type === "click") {
+  // After-state evidence for this same click, gathered before success criteria are
+  // re-evaluated below so newlySatisfiedCriteriaIds/verifierDecisions can be attributed to
+  // it too. GA4 requests can lag slightly behind a click's synchronous return (especially
+  // just before a navigation), so a short bounded wait is applied -- but only when a task
+  // actually asked for ga4_network_events correlation; every other run is unaffected.
+  let resultingTitle: string | undefined;
+  let dataLayerAfter: DataLayerSnapshot | undefined;
+  let ga4WindowEndIndex: number | undefined;
+  if (wantsCtaClickCapture && isClick) {
+    if (actionResult.success) {
+      resultingTitle = await page.title().catch(() => undefined);
+    }
+    if (wantsGa4Window) {
+      await page.waitForTimeout(GA4_ACTION_WINDOW_MS).catch(() => undefined);
+      ga4WindowEndIndex = captures.ga4_network_events?.length ?? 0;
+    }
+    if (wantsDataLayerDelta) {
+      dataLayerAfter = await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] }));
+    }
+  }
+
+  state.recordAction(effectiveAction);
+
+  const satisfiedCountBeforeThisAction = state.satisfiedCriteriaIds.size;
+  const verifierDecisionCountBefore = semanticVerifier?.getUsageDiagnostics?.()?.decisions?.length ?? 0;
+  const newlySatisfied = await evaluateSuccessCriteria(
+    page,
+    task.successCriteria,
+    task.objective,
+    semanticVerifier,
+    state.satisfiedCriteriaIds,
+    wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
+  );
+  newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
+
+  if (wantsCtaClickCapture && isClick) {
+    const advancedJourney =
+      Boolean(actionResult.resultingUrl && actionResult.resultingUrl !== observation.url) ||
+      Boolean(resultingTitle && resultingTitle !== observation.title) ||
+      newlySatisfied.length > 0 ||
+      state.satisfiedCriteriaIds.size > satisfiedCountBeforeThisAction;
+
+    const verifierDecisions = wantsCtaClickCapture
+      ? semanticVerifier?.getUsageDiagnostics?.()?.decisions?.slice(verifierDecisionCountBefore)
+      : undefined;
+
+    const actionAnalytics: ActionAnalytics = {
+      ...(wantsDataLayerDelta && dataLayerBefore && dataLayerAfter
+        ? { dataLayerDelta: diffDataLayer(dataLayerBefore, dataLayerAfter) }
+        : {}),
+      ...(wantsGa4Window
+        ? {
+            ga4RequestsObservedDuringActionWindow: (captures.ga4_network_events ?? []).slice(
+              ga4WindowStartIndex,
+              ga4WindowEndIndex,
+            ),
+          }
+        : {}),
+      advancedJourney,
+      ...(newlySatisfied.length > 0 ? { newlySatisfiedCriteriaIds: newlySatisfied } : {}),
+      ...(verifierDecisions && verifierDecisions.length > 0 ? { verifierDecisions } : {}),
+    };
+
     const ctaClick = buildCtaClickCapture({
       stepIndex,
       sourcePageUrl: observation.url,
       sourcePageTitle: observation.title,
       details: clickedElementDetails,
       actionResult,
+      resultingTitle,
+      actionAnalytics,
     });
     captures.cta_clicks = [...(captures.cta_clicks ?? []), ctaClick];
   }
-
-  state.recordAction(effectiveAction);
-  (
-    await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier, state.satisfiedCriteriaIds)
-  ).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
   // A stop_success decision is only ever a *proposal* from the reasoning layer -- the
   // engine is the sole authority on whether the objective was actually reached. Every
