@@ -575,3 +575,121 @@ test("url_pattern and element_present never consult semanticVerifier, even when 
     assert.equal(verifier.calls.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// Already-satisfied short-circuit (evaluateSuccessCriteria's alreadySatisfiedCriteriaIds
+// parameter, consulted by src/core/loop.ts via state.satisfiedCriteriaIds): a criterion
+// whose id is already a member of that set is never re-evaluated at all -- of any type,
+// not gated on the page or URL "not having changed". Ratchet semantics (nothing ever
+// removes a member from satisfiedCriteriaIds -- see src/core/state.ts) make this a pure
+// redundant-work elimination: the answer can no longer affect the run's outcome, so
+// re-deriving it (most costly for semantic_page_match, which can mean a wasted model
+// call every time an SPA re-renders incidental content after the criterion was already
+// satisfied) is pure waste. See docs/n8n-integration.md "Repeated-decision and cost
+// control".
+// ---------------------------------------------------------------------------------------
+
+test("an already-satisfied semantic_page_match criterion makes zero further semanticVerifier calls", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  // Page evidence that would normally force an escalation to the verifier (deterministic
+  // score below minScore, cross-language) -- if the short-circuit didn't work, this test
+  // would fail loudly on the thrown error below, not pass for an unrelated reason.
+  const html = page_("<h1>Configurateur de véhicule</h1><h2>Options de configuration visibles</h2>", "Configurez");
+  const verifier = fakeVerifier(() => {
+    throw new Error("semanticVerifier.verify() must never be called for an already-satisfied criterion");
+  });
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      objective,
+      verifier,
+      new Set(["reached-configurator"]),
+    );
+    assert.deepEqual(satisfied, []);
+  });
+});
+
+test("an already-satisfied url_pattern criterion is never re-checked against the live page", async () => {
+  await withPage(page_("<h1>Success</h1>", "Success"), async (page) => {
+    let urlCalls = 0;
+    const originalUrl = page.url.bind(page);
+    page.url = () => {
+      urlCalls += 1;
+      return originalUrl();
+    };
+    const criterion: SuccessCriterion = {
+      id: "on-success-url",
+      type: "url_pattern",
+      description: "A pattern that would never match this fixture, proving re-evaluation never happens.",
+      config: { pattern: "https://this-will-never-match.invalid/**" },
+    };
+
+    await evaluateSuccessCriteria(page, [criterion], "objective", undefined, new Set(["on-success-url"]));
+
+    assert.equal(urlCalls, 0, "page.url() must never be called for an already-satisfied url_pattern criterion");
+  });
+});
+
+test("an already-satisfied element_present criterion is never re-queried against the live DOM", async () => {
+  await withPage(page_("<h1>Success</h1>", "Success"), async (page) => {
+    let locatorCalls = 0;
+    const originalLocator = page.locator.bind(page);
+    page.locator = ((selector: string) => {
+      locatorCalls += 1;
+      return originalLocator(selector);
+    }) as typeof page.locator;
+    const criterion: SuccessCriterion = {
+      id: "success-marker-present",
+      type: "element_present",
+      description: "A selector that would never match this fixture, proving re-evaluation never happens.",
+      config: { selector: '[data-testid="this-will-never-exist"]' },
+    };
+
+    await evaluateSuccessCriteria(page, [criterion], "objective", undefined, new Set(["success-marker-present"]));
+
+    assert.equal(locatorCalls, 0, "page.locator() must never be called for an already-satisfied element_present criterion");
+  });
+});
+
+test("a criterion satisfied earlier is skipped on a later call, while a still-unsatisfied criterion keeps being evaluated normally", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const alreadySatisfied: SuccessCriterion = {
+    id: "already-satisfied",
+    type: "url_pattern",
+    description: "Already satisfied on an earlier step; must never be checked again.",
+    config: { pattern: "https://this-will-never-match.invalid/**" },
+  };
+  const notYetSatisfied: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>", "Configure Your Vehicle");
+
+  await withPage(html, async (page) => {
+    let urlCalls = 0;
+    const originalUrl = page.url.bind(page);
+    page.url = () => {
+      urlCalls += 1;
+      return originalUrl();
+    };
+
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [alreadySatisfied, notYetSatisfied],
+      objective,
+      undefined,
+      new Set(["already-satisfied"]),
+    );
+
+    assert.deepEqual(satisfied, ["reached-configurator"]);
+    assert.equal(urlCalls, 0, "the already-satisfied url_pattern criterion must never be re-checked");
+  });
+});

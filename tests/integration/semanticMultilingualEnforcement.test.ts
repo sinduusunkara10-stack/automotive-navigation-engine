@@ -196,12 +196,17 @@ test("FAILING-BEFORE-FIX regression proof: the English objective must succeed ag
     assert.ok(response.engineAssessment.satisfiedSuccessCriteriaIds?.includes("objective-destination-reached"));
     // Exactly two real model calls for the whole run: one correctly-negative call for the
     // start page (evaluated once, before the click, since its deterministic score also
-    // falls short of minScore) and one positive call for the destination page. Every
-    // further evaluation of either already-seen page (including the accepted stop_success
-    // proposal itself) is a cache hit -- an unchanged page is never re-verified.
+    // falls short of minScore) and one positive call for the destination page. Once the
+    // criterion is satisfied, src/core/loop.ts's already-satisfied short-circuit
+    // (evaluateSuccessCriteria's alreadySatisfiedCriteriaIds parameter) skips it entirely
+    // on every later evaluation -- including the accepted stop_success proposal itself --
+    // so those never even reach the verifier's own content cache. cacheHitCount stays 0:
+    // it counts calls that reached verify() and were served from cache, not evaluations
+    // skipped before ever calling verify() at all (see "Repeated-decision and cost
+    // control" in docs/n8n-integration.md for the distinction between the two mechanisms).
     assert.equal(modelClient.requests.length, 2);
     assert.equal(response.diagnostics.semanticVerifier?.callCount, 2);
-    assert.equal(response.diagnostics.semanticVerifier?.cacheHitCount, 2);
+    assert.equal(response.diagnostics.semanticVerifier?.cacheHitCount, 0);
     assert.equal(response.diagnostics.semanticVerifier?.satisfiedCount, 1);
     assert.equal(response.diagnostics.semanticVerifier?.rejectedCount, 1);
   } finally {
