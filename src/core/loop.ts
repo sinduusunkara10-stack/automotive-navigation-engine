@@ -52,9 +52,9 @@ export async function runStep(params: {
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), dataLayerEntry];
   }
 
-  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier)).forEach((id) =>
-    state.satisfiedCriteriaIds.add(id),
-  );
+  (
+    await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier, state.satisfiedCriteriaIds)
+  ).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
   const limitsBreach = checkLimitsBreach(
     {
@@ -211,9 +211,9 @@ export async function runStep(params: {
   }
 
   state.recordAction(effectiveAction);
-  (await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier)).forEach((id) =>
-    state.satisfiedCriteriaIds.add(id),
-  );
+  (
+    await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier, state.satisfiedCriteriaIds)
+  ).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
   // A stop_success decision is only ever a *proposal* from the reasoning layer -- the
   // engine is the sole authority on whether the objective was actually reached. Every

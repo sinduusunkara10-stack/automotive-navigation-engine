@@ -7,6 +7,12 @@ import { chromium } from "playwright";
 import { runTask } from "../../src/core/engine.js";
 import type { TaskRequest } from "../../src/types/task-request.js";
 import type { Decision, ReasoningContext, ReasoningProvider } from "../../src/reasoning/reasoningProvider.js";
+import { ClaudeSemanticCriterionVerifier } from "../../src/reasoning/semanticCriterionVerifier.js";
+import type {
+  ReasoningModelClient,
+  ReasoningModelRequest,
+  ReasoningModelResult,
+} from "../../src/reasoning/reasoningModelClient.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -506,6 +512,123 @@ test("conflicting evidence: one satisfied required criterion alongside one unsat
     assert.ok(response.diagnostics.missingRequiredCriteriaIds?.includes("on-success-url"));
     assert.ok(!response.diagnostics.missingRequiredCriteriaIds?.includes("reached-step-two"));
     assert.ok(response.engineAssessment.satisfiedSuccessCriteriaIds?.includes("reached-step-two"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// Already-satisfied short-circuit at the full engine-loop level (Option 3): reproduces
+// the reported production pattern -- a verifier-backed required criterion gets satisfied
+// once, then the run continues for several more steps (here, via the no-progress guard
+// needing two identical rejections before it ends the run) while a *second* required
+// criterion never becomes satisfied. Every one of those extra steps re-evaluates the
+// already-satisfied criterion at both the top-of-step and post-action call sites in
+// src/core/loop.ts -- proving the short-circuit, not just the verifier's own content
+// cache, is what keeps diagnostics.semanticVerifier.callCount flat.
+// ---------------------------------------------------------------------------------------
+
+const TEST_VERIFIER_CONFIG = {
+  apiKey: "test-fake-key-never-a-real-credential",
+  model: "claude-sonnet-5",
+  maxOutputTokens: 512,
+  timeoutMs: 5000,
+  maxRetries: 1,
+  minConfidence: 0.5,
+};
+
+/** Judges evidence containing `satisfiedMarker` as satisfied; everything else, not. */
+class KeywordAwareSemanticModelClient implements ReasoningModelClient {
+  readonly requests: ReasoningModelRequest<unknown>[] = [];
+  constructor(private readonly satisfiedMarker: string) {}
+
+  async createDecision<TPayload>(request: ReasoningModelRequest<TPayload>): Promise<ReasoningModelResult<TPayload>> {
+    this.requests.push(request as ReasoningModelRequest<unknown>);
+    const satisfied = request.userPrompt.includes(this.satisfiedMarker);
+    return {
+      parsedOutput: {
+        satisfied,
+        confidence: satisfied ? 0.9 : 0.1,
+        evidence: satisfied ? "Step Two page evidence matched." : "No matching evidence on this page.",
+      } as TPayload,
+      stopReason: "end_turn",
+      usage: { inputTokens: 100, outputTokens: 20 },
+    };
+  }
+}
+
+test("REGRESSION (Citroën production pattern): an already-satisfied semantic criterion stops costing verifier calls, even while the run continues for several more steps", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      // Deliberately avoids the phrase "Learn more about this step" (the fake verifier's
+      // marker below) anywhere in objective/description text -- the marker must only ever
+      // be found in *page* evidence, never echoed into every prompt via the objective
+      // itself (which would satisfy the criterion on the very first, wrong-page call).
+      objective: "Reach the fixture's intermediate page and continue toward the success page.",
+      startUrl: `${baseUrl}/start.html`,
+      successCriteria: [
+        {
+          id: "reached-step-two",
+          type: "semantic_page_match",
+          description: "The intermediate page's own controls are visible.",
+          // Deliberately unreachable by the deterministic evaluator alone, so every
+          // evaluation of this criterion (until short-circuited) must escalate to the
+          // verifier -- isolating this test to the exact mechanism under test.
+          config: { minScore: 0.99 },
+          required: true,
+        },
+        {
+          id: "on-success-url",
+          type: "url_pattern",
+          description: "Current page is the success fixture.",
+          config: { pattern: `${baseUrl}/success.html` },
+          required: true,
+        },
+      ],
+      // Generous limits: a genuine maxSteps/repeated-action stop would take many more
+      // steps (and, pre-Option-3, many more verifier calls) to reach -- proving the
+      // no-progress guard, not the limits, is what ends this run, while the *verifier
+      // call count* is what proves Option 3's short-circuit specifically.
+      limits: { maxSteps: 50, maxBacktracks: 0, maxRepeatedActions: 50 },
+    });
+
+    // "Learn more about this step" is step2.html's own button text (see tests/fixtures/step2.html)
+    // -- present only in that page's interactiveElementText, never in the objective/description.
+    const modelClient = new KeywordAwareSemanticModelClient("Learn more about this step");
+    const semanticVerifier = new ClaudeSemanticCriterionVerifier({ config: TEST_VERIFIER_CONFIG, modelClient });
+
+    const response = await runTask({
+      page,
+      task,
+      reasoning: new ClickOnceThenAlwaysStopSuccessProvider(),
+      semanticVerifier,
+    });
+
+    assert.equal(response.finalUrl, `${baseUrl}/step2.html`);
+    assert.notEqual(response.status, "success");
+    assert.ok(response.engineAssessment.satisfiedSuccessCriteriaIds?.includes("reached-step-two"));
+    assert.ok(response.diagnostics.missingRequiredCriteriaIds?.includes("on-success-url"));
+    // More than 2 runStep iterations occurred (the no-progress guard requires at least
+    // one rejected stop_success beyond the satisfying step), so without the short-circuit
+    // this would be > 2. With it: exactly one negative call (start.html) and one positive
+    // call (step2.html) -- the criterion is satisfied after that and never re-verified,
+    // no matter how many more steps evaluate it.
+    assert.ok(response.steps.length > 2, "expected the run to continue for multiple steps after satisfaction");
+    assert.equal(modelClient.requests.length, 2);
+    assert.equal(response.diagnostics.semanticVerifier?.callCount, 2);
+    assert.equal(response.diagnostics.semanticVerifier?.satisfiedCount, 1);
+    assert.equal(response.diagnostics.semanticVerifier?.rejectedCount, 1);
+    // cacheHitCount stays 0: the repeated evaluations never reach verify() at all (the
+    // short-circuit happens one layer up, in evaluateSuccessCriteria), so they're not
+    // counted as cache hits either -- see docs/n8n-integration.md "Repeated-decision and
+    // cost control" for the distinction between this mechanism and the verifier's own
+    // content cache.
+    assert.equal(response.diagnostics.semanticVerifier?.cacheHitCount, 0);
   } finally {
     await page.close();
     await browser.close();

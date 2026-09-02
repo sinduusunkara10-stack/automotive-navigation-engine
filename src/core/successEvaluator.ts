@@ -24,15 +24,34 @@ const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
  * could not already satisfy -- see docs/n8n-integration.md "Generic multilingual
  * semantic_page_match verification" for why deterministic token overlap alone cannot
  * safely support arbitrary objective-language/page-language pairs.
+ *
+ * `alreadySatisfiedCriteriaIds` is optional and off by default too: when supplied (the
+ * engine passes its running satisfiedCriteriaIds Set -- see src/core/loop.ts), a
+ * criterion whose id is already a member is never re-evaluated at all, of any type --
+ * not just semantic_page_match, and not gated on the page or URL having "not changed".
+ * This is a pure redundant-work elimination, not a change to what "satisfied" means: the
+ * engine's satisfiedCriteriaIds is a one-way ratchet (nothing ever removes a member --
+ * see src/core/state.ts), so a criterion's truth value can never revert from true to
+ * false, and re-deriving an answer that can no longer affect the run's outcome is wasted
+ * work -- most visibly, a wasted semantic-verifier model call on a page whose incidental
+ * content (a selected option, a live price, a step counter) keeps changing after the
+ * criterion was already satisfied. See docs/n8n-integration.md "Repeated-decision and
+ * cost control" for the caching/no-progress guard this complements, and the design
+ * discussion in this session for why URL- or content-based caching was rejected in favour
+ * of this narrower, zero-new-false-positive/false-negative optimisation.
  */
 export async function evaluateSuccessCriteria(
   page: Page,
   criteria: SuccessCriterion[],
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
+  alreadySatisfiedCriteriaIds?: ReadonlySet<string>,
 ): Promise<string[]> {
   const satisfied: string[] = [];
   for (const criterion of criteria) {
+    if (alreadySatisfiedCriteriaIds?.has(criterion.id)) {
+      continue;
+    }
     if (await evaluateSingle(page, criterion, objective, semanticVerifier)) {
       satisfied.push(criterion.id);
     }
