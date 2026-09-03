@@ -100,7 +100,7 @@ function successResult(overrides: Partial<TaskResponse> = {}): TaskResponse {
       totalDurationMs: 2500,
       finishReason: "stop_success_action",
       reasoningProvider: {
-        version: "1.0.0",
+        version: "1.1.0",
         provider: "claude",
         model: "claude-sonnet-5",
         callCount: 3,

@@ -877,6 +877,57 @@
         "latencyMs": {
           "type": "integer",
           "minimum": 0
+        },
+        "elementSelection": {
+          "$ref": "#/$defs/promptElementSelectionDiagnostic",
+          "description": "Bounded diagnostic of which interactive elements from this step's Observation actually reached the model's prompt for this attempt, and why."
+        }
+      }
+    },
+    "promptElementSelectionDiagnostic": {
+      "type": "object",
+      "description": "Bounded diagnostic explaining which interactive elements from a step's Observation were actually included in one decision attempt's model prompt, and why (see src/reasoning/promptBuilder.ts). Never duplicates the full observation or the raw prompt -- `selected` is capped at the same per-step interactive-element limit already applied to the prompt itself, and `excludedRelevantCount` is a count only, never a list.",
+      "additionalProperties": false,
+      "required": ["candidateCount", "selectedCount", "relevantSelectedCount", "structuralSelectedCount", "excludedRelevantCount", "selected"],
+      "properties": {
+        "candidateCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total interactive elements observed on the page this step, before any truncation."
+        },
+        "selectedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of elements actually included in the prompt sent to the model."
+        },
+        "relevantSelectedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of selectedCount, how many were selected because their accessible name shares literal vocabulary with the objective/successCriteria text."
+        },
+        "structuralSelectedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of selectedCount, how many were selected by the generic, language-independent structural/positional fallback (never text-based) rather than lexical relevance."
+        },
+        "excludedRelevantCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Count of elements that scored positively on lexical relevance but still did not fit within the prompt's element cap. A count only, never a list, to keep this diagnostic bounded."
+        },
+        "selected": {
+          "type": "array",
+          "description": "The elements actually included in the prompt, and why -- bounded to selectedCount entries.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "accessibleName", "reason"],
+            "properties": {
+              "id": { "type": "string" },
+              "accessibleName": { "type": "string" },
+              "reason": { "type": "string", "enum": ["relevant", "structural"] }
+            }
+          }
         }
       }
     },
@@ -899,9 +950,9 @@
       "properties": {
         "version": {
           "type": "string",
-          "description": "Version of this reasoning-provider diagnostics structure, e.g. \"1.0.0\".",
+          "description": "Version of this reasoning-provider diagnostics structure, e.g. \"1.1.0\". Bumped from \"1.0.0\" to \"1.1.0\" for the additive, optional decisions[].elementSelection diagnostic -- no existing field removed or renamed.",
           "pattern": "^\\d+\\.\\d+\\.\\d+$",
-          "const": "1.0.0"
+          "const": "1.1.0"
         },
         "provider": {
           "type": "string",

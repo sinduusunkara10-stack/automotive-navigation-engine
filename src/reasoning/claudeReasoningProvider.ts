@@ -2,7 +2,7 @@ import type { Decision, ReasoningContext, ReasoningProvider } from "./reasoningP
 import { REASONING_PROVIDER_DIAGNOSTICS_VERSION } from "./reasoningProvider.js";
 import { ReasoningModelError, type ReasoningModelClient } from "./reasoningModelClient.js";
 import { buildClaudeDecisionSchema, type ClaudeDecisionPayload } from "./claudeDecisionSchema.js";
-import { buildReasoningPrompt } from "./promptBuilder.js";
+import { buildReasoningPrompt, type PromptElementSelectionDiagnostic } from "./promptBuilder.js";
 import { validateClaudeDecision } from "./validateClaudeDecision.js";
 import { readClaudeReasoningConfig, type ClaudeReasoningConfig } from "./config.js";
 import { createAnthropicReasoningModelClient } from "./anthropicReasoningModelClient.js";
@@ -19,6 +19,13 @@ export interface ClaudeDecisionLogEntry {
   confidence?: number;
   latencyMs: number;
   usage?: { inputTokens?: number; outputTokens?: number };
+  /**
+   * Bounded diagnostic explaining which interactive elements were actually included in
+   * *this* attempt's prompt and why (see src/reasoning/promptBuilder.ts) -- lets a caller
+   * confirm whether a specific element (e.g. one visible in StepLog.observation) actually
+   * reached the model, without having to reconstruct the selection logic themselves.
+   */
+  elementSelection?: PromptElementSelectionDiagnostic;
 }
 
 export interface ClaudeReasoningProviderOptions {
@@ -45,6 +52,7 @@ function toDecisionSummary(entry: ClaudeDecisionLogEntry): ReasoningProviderDeci
     ...(entry.usage?.inputTokens !== undefined ? { inputTokens: entry.usage.inputTokens } : {}),
     ...(entry.usage?.outputTokens !== undefined ? { outputTokens: entry.usage.outputTokens } : {}),
     latencyMs: entry.latencyMs,
+    ...(entry.elementSelection ? { elementSelection: entry.elementSelection } : {}),
   };
 }
 
@@ -100,7 +108,15 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
 
         if (!result.parsedOutput) {
           lastReason = result.stopReason === "refusal" ? "refusal" : "malformed_output";
-          this.log({ stepIndex, attempt, outcome: "rejected", reason: lastReason, latencyMs, usage: result.usage });
+          this.log({
+            stepIndex,
+            attempt,
+            outcome: "rejected",
+            reason: lastReason,
+            latencyMs,
+            usage: result.usage,
+            elementSelection: prompt.elementSelection,
+          });
           continue;
         }
 
@@ -115,6 +131,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
             confidence: result.parsedOutput.confidence,
             latencyMs,
             usage: result.usage,
+            elementSelection: prompt.elementSelection,
           });
           continue;
         }
@@ -126,6 +143,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
           confidence: validation.confidence,
           latencyMs,
           usage: result.usage,
+          elementSelection: prompt.elementSelection,
         });
         return {
           action: validation.action,
@@ -134,11 +152,11 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
       } catch (error) {
         const latencyMs = Date.now() - startedAt;
         lastReason = error instanceof ReasoningModelError ? error.category : "provider_error";
-        this.log({ stepIndex, attempt, outcome: "error", reason: lastReason, latencyMs });
+        this.log({ stepIndex, attempt, outcome: "error", reason: lastReason, latencyMs, elementSelection: prompt.elementSelection });
       }
     }
 
-    return this.fallback(lastReason, stepIndex);
+    return this.fallback(lastReason, stepIndex, prompt.elementSelection);
   }
 
   /**
@@ -170,8 +188,8 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
     };
   }
 
-  private fallback(reason: string, stepIndex: number): Decision {
-    this.log({ stepIndex, attempt: -1, outcome: "fallback", reason, latencyMs: 0 });
+  private fallback(reason: string, stepIndex: number, elementSelection?: PromptElementSelectionDiagnostic): Decision {
+    this.log({ stepIndex, attempt: -1, outcome: "fallback", reason, latencyMs: 0, elementSelection });
     return {
       action: { type: FALLBACK_ACTION_TYPE },
       rationale: `Claude reasoning provider could not produce a valid decision (${reason}); stopping safely.`,

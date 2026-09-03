@@ -228,6 +228,25 @@ export interface EngineAssessment {
 
 export type ReasoningProviderDecisionOutcome = "accepted" | "rejected" | "error" | "fallback";
 
+/**
+ * Bounded diagnostic explaining which interactive elements from the step's Observation
+ * were actually included in this one decision attempt's model prompt, and why (see
+ * selection algorithm in src/reasoning/promptBuilder.ts) -- lets a caller confirm whether
+ * a specific element visible in StepLog.observation actually reached the model, without
+ * reconstructing the selection logic themselves. Bounded by construction: `selected` never
+ * exceeds the same per-step interactive-element cap already applied to the prompt itself
+ * (see promptBuilder.ts's MAX_INTERACTIVE_ELEMENTS), and `excludedRelevantCount` is a count
+ * only, never a list -- this never duplicates the full observation or the raw prompt.
+ */
+export interface PromptElementSelectionDiagnostic {
+  candidateCount: number;
+  selectedCount: number;
+  relevantSelectedCount: number;
+  structuralSelectedCount: number;
+  excludedRelevantCount: number;
+  selected: { id: string; accessibleName: string; reason: "relevant" | "structural" }[];
+}
+
 export interface ReasoningProviderDecisionSummary {
   stepIndex?: number;
   attempt: number;
@@ -236,6 +255,7 @@ export interface ReasoningProviderDecisionSummary {
   inputTokens?: number;
   outputTokens?: number;
   latencyMs: number;
+  elementSelection?: PromptElementSelectionDiagnostic;
 }
 
 /**
@@ -247,7 +267,7 @@ export interface ReasoningProviderDecisionSummary {
  * monetary cost) so cost can be computed downstream against whatever pricing applies later.
  */
 export interface ReasoningProviderDiagnostics {
-  version: "1.0.0";
+  version: "1.1.0";
   provider: string;
   model?: string;
   callCount: number;

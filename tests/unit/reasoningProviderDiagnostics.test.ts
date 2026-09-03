@@ -43,7 +43,7 @@ test("one accepted fake Claude decision produces callCount 1 and zero retries", 
   await provider.decide(buildTestReasoningContext());
   const diagnostics = provider.getUsageDiagnostics();
 
-  assert.equal(diagnostics.version, "1.0.0");
+  assert.equal(diagnostics.version, "1.1.0");
   assert.equal(diagnostics.provider, "claude");
   assert.equal(diagnostics.model, TEST_CONFIG.model);
   assert.equal(diagnostics.callCount, 1);
@@ -197,8 +197,31 @@ test("diagnostics contain no prompts, raw responses, observations, page HTML, se
   const decisionKeys = new Set(diagnostics.decisions?.flatMap((d) => Object.keys(d)) ?? []);
   for (const key of decisionKeys) {
     assert.ok(
-      ["stepIndex", "attempt", "outcome", "confidence", "inputTokens", "outputTokens", "latencyMs"].includes(key),
+      ["stepIndex", "attempt", "outcome", "confidence", "inputTokens", "outputTokens", "latencyMs", "elementSelection"].includes(
+        key,
+      ),
       `unexpected key "${key}" in a per-decision summary`,
     );
+  }
+
+  // elementSelection itself must stay just as safe/bounded as the rest of this
+  // structure -- ids, accessible names (already visible in Observation, never raw HTML),
+  // and counts only, never a prompt, raw model response, or unbounded element list.
+  for (const decision of diagnostics.decisions ?? []) {
+    if (!decision.elementSelection) {
+      continue;
+    }
+    const selectionKeys = Object.keys(decision.elementSelection).sort();
+    assert.deepEqual(selectionKeys, [
+      "candidateCount",
+      "excludedRelevantCount",
+      "relevantSelectedCount",
+      "selected",
+      "selectedCount",
+      "structuralSelectedCount",
+    ]);
+    for (const entry of decision.elementSelection.selected) {
+      assert.deepEqual(Object.keys(entry).sort(), ["accessibleName", "id", "reason"]);
+    }
   }
 });
