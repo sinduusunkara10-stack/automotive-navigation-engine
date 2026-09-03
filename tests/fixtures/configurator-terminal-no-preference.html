@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Configurateur</title>
+    <meta
+      name="description"
+      content="Small companion fixture (no large filler list) for the no-route-preference regression test -- isolates the success-criteria/terminal-verifier acceptance logic from the separate, already-covered prompt-truncation/ranking mechanism (see configurator-terminal-fr.html)."
+    />
+  </head>
+  <body>
+    <h1>Configuration du véhicule</h1>
+    <a href="#a">Lien de navigation</a>
+    <a href="#b">Autre lien</a>
+    <h2>Étape finale</h2>
+    <a href="/offres.html" id="decoy-offers">Voir les offres promotionnelles</a>
+    <a href="/paiement.html" id="decoy-payment">Payer maintenant et finaliser la commande</a>
+    <button type="button" id="continue-control">Continuez</button>
+    <button type="button" id="summary-control">Résumé</button>
+    <div id="result-area"></div>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "configurator-terminal-no-pref", fictionalId: "FIX-NOPREF-001" });
+
+      document.getElementById("summary-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Résumé de la configuration terminée</h2>";
+        window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-NOPREF-002" });
+      });
+
+      document.getElementById("continue-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Continuation confirmée</h2>";
+        window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-NOPREF-003" });
+      });
+
+      document.getElementById("decoy-payment").addEventListener("click", function (e) {
+        e.preventDefault();
+        document.getElementById("result-area").innerHTML = "<h2>ERREUR DE TEST</h2><p>Le controle de paiement a ete active -- ceci ne doit jamais se produire.</p>";
+      });
+    </script>
+  </body>
+</html>

@@ -694,6 +694,57 @@ test("a criterion satisfied earlier is skipped on a later call, while a still-un
   });
 });
 
+test("an already-satisfied OPTIONAL (required: false) criterion is short-circuited exactly like a required one -- the milestone pattern (e.g. configurator-entered) never pays repeated verification cost once satisfied", async () => {
+  // Matches the real configurator-entered/configuration-finished pattern (docs/n8n-
+  // integration.md "Terminal-route success model"): an optional milestone criterion,
+  // satisfied early, must never be re-verified on every subsequent step just because it
+  // is optional -- the short-circuit in evaluateSuccessCriteria operates purely on
+  // criterion id membership in alreadySatisfiedCriteriaIds and has no `required`
+  // conditional anywhere near it (see src/core/successEvaluator.ts), but until now no
+  // test exercised the required:false case specifically.
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const optionalMilestone: SuccessCriterion = {
+    id: "configurator-entered",
+    type: "semantic_page_match",
+    description: "The vehicle configurator has been entered.",
+    required: false,
+  };
+  // Deliberately unreachable by the deterministic evaluator alone (cross-language page),
+  // so re-evaluation -- if it happened -- would necessarily escalate to the verifier,
+  // making the thrown error below a reliable failure signal.
+  const html = page_("<h1>Configurateur de vehicule</h1><h2>Options de configuration visibles</h2>", "Configurez");
+  const verifier = fakeVerifier(() => {
+    throw new Error("semanticVerifier.verify() must never be called for an already-satisfied optional criterion");
+  });
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [optionalMilestone],
+      objective,
+      verifier,
+      new Set(["configurator-entered"]),
+    );
+    assert.deepEqual(satisfied, [], "an already-satisfied criterion is never re-reported as newly satisfied");
+  });
+});
+
+test("an optional (required: false) criterion not yet satisfied is still evaluated normally, and getMissingRequiredCriteriaIds never reports it as missing once satisfied or not", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const optionalMilestone: SuccessCriterion = {
+    id: "configurator-entered",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+    required: false,
+  };
+  const html = page_("<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>", "Configure Your Vehicle");
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [optionalMilestone], objective);
+    assert.deepEqual(satisfied, ["configurator-entered"], "an optional criterion not yet in alreadySatisfiedCriteriaIds is still evaluated and can become satisfied");
+  });
+});
+
 // ---------------------------------------------------------------------------------------
 // lastActionEvidence (optional 6th param, threaded to semanticVerifier.verify() only):
 // lets a criterion generically require that a *specific* control was clicked -- e.g. a
