@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Configurateur</title>
+    <meta name="description" content="Fixture reproducing the reported production truncation defect: many filler nav/footer links precede the real terminal-route controls in DOM order, closely mirroring the real production configurator run that motivated this fix. Labels are French on purpose, to prove the fix is language-agnostic, not to hardcode French anywhere in production code." />
+  </head>
+  <body>
+    <h1>Configuration du véhicule</h1>
+    <nav>
+      <a href="#filler-0">Footer link 0</a>
+      <a href="#filler-1">Footer link 1</a>
+      <a href="#filler-2">Footer link 2</a>
+      <a href="#filler-3">Footer link 3</a>
+      <a href="#filler-4">Footer link 4</a>
+      <a href="#filler-5">Footer link 5</a>
+      <a href="#filler-6">Footer link 6</a>
+      <a href="#filler-7">Footer link 7</a>
+      <a href="#filler-8">Footer link 8</a>
+      <a href="#filler-9">Footer link 9</a>
+      <a href="#filler-10">Footer link 10</a>
+      <a href="#filler-11">Footer link 11</a>
+      <a href="#filler-12">Footer link 12</a>
+      <a href="#filler-13">Footer link 13</a>
+      <a href="#filler-14">Footer link 14</a>
+      <a href="#filler-15">Footer link 15</a>
+      <a href="#filler-16">Footer link 16</a>
+      <a href="#filler-17">Footer link 17</a>
+      <a href="#filler-18">Footer link 18</a>
+      <a href="#filler-19">Footer link 19</a>
+      <a href="#filler-20">Footer link 20</a>
+      <a href="#filler-21">Footer link 21</a>
+      <a href="#filler-22">Footer link 22</a>
+      <a href="#filler-23">Footer link 23</a>
+      <a href="#filler-24">Footer link 24</a>
+      <a href="#filler-25">Footer link 25</a>
+      <a href="#filler-26">Footer link 26</a>
+      <a href="#filler-27">Footer link 27</a>
+      <a href="#filler-28">Footer link 28</a>
+      <a href="#filler-29">Footer link 29</a>
+      <a href="#filler-30">Footer link 30</a>
+      <a href="#filler-31">Footer link 31</a>
+      <a href="#filler-32">Footer link 32</a>
+      <a href="#filler-33">Footer link 33</a>
+      <a href="#filler-34">Footer link 34</a>
+      <a href="#filler-35">Footer link 35</a>
+      <a href="#filler-36">Footer link 36</a>
+      <a href="#filler-37">Footer link 37</a>
+      <a href="#filler-38">Footer link 38</a>
+      <a href="#filler-39">Footer link 39</a>
+      <a href="#filler-40">Footer link 40</a>
+      <a href="#filler-41">Footer link 41</a>
+      <a href="#filler-42">Footer link 42</a>
+      <a href="#filler-43">Footer link 43</a>
+      <a href="#filler-44">Footer link 44</a>
+    </nav>
+    <h2>Étape finale</h2>
+    <a href="/offres.html" id="decoy-offers">Voir les offres promotionnelles</a>
+    <a href="/paiement.html" id="decoy-payment">Payer maintenant et finaliser la commande</a>
+    <button type="button" id="continue-control">Continuez</button>
+    <button type="button" id="summary-control">Résumé</button>
+    <div id="result-area"></div>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "configurator-terminal", fictionalId: "FIX-TERM-001" });
+
+      function fireGa4(eventName) {
+        var params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          cid: "555.123456",
+          en: eventName,
+          dl: location.href,
+          dt: document.title,
+        });
+        new Image().src = "/g/collect?" + params.toString();
+      }
+
+      // Deliberately plain-ASCII ("resume"/"terminee" without accents) even though the
+      // static button labels above keep their real French accents (Résumé, Continuez):
+      // the deterministic lexical evaluator (src/discovery/relevance.ts's tokenize) splits
+      // on any non-[a-z0-9] character, so an accented word fragments into ASCII pieces
+      // ("résumé" -> "r"/"sum") that would not reliably token-match a plain-ASCII
+      // objective/criterion description. Using plain ASCII here keeps the *deterministic*
+      // semantic_page_match matching in these regression tests robust and easy to verify
+      // by inspection, while the accented button labels still exercise the real
+      // language-agnostic *selection* mechanism (regex-based in these tests) end to end.
+      // Matching vocabulary lives in the injected <h2> itself, not a <p> -- the
+      // deterministic semantic_page_match evaluator only scans headings (h1-h4) and
+      // interactive-element accessible names (src/core/semanticPageMatch.ts), never
+      // arbitrary paragraph text, matching what the real engine actually reads.
+      document.getElementById("summary-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Resume de la configuration terminee : affiche</h2>";
+        window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-TERM-002" });
+        fireGa4("configuration_summary_shown");
+      });
+
+      document.getElementById("continue-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Continuation : configuration continue en toute securite</h2>";
+        window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-TERM-003" });
+        fireGa4("configuration_continued");
+      });
+
+      // Both decoys prevent real navigation (neither /offres.html nor /paiement.html
+      // exists on the fixture server) so a wrong click is inert and recoverable rather
+      // than navigating the run away to a 404 -- letting a test prove a wrong click
+      // doesn't satisfy the terminal criterion, and that a corrective click afterward
+      // still succeeds. decoy-payment additionally renders a loud in-page marker: if a
+      // test ever sees it, that proves a real defect (a transactional control was
+      // actually selected), not just an inert click.
+      document.getElementById("decoy-offers").addEventListener("click", function (e) {
+        e.preventDefault();
+      });
+      document.getElementById("decoy-payment").addEventListener("click", function (e) {
+        e.preventDefault();
+        document.getElementById("result-area").innerHTML = "<h2>ERREUR DE TEST</h2><p>Le controle de paiement a ete active -- ceci ne doit jamais se produire.</p>";
+      });
+    </script>
+  </body>
+</html>
