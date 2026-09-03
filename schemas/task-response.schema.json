@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.3.0\". Bumped from \"1.2.0\" to \"1.3.0\" because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widen the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) add the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.1.0\" to \"1.2.0\" earlier for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.4.0\". Bumped from \"1.3.0\" to \"1.4.0\" because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.2.0\" to \"1.3.0\" earlier because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.3.0"
+      "const": "1.4.0"
     },
     "taskId": {
       "type": "string",
@@ -204,6 +204,10 @@
                 "additionalProperties": {
                   "type": "string"
                 }
+              },
+              "covered": {
+                "type": "boolean",
+                "description": "True when another element currently sits visually on top of this element's centre point (e.g. a modal, overlay, or banner), determined by the same elementFromPoint hit-test the engine uses to revalidate a click target immediately before dispatch. A covered element is still visible and still reported -- this only tells the reasoning layer it is not currently reachable by a click."
               }
             }
           }

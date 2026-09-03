@@ -21,6 +21,17 @@ export interface InteractiveElement {
    * closed set -- see src/observation/observationBuilder.ts.
    */
   ariaState?: Record<string, string>;
+  /**
+   * True when another element currently sits visually on top of this one's centre point
+   * (e.g. a modal, an overlay, a banner) -- the same mechanical elementFromPoint hit-test
+   * src/observation/observationBuilder.ts's readElementState already uses to revalidate a
+   * click target immediately before dispatch, computed here up front instead so the
+   * reasoning layer can see it too, rather than only discovering it after a wasted
+   * decision and a failed click. A covered element is still reported (never silently
+   * dropped) -- an element being visible but covered is itself informative, generic
+   * evidence, never engine interpretation.
+   */
+  covered?: boolean;
 }
 
 export interface Observation {
@@ -403,7 +414,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.3.0";
+  schemaVersion: "1.4.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

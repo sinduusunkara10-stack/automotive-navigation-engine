@@ -90,8 +90,8 @@ produces an `Observation`:
 
 - page `url` and `title`
 - a condensed list of `interactiveElements` (role, accessible name, a stable `id` the engine
-  can resolve back to a Playwright locator, visibility, and optionally `disabled` and
-  `ariaState`) — sourced from the accessibility tree and visible DOM, not a full serialization
+  can resolve back to a Playwright locator, visibility, and optionally `disabled`, `ariaState`,
+  and `covered`) — sourced from the accessibility tree and visible DOM, not a full serialization
 - a short list of `notableText` snippets (headings, banners, prices) when relevant
 - an optional `progressIndicatorText` list, when the page marks up a progress/step indicator
 
@@ -110,10 +110,16 @@ configurator's custom tab strip, option chips, or radio/checkbox-style controls 
 candidates, not just conventional links and buttons. `notableText` now scans `h1`-`h4` (was
 `h1`-`h2`), since a configuration step's own heading is frequently nested under a page-level
 `h1`/`h2`. Each interactive element optionally carries `disabled` (from the `disabled`
-attribute or `aria-disabled="true"`) and `ariaState` — the element's `aria-selected`/
+attribute or `aria-disabled="true"`), `ariaState` — the element's `aria-selected`/
 `aria-checked`/`aria-pressed`/`aria-current` attribute values, read verbatim and never
 normalised into an engine-defined closed set of states, so no future ARIA value a site might
-use ever requires an engine change. `progressIndicatorText` is read the same way, from any
+use ever requires an engine change — and `covered`, true when another element (a modal,
+overlay, or banner) currently sits visually on top of the element's centre point, using the
+same `elementFromPoint` hit-test `src/core/loop.ts`'s pre-dispatch revalidation and
+`src/actions/click.ts`'s fallback already use (see "Action-execution consistency" below) —
+computed up front here too so the reasoning layer itself can see a control is not currently
+reachable instead of only discovering that after proposing a click that then fails.
+`progressIndicatorText` is read the same way, from any
 element the page marks up via `role="progressbar"`, `aria-valuenow`, or `aria-current="step"`.
 `src/core/semanticPageMatch.ts`'s `gatherSemanticPageSignals` uses the same selectors (plus
 optional `ariaState`/`progressText` evidence, forwarded only to an optional `semanticVerifier`,
@@ -136,8 +142,12 @@ for the lifetime of the page even if the DOM around it reorders. A genuinely hid
 the DOM for another breakpoint) is never offered as a candidate at all: that is a permanent,
 safely-determinable fact at scan time, and offering it would let the reasoning layer confuse it
 with a visible look-alike. A disabled or currently-covered element *is* still offered (choosing
-one is not inherently confused, unlike picking an invisible duplicate); those are point-in-time
-facts the engine instead handles safely at execution time, below.
+one is not inherently confused, unlike picking an invisible duplicate) — both are reported as
+`disabled`/`covered` evidence on the element so the reasoning layer can factor them into its own
+choice (the system prompt instructs it to prefer an uncovered, objective-matching control over a
+covered one, and that dismissing a blocker is never itself the objective), but both remain
+point-in-time facts that can change between decision and dispatch, which is why the engine also
+still handles them safely at execution time, below.
 
 ### Action-execution consistency
 

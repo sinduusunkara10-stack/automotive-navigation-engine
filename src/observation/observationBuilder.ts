@@ -31,9 +31,12 @@ export async function buildObservation(page: Page): Promise<Observation> {
       // offered as a candidate at all -- this is a permanent, safely-determinable fact
       // at scan time. Disabled/covered elements *are* still offered here (a model
       // choosing one is not inherently confused, unlike picking an invisible duplicate
-      // with an identical accessible name); those are transient-in-time facts the
-      // engine instead handles safely at execution time (see readElementState below,
-      // core/loop.ts's pre-dispatch revalidation, and actions/click.ts's fallback).
+      // with an identical accessible name) -- disabled/covered are reported as evidence
+      // (see below) so the reasoning layer can factor them into its own choice, but both
+      // remain point-in-time facts that can change by dispatch time, which is why
+      // core/loop.ts's pre-dispatch revalidation and actions/click.ts's fallback (via
+      // readElementState below) still exist as the safety net for a target that goes
+      // stale between decision and execution.
       return elements
         .map((el, index) => {
           let id = el.getAttribute(attr);
@@ -61,6 +64,22 @@ export async function buildObservation(page: Page): Promise<Observation> {
               ariaState[attrName] = value;
             }
           }
+          // Same elementFromPoint hit-test readElementState (below) uses to revalidate a
+          // click target right before dispatch -- computed here too so the reasoning layer
+          // itself can see whether a control is genuinely reachable (e.g. a modal/overlay/
+          // banner sitting on top of it) up front, instead of only discovering it after
+          // proposing a click that then fails. Only ever computed for a point already
+          // inside the viewport -- elementFromPoint outside it always returns null, which
+          // would otherwise be misread as "covered".
+          let covered = false;
+          if (visible) {
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
+              const topEl = document.elementFromPoint(cx, cy);
+              covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
+            }
+          }
           return {
             id,
             role,
@@ -69,6 +88,7 @@ export async function buildObservation(page: Page): Promise<Observation> {
             ...(destinationUrl ? { destinationUrl } : {}),
             ...(disabled ? { disabled } : {}),
             ...(Object.keys(ariaState).length > 0 ? { ariaState } : {}),
+            ...(covered ? { covered } : {}),
           };
         })
         .filter((el) => el.visible);

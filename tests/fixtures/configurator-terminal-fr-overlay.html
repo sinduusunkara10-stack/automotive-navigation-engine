@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Configurateur</title>
+    <meta name="description" content="Fixture reproducing a reported production run: a full-viewport consent-style overlay initially sits on top of the page, so the real terminal-route controls (Résumé/Continuez) are visible in the DOM but not actually clickable, while the overlay's own dismiss control is the only genuinely reachable control until it is dismissed. Proves the engine can see and correctly act on the covered/uncovered distinction end to end. French labels are fixture-only, matching the terminal-fr fixture's convention -- no such wording appears in production src/ code." />
+  </head>
+  <body>
+    <h1>Configuration du véhicule</h1>
+    <nav>
+      <a href="#filler-0">Footer link 0</a>
+      <a href="#filler-1">Footer link 1</a>
+      <a href="#filler-2">Footer link 2</a>
+      <a href="#filler-3">Footer link 3</a>
+      <a href="#filler-4">Footer link 4</a>
+      <a href="#filler-5">Footer link 5</a>
+      <a href="#filler-6">Footer link 6</a>
+      <a href="#filler-7">Footer link 7</a>
+      <a href="#filler-8">Footer link 8</a>
+      <a href="#filler-9">Footer link 9</a>
+    </nav>
+    <h2>Étape finale</h2>
+    <button type="button" id="continue-control">Continuez</button>
+    <button type="button" id="summary-control">Résumé</button>
+    <div id="result-area"></div>
+
+    <div
+      id="consent-overlay"
+      style="position: fixed; inset: 0; z-index: 9999; background: rgba(0, 0, 0, 0.5)"
+    >
+      <button type="button" id="consent-accept" style="position: fixed; top: 10px; left: 10px">Tout accepter</button>
+    </div>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "configurator-terminal-overlay", fictionalId: "FIX-TERM-OVERLAY-001" });
+
+      function fireGa4(eventName) {
+        var params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          cid: "555.123456",
+          en: eventName,
+          dl: location.href,
+          dt: document.title,
+        });
+        new Image().src = "/g/collect?" + params.toString();
+      }
+
+      document.getElementById("consent-accept").addEventListener("click", function () {
+        document.getElementById("consent-overlay").remove();
+        window.dataLayer.push({ event: "consent_accepted", fictionalId: "FIX-TERM-OVERLAY-002" });
+        fireGa4("consent_accepted");
+      });
+
+      // Same plain-ASCII-vs-accented split as configurator-terminal-fr.html -- see that
+      // fixture's comment for why.
+      document.getElementById("summary-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Resume de la configuration terminee : affiche</h2>";
+        window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-TERM-OVERLAY-003" });
+        fireGa4("configuration_summary_shown");
+      });
+
+      document.getElementById("continue-control").addEventListener("click", function () {
+        document.getElementById("result-area").innerHTML = "<h2>Continuation : configuration continue en toute securite</h2>";
+        window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-TERM-OVERLAY-004" });
+        fireGa4("configuration_continued");
+      });
+    </script>
+  </body>
+</html>

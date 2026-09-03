@@ -162,7 +162,7 @@ class RouteVerifierModelClient implements ReasoningModelClient {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.3.0",
+    schemaVersion: "1.4.0",
     taskId: "objective-aligned-terminal-route",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["cta_clicks", "data_layer_evidence", "ga4_network_events", "errors"],
@@ -173,7 +173,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.3.0",
+    outputSchemaVersion: "1.4.0",
     ...overrides,
   };
 }

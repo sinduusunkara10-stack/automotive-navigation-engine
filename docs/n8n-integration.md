@@ -186,6 +186,17 @@ repo's convention, so the request contract's own `schemaVersion` moved from `"1.
 version strings it sends (`schemaVersion` and `outputSchemaVersion`) to `"1.3.0"` — see the
 `examples/*.json` fixtures in this repo, all of which were updated the same way.
 
+**Example (already applied, again): `"1.3.0"` → `"1.4.0"`.** Widening observation evidence
+further (§"Observation evidence" in `docs/architecture.md`) added one new, purely additive field
+to the **response** contract: `observation.interactiveElements[].covered`, true when another
+element currently sits visually on top of a control so it cannot actually be clicked. No
+existing response field was removed, renamed, or had its meaning changed. Per this repo's own
+stated convention, the response contract's `schemaVersion` moved from `"1.3.0"` to `"1.4.0"`, and
+— by the same chain as the previous bump — the request contract's `outputSchemaVersion` and its
+own `schemaVersion` both moved to `"1.4.0"` too, even though no other request field changed. An
+n8n workflow must update both version strings it sends to `"1.4.0"` — see the `examples/*.json`
+fixtures in this repo, all of which were updated the same way.
+
 ## 8. Task store and instance limitations
 
 Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
