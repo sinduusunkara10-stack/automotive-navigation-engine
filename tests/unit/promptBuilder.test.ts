@@ -200,6 +200,69 @@ test("REGRESSION: disabled, ariaState, and progressIndicatorText -- added to Obs
 });
 
 // ---------------------------------------------------------------------------------------
+// REGRESSION (real production run): a full-viewport overlay (e.g. a consent-style banner)
+// sat on top of the page's real terminal-route controls -- they were visible in the DOM
+// but not actually clickable, while the overlay's own dismiss control was the only
+// genuinely reachable one. Navigation Claude selected the overlay's control based on
+// nothing but visibility, matching the underlying page, then failed to dispatch it
+// because it never distinguished "visible" from "actually clickable right now". Root
+// cause traced to src/observation/observationBuilder.ts's buildObservation never
+// computing or forwarding whether a control is covered by another element -- only the
+// separate, per-id readElementState (pre-dispatch revalidation only) did. These tests
+// prove `covered` (once buildObservation computes it) reaches the actual prompt payload
+// Navigation Claude sees, and that the structural fallback (stratifiedSample) does not
+// prefer a covered element over an uncovered one within the same stratum. Entirely
+// synthetic, generic fixtures -- no CTA wording, no site-specific selector.
+// ---------------------------------------------------------------------------------------
+
+test("REGRESSION: covered is forwarded to the prompt exactly as observed, never defaulted for an uncovered element", () => {
+  const context = buildTestReasoningContext({
+    observation: {
+      url: "https://example-fictional-oem.test/configurator/step-4",
+      title: "Configurator",
+      interactiveElements: [
+        { id: "el-0", role: "button", accessibleName: "Show configuration summary", visible: true, covered: true },
+        { id: "el-1", role: "button", accessibleName: "Continue", visible: true },
+      ],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { interactiveElements: Array<Record<string, unknown>> };
+  };
+
+  assert.equal(payload.currentPage.interactiveElements[0]?.covered, true);
+  assert.ok(!("covered" in (payload.currentPage.interactiveElements[1] ?? {})));
+});
+
+test("REGRESSION: a covered control reaching the structural fallback is still correctly flagged covered, and an uncovered alternative is not crowded out by it", () => {
+  const fillers = buildManyElements(60);
+  const coveredDecoy = { id: "el-60", role: "button", accessibleName: "Résumé", visible: true, covered: true };
+  const uncoveredControl = { id: "el-61", role: "button", accessibleName: "Continuez", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...fillers, coveredDecoy, uncoveredControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string; covered?: boolean }> } };
+
+  const uncoveredEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-61");
+  assert.ok(uncoveredEntry, "the uncovered terminal control must reach the prompt");
+
+  const coveredEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-60");
+  if (coveredEntry) {
+    assert.equal(coveredEntry.covered, true, "a covered control must never be silently promoted as uncovered/actionable");
+  }
+});
+
+// ---------------------------------------------------------------------------------------
 // REGRESSION (real production run, second occurrence, schemaVersion 1.3.0): the previous
 // fix (lexical objective-relevance ranking) does not, on its own, rescue a terminal-route
 // control whose accessible name shares *zero* literal vocabulary with the objective --

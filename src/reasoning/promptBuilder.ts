@@ -59,7 +59,7 @@ function stratifiedSample(pool: readonly ScoredElement[], k: number): ScoredElem
     const start = Math.floor(i * step);
     const end = Math.max(start + 1, Math.floor((i + 1) * step));
     const stratum = pool.slice(start, end);
-    const isActionable = (s: ScoredElement) => s.el.visible !== false && !s.el.disabled;
+    const isActionable = (s: ScoredElement) => s.el.visible !== false && !s.el.disabled && !s.el.covered;
     const preferred =
       stratum.find((s) => isActionable(s) && !hasPersistedSelectionState(s.el)) ??
       stratum.find((s) => isActionable(s)) ??
@@ -211,7 +211,13 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "scrolling. Only choose \"scroll\" when no visible control yet matches, or when " +
     "\"recentActions\" shows scrolling has genuinely been revealing new elements; if you've " +
     "recently scrolled without \"currentPage\" changing in a way that helps, say so in your " +
-    "reason and prefer a different action. When more than one visible control could " +
+    "reason and prefer a different action. An interactiveElements entry marked " +
+    "\"covered\": true currently has some other element sitting on top of it and cannot " +
+    "actually be clicked -- when an uncovered control also matches the objective, prefer " +
+    "that uncovered control over a covered one. Only choose a covered control when clearing " +
+    "whatever is covering the page is itself a necessary step before the objective can be " +
+    "reached, and remember that dismissing or clearing a covering element is never itself " +
+    "the objective -- it only clears the way for a later action that is. When more than one visible control could " +
     "plausibly apply, choose the one whose semantic purpose most specifically matches the " +
     "objective/successCriteria wording (for example: prefer whichever of a " +
     "\"summary\"-purposed control or a \"continue\"-purposed control the objective actually " +
@@ -252,6 +258,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
         ...(el.destinationUrl ? { destinationUrl: el.destinationUrl } : {}),
         ...(el.disabled ? { disabled: el.disabled } : {}),
         ...(el.ariaState ? { ariaState: el.ariaState } : {}),
+        ...(el.covered ? { covered: el.covered } : {}),
       })),
     },
     recentActions: recentActions.slice(-MAX_RECENT_ACTIONS).map((a) => ({ type: a.type, target: a.target })),

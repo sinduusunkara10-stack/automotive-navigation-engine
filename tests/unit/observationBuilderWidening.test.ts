@@ -77,6 +77,63 @@ test("an element with no ARIA state attributes and not disabled carries neither 
   });
 });
 
+// ---------------------------------------------------------------------------------------
+// REGRESSION (real production run): a full-viewport overlay (e.g. a consent-style banner)
+// left a genuinely visible-but-unreachable control indistinguishable, in the observation,
+// from a genuinely clickable one -- buildObservation computed visible/disabled/ariaState
+// per element but never whether something else currently sits on top of it, even though
+// the separate, per-id readElementState (used only for pre-dispatch revalidation) already
+// computed exactly that. These tests prove `covered` now reaches buildObservation's own
+// output using the same elementFromPoint hit-test, entirely generically (no CTA wording,
+// no site-specific selector).
+// ---------------------------------------------------------------------------------------
+
+test("a control sitting underneath a full-viewport overlay is flagged covered, while the overlay's own control is not", async () => {
+  const html = `<!doctype html><html><body>
+    <button id="target" style="position:fixed;top:100px;left:100px;width:200px;height:50px;">Underneath</button>
+    <div style="position:fixed;inset:0;z-index:9999;">
+      <button id="overlay-button" style="position:fixed;top:10px;left:10px;">On top</button>
+    </div>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    const observation = await buildObservation(page);
+    const covered = observation.interactiveElements.find((el) => el.accessibleName === "Underneath");
+    const uncovered = observation.interactiveElements.find((el) => el.accessibleName === "On top");
+    assert.ok(covered);
+    assert.ok(uncovered);
+    assert.equal(covered?.covered, true);
+    assert.equal(uncovered?.covered, undefined);
+  });
+});
+
+test("an uncovered element carries no covered field at all (never a false value cluttering the payload)", async () => {
+  const html = `<!doctype html><html><body><button>Plain</button></body></html>`;
+  await withPage(html, async (page) => {
+    const observation = await buildObservation(page);
+    const el = observation.interactiveElements[0];
+    assert.ok(el);
+    assert.equal(el.covered, undefined);
+  });
+});
+
+test("once the covering overlay is removed, the same control is no longer reported as covered", async () => {
+  const html = `<!doctype html><html><body>
+    <button id="target" style="position:fixed;top:100px;left:100px;width:200px;height:50px;">Underneath</button>
+    <div id="overlay" style="position:fixed;inset:0;z-index:9999;"></div>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    const before = await buildObservation(page);
+    const beforeEl = before.interactiveElements.find((el) => el.accessibleName === "Underneath");
+    assert.equal(beforeEl?.covered, true);
+
+    await page.evaluate(() => document.getElementById("overlay")?.remove());
+
+    const after = await buildObservation(page);
+    const afterEl = after.interactiveElements.find((el) => el.accessibleName === "Underneath");
+    assert.equal(afterEl?.covered, undefined);
+  });
+});
+
 test("notableText now includes h3/h4, not just h1/h2", async () => {
   const html = `<!doctype html><html><body>
     <h1>Configure Your Vehicle</h1>
