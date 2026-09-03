@@ -194,7 +194,7 @@ class StubbornClickProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; successUrlPattern: string }): TaskRequest {
   return {
-    schemaVersion: "1.4.0",
+    schemaVersion: "1.5.0",
     taskId: "action-execution-consistency",
     objective: "Reach the fixture's target page via the configured control.",
     startUrl: params.startUrl,
@@ -210,7 +210,7 @@ function buildTask(params: { startUrl: string; successUrlPattern: string }): Tas
     captureModules: ["errors"],
     limits: { maxSteps: 4, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.4.0",
+    outputSchemaVersion: "1.5.0",
   };
 }
 
@@ -433,11 +433,16 @@ test("fallback URL outside allowedDomains: the fallback is rejected, not silentl
     });
     const response = await runTask({ page, task, reasoning: new ClickByNameProvider(page, "Continue") });
 
+    // The intercepted click is a recoverable staleTarget failure (see
+    // src/core/loop.ts's bounded blocker-recovery): the run continues to a second step,
+    // where ClickByNameProvider excludes the already-attempted target, finds no other
+    // candidate, and itself decides stop_failure -- the fallback's rejection is still
+    // recorded (as a recoverable, non-stopping diagnostic) on the first step.
     assert.equal(response.status, "failure");
-    assert.equal(response.steps[0]?.currentUrl, `${baseUrl}/fallback-outside-domain.html`);
-    const actionFailure = response.captures.errors?.find((e) => e.stoppedRun);
-    assert.ok(actionFailure);
-    assert.match(actionFailure?.message ?? "", /fallbackRejectedReason=outside_allowed_domains/);
+    assert.ok(response.steps.every((s) => s.currentUrl === `${baseUrl}/fallback-outside-domain.html`));
+    const rejectedFallback = response.captures.errors?.find((e) => e.category === "stale_target_recovery");
+    assert.ok(rejectedFallback);
+    assert.match(rejectedFallback?.message ?? "", /fallbackRejectedReason=outside_allowed_domains/);
   } finally {
     await page.close();
     await browser.close();
@@ -457,11 +462,13 @@ test("unsafe protocol: a javascript: destinationUrl is never used as a fallback"
     });
     const response = await runTask({ page, task, reasoning: new ClickByNameProvider(page, "Continue") });
 
+    // Same reasoning as the outside-allowedDomains case above: recoverable first, then a
+    // clean stop_failure once the provider excludes the already-attempted target.
     assert.equal(response.status, "failure");
-    assert.equal(response.steps[0]?.currentUrl, `${baseUrl}/fallback-unsafe-protocol.html`);
-    const actionFailure = response.captures.errors?.find((e) => e.stoppedRun);
-    assert.ok(actionFailure);
-    assert.match(actionFailure?.message ?? "", /fallbackRejectedReason=unsafe_protocol/);
+    assert.ok(response.steps.every((s) => s.currentUrl === `${baseUrl}/fallback-unsafe-protocol.html`));
+    const rejectedFallback = response.captures.errors?.find((e) => e.category === "stale_target_recovery");
+    assert.ok(rejectedFallback);
+    assert.match(rejectedFallback?.message ?? "", /fallbackRejectedReason=unsafe_protocol/);
   } finally {
     await page.close();
     await browser.close();

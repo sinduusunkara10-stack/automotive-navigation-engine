@@ -36,7 +36,7 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "local-poc-success",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -66,7 +66,7 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });
@@ -196,7 +196,7 @@ test("capture modules only run when the task requests them", async () => {
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "local-poc-selective-capture",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -217,7 +217,7 @@ test("capture modules only run when the task requests them", async () => {
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });
@@ -248,7 +248,7 @@ test("safety layer blocks a task whose startUrl falls outside allowedDomains", a
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "local-poc-blocked",
       objective: "Attempt to run against a host outside the allow-list.",
       startUrl: `${baseUrl}/start.html`,
@@ -259,7 +259,7 @@ test("safety layer blocks a task whose startUrl falls outside allowedDomains", a
       captureModules: ["page_visits"],
       limits: { maxSteps: 5, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });
@@ -283,7 +283,7 @@ test("limits guard stops the run once maxSteps is reached without a success stat
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "local-poc-max-steps",
       objective: "Reach an unreachable success state so the step ceiling is exercised.",
       startUrl: `${baseUrl}/start.html`,
@@ -299,7 +299,7 @@ test("limits guard stops the run once maxSteps is reached without a success stat
       captureModules: ["page_visits"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });

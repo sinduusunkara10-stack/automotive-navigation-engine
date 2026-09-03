@@ -9,6 +9,7 @@ export const CAPTURE_MODULE_NAMES = [
   "screenshots",
   "errors",
   "offer_extraction",
+  "host_context_snapshot",
 ] as const;
 
 export type CaptureModuleName = (typeof CAPTURE_MODULE_NAMES)[number];

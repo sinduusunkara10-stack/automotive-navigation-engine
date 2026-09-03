@@ -42,6 +42,7 @@ export function buildTestReasoningContext(overrides: Partial<ReasoningContext> =
     },
     recentActions: [],
     satisfiedCriteriaIds: [],
+    consentInteractionPolicy: "reject_optional",
     ...overrides,
   };
 }

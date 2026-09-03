@@ -25,16 +25,44 @@ export interface Limits {
   maxRepeatedActions?: number;
 }
 
+/**
+ * How the reasoning layer may interact with a blocking consent/preference control when
+ * one is genuinely in the way of an objective-relevant control (see docs/architecture.md
+ * "Blocker recovery"). Never a license to alter granular consent settings by guesswork,
+ * and never enforced by hardcoded CTA wording or a vendor-specific selector -- the engine
+ * gives the model this policy as plain instruction and trusts it to apply the same
+ * generic, language-agnostic semantic judgement already used elsewhere (e.g. preferring an
+ * objective-matching control by accessible name/type/ariaState, not a fixed wordlist).
+ *
+ * - "reject_optional" (the default when this field is omitted): may click a control whose
+ *   semantic purpose is to decline or continue without granting optional/non-essential
+ *   data collection; must never click one whose purpose is to grant broad/optional
+ *   consent.
+ * - "essential_only": same practical latitude as "reject_optional" -- the engine has no
+ *   generic, non-vendor-specific way to distinguish a granular "essential only" toggle
+ *   screen from a plain reject control -- offered as a distinct, explicit value for a
+ *   caller whose own policy language specifically calls for it.
+ * - "accept_optional": an explicit, caller-opted-in allowance to grant optional consent
+ *   solely to clear a blocking control that prevents reaching the objective -- never the
+ *   default, and never applied when the objective is reachable without it.
+ * - "do_not_interact": the model must never click any control whose purpose is to manage
+ *   consent/tracking preferences, even to dismiss a blocker; a control that stays blocked
+ *   stays blocked.
+ */
+export type ConsentInteractionPolicy = "reject_optional" | "accept_optional" | "essential_only" | "do_not_interact";
+
 export interface Safety {
   allowedActions: ActionType[];
   allowFormSubmission?: boolean;
   allowPaymentOrPurchase?: false;
   allowPersonalDataEntry?: false;
   requireDomainConfirmationOnRedirect?: boolean;
+  /** See ConsentInteractionPolicy above. Omitted means "reject_optional". */
+  consentInteractionPolicy?: ConsentInteractionPolicy;
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.4.0";
+  schemaVersion: "1.5.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -56,7 +84,7 @@ export interface TaskRequest {
   captureModules: CaptureModuleName[];
   limits: Limits;
   safety: Safety;
-  outputSchemaVersion: "1.4.0";
+  outputSchemaVersion: "1.5.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

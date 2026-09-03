@@ -38,7 +38,7 @@ test("errors capture module records page JS errors, console errors, failed netwo
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "errors-capture-diagnostics",
       objective: "Attempt to reach an unreachable success state on a fixture that emits fictional failures.",
       startUrl: `${baseUrl}/errors-start.html`,
@@ -54,15 +54,19 @@ test("errors capture module records page JS errors, console errors, failed netwo
       captureModules: ["errors"],
       limits: { maxSteps: 3, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });
 
     // The click's only target is intercepted by an overlay, so the click action itself
-    // fails and the run stops after a single step.
+    // fails -- but this is now a recoverable staleTarget failure (see
+    // src/actions/click.ts/src/core/loop.ts's bounded blocker-recovery), not an immediate
+    // fatal stop: the run continues to a second step, where MockReasoningProvider excludes
+    // the already-attempted target from consideration, finds no other candidate, and
+    // itself decides stop_failure.
     assert.equal(response.status, "failure");
-    assert.equal(response.steps.length, 1);
+    assert.equal(response.steps.length, 2);
 
     const errors = response.captures.errors ?? [];
     assert.ok(errors.length > 0, "expected diagnostics to be captured");
@@ -91,20 +95,21 @@ test("errors capture module records page JS errors, console errors, failed netwo
     assert.equal(networkFailure?.stoppedRun, false);
     assert.ok(networkFailure?.message.includes("404"));
 
-    const actionFailure = errors.find((e) => e.category === "action_timeout" || e.category === "action_execution_failure");
-    assert.ok(actionFailure, "expected a failed-action diagnostic for the intercepted click");
-    assert.equal(actionFailure?.severity, "critical");
-    assert.equal(actionFailure?.recoverable, false);
-    assert.equal(actionFailure?.stoppedRun, true);
+    // The intercepted click is a recoverable staleTarget failure, not an immediate fatal
+    // one -- see src/core/loop.ts's bounded blocker-recovery.
+    const actionFailure = errors.find((e) => e.category === "stale_target_recovery");
+    assert.ok(actionFailure, "expected a stale_target_recovery diagnostic for the intercepted click");
+    assert.equal(actionFailure?.severity, "warning");
+    assert.equal(actionFailure?.recoverable, true);
+    assert.equal(actionFailure?.stoppedRun, false);
     assert.equal(actionFailure?.actionType, "click");
     assert.ok(actionFailure?.targetElementId, "expected the click's target element id to be recorded");
     assert.equal(actionFailure?.stepIndex, 0);
 
-    // Recoverable and run-stopping diagnostics must be distinguishable within the same
-    // capture: the browser-observed diagnostics above did not stop the run, the action
-    // failure did.
-    assert.ok(errors.some((e) => e.recoverable === true && e.stoppedRun === false));
-    assert.ok(errors.some((e) => e.recoverable === false && e.stoppedRun === true));
+    // Recoverable diagnostics must be distinguishable from run-stopping ones within the
+    // same capture (see the dedicated stale-target-exhaustion regression tests for a
+    // scenario that actually produces a stoppedRun:true diagnostic).
+    assert.ok(errors.every((e) => e.recoverable === true && e.stoppedRun === false));
 
     // No cookies, auth headers, request bodies, credentials, tokens, or raw stack traces.
     for (const entry of errors) {
@@ -127,7 +132,7 @@ test("errors capture module records a limit_stop diagnostic when maxSteps is rea
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "errors-capture-limit-stop",
       objective: "Reach an unreachable success state so the step ceiling is exercised.",
       startUrl: `${baseUrl}/start.html`,
@@ -143,7 +148,7 @@ test("errors capture module records a limit_stop diagnostic when maxSteps is rea
       captureModules: ["errors"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });
@@ -173,7 +178,7 @@ test("errors capture module records nothing when not requested, even on a page t
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.4.0",
+      schemaVersion: "1.5.0",
       taskId: "errors-capture-not-requested",
       objective: "Attempt to reach an unreachable success state on a fixture that emits fictional failures.",
       startUrl: `${baseUrl}/errors-start.html`,
@@ -189,7 +194,7 @@ test("errors capture module records nothing when not requested, even on a page t
       captureModules: ["page_visits"],
       limits: { maxSteps: 3, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.4.0",
+      outputSchemaVersion: "1.5.0",
     };
 
     const response = await runTask({ page, task });

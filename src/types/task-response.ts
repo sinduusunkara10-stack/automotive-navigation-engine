@@ -32,6 +32,13 @@ export interface InteractiveElement {
    * evidence, never engine interpretation.
    */
   covered?: boolean;
+  /**
+   * Origin (scheme+host+port, never a full URL) of the same-origin child frame this
+   * element was found in -- present only for an element outside the main document. See
+   * src/observation/frames.ts. Absent for every main-document element, which remains the
+   * overwhelming common case.
+   */
+  frameOrigin?: string;
 }
 
 export interface Observation {
@@ -41,12 +48,30 @@ export interface Observation {
   notableText?: string[];
   /** Generic, brand-agnostic progress-indicator text (e.g. "Step 2 of 4"), when present. */
   progressIndicatorText?: string[];
+  /**
+   * Bounded (capped small), deduplicated list of origins of same-origin-scan-eligible
+   * child frames the engine detected but could not evaluate script in at the time of this
+   * observation (removed mid-scan, or otherwise inaccessible -- see
+   * src/observation/frames.ts). Present only when at least one such frame was seen. Never
+   * frame content, never a reason it couldn't be read beyond the fact that it couldn't.
+   */
+  inaccessibleFrameOrigins?: string[];
 }
 
 export interface ActionResult {
   success: boolean;
   error?: string;
   resultingUrl?: string;
+  /**
+   * True only when a failed action's cause was mechanically classified as the target
+   * having gone stale (hidden, detached, covered/intercepted, timed out, or its owning
+   * frame becoming unavailable) between decision and dispatch -- never a genuinely wrong
+   * or unsafe decision. Drives core/loop.ts's bounded, non-fatal recovery: a step whose
+   * actionResult carries staleTarget does not by itself end the run (see
+   * Diagnostics/StepLog.recoveryAttempts below for the bound). Absent (never false) when
+   * not applicable, consistent with every other boolean evidence flag in this schema.
+   */
+  staleTarget?: boolean;
 }
 
 export interface Progress {
@@ -64,6 +89,20 @@ export interface StepLog {
   actionResult: ActionResult;
   progress: Progress;
   safetyFlags?: string[];
+  /**
+   * True when this step's pre-dispatch revalidation found the originally-decided click
+   * target no longer actionable and asked the reasoning provider again against a freshly
+   * rebuilt observation before dispatching anything (see core/loop.ts). Absent (never
+   * false) for a step that never needed this -- the ordinary case.
+   */
+  reObservationAttempted?: boolean;
+  /**
+   * How many additional decision/revalidation cycles this step's pre-dispatch recovery
+   * used before settling on the action it actually dispatched -- bounded by a small fixed
+   * constant (see MAX_STALE_TARGET_RECOVERY_ATTEMPTS in core/loop.ts). Absent (never 0)
+   * when no recovery cycle ran.
+   */
+  recoveryAttempts?: number;
 }
 
 export interface PageVisitCapture {
@@ -82,7 +121,15 @@ export type ErrorCategory =
   | "action_timeout"
   | "target_element_missing"
   | "safety_guard_stop"
-  | "limit_stop";
+  | "limit_stop"
+  /**
+   * A click target went stale (hidden, detached, covered/intercepted, timed out, or its
+   * owning frame became unavailable) between decision and dispatch -- recorded once per
+   * occurrence, whether or not the run ultimately recovered from it (severity/recoverable/
+   * stoppedRun distinguish an in-progress recovery from the bounded allowance finally
+   * being exhausted). See core/loop.ts and actions/click.ts's staleTarget classification.
+   */
+  | "stale_target_recovery";
 
 export type ErrorSeverity = "info" | "warning" | "error" | "critical";
 
@@ -137,6 +184,36 @@ export interface FinishPageCtaCapture {
   url?: string;
   elementType: string;
   accessibleName?: string;
+}
+
+export interface CookieNameEntry {
+  name: string;
+  domain: string;
+}
+
+export interface StorageKeyEntry {
+  store: "local" | "session";
+  key: string;
+}
+
+/**
+ * Bounded, name-only footprint of cookies and localStorage/sessionStorage keys on the
+ * current page, captured only when this step's hostname differs from the previous step's
+ * (see src/capture-modules/hostContext.ts and CLAUDE.md "Secrets") -- lets a caller
+ * empirically confirm, from Get Task Result, whether cookie/storage state carried across a
+ * cross-host navigation without ever exposing a value: cookie/storage *names* and cookie
+ * *domains* are structural facts about where state lives, not the state's content.
+ * Deliberately never attempts to classify a name/key as "consent-related" -- that would
+ * require exactly the kind of vendor-specific dictionary this engine's core must not
+ * contain; every name/key present on the page is reported, and a human or a later,
+ * out-of-band analysis decides what's relevant.
+ */
+export interface HostContextSnapshotCapture {
+  stepIndex: number;
+  timestamp: string;
+  hostname: string;
+  cookieNames: CookieNameEntry[];
+  storageKeyNames: StorageKeyEntry[];
 }
 
 /**
@@ -227,6 +304,7 @@ export interface Captures {
   finish_page_ctas?: FinishPageCtaCapture[];
   cta_clicks?: CtaClickCapture[];
   journey_path?: JourneyPathEntry[];
+  host_context_snapshot?: HostContextSnapshotCapture[];
 }
 
 export interface EngineAssessment {
@@ -414,7 +492,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.4.0";
+  schemaVersion: "1.5.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
