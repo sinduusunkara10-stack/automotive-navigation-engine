@@ -7,6 +7,7 @@ import { isAuthorized, readApiAuthConfig, type ApiAuthConfig } from "./auth.js";
 import { API_VERSION } from "./version.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
+import { readDeployedCommitSha } from "../config/deploymentInfo.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -58,9 +59,19 @@ async function readJsonBody(req: IncomingMessage): Promise<BodyResult> {
 }
 
 function handleHealth(res: ServerResponse): void {
-  // Deliberately minimal: status, service name, API version only — never environment
-  // variables, dependency versions, filesystem paths, secrets, or other configuration.
-  sendJson(res, 200, { status: "ok", service: "navigation-engine", version: API_VERSION });
+  // Deliberately minimal: status, service name, API version, and (when the deployment
+  // platform provides it) the deployed commit SHA -- never any other environment
+  // variable, dependency version, filesystem path, secret, or configuration value. The
+  // commit SHA is not a secret (it is already public in the repository's own git
+  // history); it exists purely so an operator investigating a live run can confirm which
+  // commit is actually serving traffic without separate shell/log access.
+  const commit = readDeployedCommitSha();
+  sendJson(res, 200, {
+    status: "ok",
+    service: "navigation-engine",
+    version: API_VERSION,
+    ...(commit ? { commit } : {}),
+  });
 }
 
 function handleUnauthorized(res: ServerResponse): void {

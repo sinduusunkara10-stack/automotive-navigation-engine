@@ -438,9 +438,12 @@ fails immediately and loudly rather than serving an API nobody can authenticate 
 
 Endpoints:
 
-- `GET /v1/health` — unauthenticated liveness check. Returns only `{ status, service, version }`
-  — never environment variables, dependency versions, filesystem paths, secrets, or other
-  configuration.
+- `GET /v1/health` — unauthenticated liveness check. Returns `{ status, service, version }`,
+  plus an optional `commit` field (the deployed commit SHA, read from Render's own
+  `RENDER_GIT_COMMIT` env var, or the generic `GIT_COMMIT_SHA` fallback on other platforms
+  — see `src/config/deploymentInfo.ts`) when the deployment platform provides it, so an
+  operator investigating a live run can confirm which commit actually served it — never any
+  other environment variable, dependency version, filesystem path, secret, or configuration.
 - `POST /v1/tasks` — accepts a `task-request.schema.json`-shaped body, starts a run in the
   background, and immediately returns `{ taskId, runId, status: "accepted" }`.
 - `GET /v1/tasks/:runId` — returns `{ status: "running" }` while the run is in progress, or the

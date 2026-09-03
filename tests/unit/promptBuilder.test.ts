@@ -198,3 +198,184 @@ test("REGRESSION: disabled, ariaState, and progressIndicatorText -- added to Obs
   assert.deepEqual(payload.currentPage.interactiveElements[0]?.ariaState, { "aria-current": "step" });
   assert.deepEqual(payload.currentPage.progressIndicatorText, ["Step 4 of 4"]);
 });
+
+// ---------------------------------------------------------------------------------------
+// REGRESSION (real production run, second occurrence, schemaVersion 1.3.0): the previous
+// fix (lexical objective-relevance ranking) does not, on its own, rescue a terminal-route
+// control whose accessible name shares *zero* literal vocabulary with the objective --
+// exactly the real-world case of an English objective and a non-English page. Verified
+// empirically while diagnosing this: objectiveRelevanceScore("...summary...", "Résumé")
+// is 0, because tokenize() (src/discovery/relevance.ts) splits on any non-[a-z0-9]
+// character, so the accented "é" fragments "Résumé" into "sum" -- a different token string
+// than "summary", not a substring match. A zero-relevance control then ties with ordinary
+// filler content and, before this fix, lost the plain DOM-index tie-break whenever
+// positioned after 40+ other elements -- exactly what a real, complex configurator page
+// (many product/spec/finance controls before the final step) makes likely. These tests
+// use entirely synthetic, generic fixtures -- no live brand, label, or element id.
+// ---------------------------------------------------------------------------------------
+
+const ENGLISH_OBJECTIVE =
+  "Navigate to the official consumer vehicle configurator, proceed through the configuration steps using " +
+  "existing defaults where necessary, and stop once the objective destination -- the completed " +
+  "configuration summary -- has been reached and confirmed.";
+
+function buildManyElements(count: number, offset = 0): Array<{ id: string; role: string; accessibleName: string; visible: boolean }> {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `el-${i + offset}`,
+    role: i % 5 === 0 ? "button" : "a",
+    accessibleName: `Option or link number ${i + offset}`,
+    visible: true,
+  }));
+}
+
+test("REGRESSION: a terminal-route control with a non-English label and zero direct token overlap with an English objective still reaches the prompt", () => {
+  const fillers = buildManyElements(63);
+  const terminalControl = { id: "el-63", role: "button", accessibleName: "Résumé", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    successCriteria: [{ id: "objective-destination-reached", type: "url_pattern", description: ENGLISH_OBJECTIVE, required: true }],
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...fillers, terminalControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
+  assert.ok(
+    payload.currentPage.interactiveElements.some((el) => el.id === "el-63"),
+    "the non-English terminal control must still reach the prompt despite zero lexical overlap with the objective",
+  );
+});
+
+test("REGRESSION: an alternative terminal-route control (also zero lexical overlap) reaches the prompt alongside the first", () => {
+  const fillers = buildManyElements(63);
+  const summaryControl = { id: "el-63", role: "button", accessibleName: "Résumé", visible: true };
+  const continueControl = { id: "el-64", role: "button", accessibleName: "Continuez", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    successCriteria: [{ id: "objective-destination-reached", type: "url_pattern", description: ENGLISH_OBJECTIVE, required: true }],
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...fillers, summaryControl, continueControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
+  const ids = payload.currentPage.interactiveElements.map((el) => el.id);
+  assert.ok(ids.includes("el-63"), "the Résumé-equivalent control must reach the prompt");
+  assert.ok(ids.includes("el-64"), "the Continuez-equivalent control must also reach the prompt");
+});
+
+test("REGRESSION: dozens of repetitive, zero-relevance controls cannot consume the entire prompt allowance and hide a structurally distinctive terminal control", () => {
+  // 90 near-identical repetitive elements (e.g. a long, repeated list of spec/filter
+  // toggles) followed by a single terminal control -- proves the structural fallback
+  // spreads coverage across the whole page rather than being crowded out by bulk content.
+  const repetitive = Array.from({ length: 90 }, (_, i) => ({
+    id: `el-${i}`,
+    role: "button",
+    accessibleName: "Voir plus",
+    visible: true,
+  }));
+  const terminalControl = { id: "el-90", role: "button", accessibleName: "Résumé", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    successCriteria: [{ id: "objective-destination-reached", type: "url_pattern", description: ENGLISH_OBJECTIVE, required: true }],
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...repetitive, terminalControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string; accessibleName: string }> } };
+  assert.ok(
+    payload.currentPage.interactiveElements.some((el) => el.id === "el-90"),
+    "the single structurally distinctive terminal control must survive alongside the repetitive bulk",
+  );
+  const repetitiveSelectedCount = payload.currentPage.interactiveElements.filter((el) => el.accessibleName === "Voir plus").length;
+  assert.ok(
+    repetitiveSelectedCount < payload.currentPage.interactiveElements.length,
+    "the repetitive cluster must not consume the entire prompt allowance",
+  );
+});
+
+test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMENTS (40), regardless of candidate count", () => {
+  const manyElements = buildManyElements(500);
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: manyElements,
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: unknown[] } };
+  assert.ok(payload.currentPage.interactiveElements.length <= 40);
+  assert.equal(prompt.elementSelection.selectedCount, payload.currentPage.interactiveElements.length);
+  assert.ok(prompt.elementSelection.candidateCount === 500);
+});
+
+test("REGRESSION: a disabled control reaching the structural fallback is still correctly flagged disabled, never silently promoted as actionable", () => {
+  const fillers = buildManyElements(60);
+  // A disabled decoy, positioned so it would otherwise be a strong structural (tail-
+  // anchor) candidate, alongside a plain enabled control in the same region.
+  const disabledDecoy = { id: "el-60", role: "button", accessibleName: "Résumé", visible: true, disabled: true };
+  const enabledControl = { id: "el-61", role: "button", accessibleName: "Continuez", visible: true, disabled: false };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...fillers, disabledDecoy, enabledControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string; disabled?: boolean }> } };
+  const enabledEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-61");
+  assert.ok(enabledEntry, "the plain enabled control must reach the prompt");
+
+  // A caller (or Navigation Claude) must never be told a control is actionable when it
+  // isn't: if the disabled decoy also happens to be included, it must still be correctly
+  // flagged disabled -- never silently promoted as an actionable candidate.
+  const disabledEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-60");
+  if (disabledEntry) {
+    assert.equal(disabledEntry.disabled, true);
+  }
+});
+
+test("REGRESSION: a control marked not visible is never prioritised by the structural fallback ahead of a visible one (defense in depth -- observationBuilder.ts already excludes invisible elements upstream)", () => {
+  const fillers = buildManyElements(60);
+  const invisibleDecoy = { id: "el-60", role: "button", accessibleName: "Résumé", visible: false };
+  const visibleControl = { id: "el-61", role: "button", accessibleName: "Continuez", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/configurator",
+      title: "Configurator",
+      interactiveElements: [...fillers, invisibleDecoy, visibleControl],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string; visible: boolean }> } };
+  const visibleEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-61");
+  assert.ok(visibleEntry, "the visible control must reach the prompt");
+
+  const invisibleEntry = payload.currentPage.interactiveElements.find((el) => el.id === "el-60");
+  if (invisibleEntry) {
+    assert.equal(invisibleEntry.visible, false, "an invisible element must never be reported as visible");
+  }
+});

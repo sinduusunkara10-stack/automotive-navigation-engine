@@ -403,3 +403,153 @@ test("REGRESSION: scrolling remains available and the repeated-action guard is u
     await close();
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// REGRESSION (real production run, second occurrence, schemaVersion 1.3.0): the tests
+// above (SUMMARY_OBJECTIVE etc.) are written in French -- the *same* language as the
+// fixture's own labels -- so, while they validate the terminal-route/verifier mechanism
+// end to end, they do not by themselves prove the actual reported failure is fixed: the
+// live run used an *English* objective against the fixture's French "Résumé"/"Continuez"
+// labels, which the deterministic lexical-relevance mechanism (objectiveRelevanceScore)
+// cannot bridge at all (verified: it scores 0, tying the real controls with ordinary
+// filler). These tests use a genuinely cross-language objective -- zero literal vocabulary
+// overlap with either label -- to demonstrate the actual reported case is fixed, not just
+// the same-language case PR #22 already covered.
+// ---------------------------------------------------------------------------------------
+
+const ENGLISH_SUMMARY_OBJECTIVE =
+  "Navigate to the official consumer vehicle configurator, proceed through the configuration steps using " +
+  "existing defaults where necessary, activate the control whose semantic purpose is to reveal the completed " +
+  "configuration summary, verify that the resulting summary state is observable, and then stop successfully.";
+
+test("REGRESSION (cross-language, zero token overlap): an English objective selects the French Résumé-equivalent control directly, without scrolling first", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/configurator-terminal-fr.html`,
+      objective: ENGLISH_SUMMARY_OBJECTIVE,
+      successCriteria: [
+        {
+          id: "objective-destination-reached",
+          type: "semantic_page_match",
+          description: "The completed configuration summary has been revealed by clicking the summary control.",
+          config: FORCE_VERIFIER_CONFIG,
+          required: true,
+        },
+      ],
+    });
+
+    const reasoning = new ClaudeReasoningProvider({ config: REASONING_CONFIG, modelClient: new RouteAwareModelClient(/r.sum./i) });
+    const semanticVerifier = new ClaudeSemanticCriterionVerifier({ config: VERIFIER_CONFIG, modelClient: new RouteVerifierModelClient(/r.sum./i) });
+    const response = await runTask({ page, task, reasoning, semanticVerifier });
+
+    assert.equal(response.status, "success", `expected success, got ${response.status}/${response.statusReason}`);
+    assert.notEqual(response.statusReason, "repeated_action", "must not reproduce the reported repeated_action block");
+    assert.equal(response.engineAssessment.objectiveAchieved, true);
+
+    const clicks = response.captures.cta_clicks ?? [];
+    assert.ok(!response.steps.some((s) => s.selectedAction.type === "scroll"), "the terminal control must be visible immediately -- no scrolling should be needed to find it");
+    assert.equal(clicks.length, 1);
+    assert.match(clicks[0]?.ctaText ?? "", /r.sum./i);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("REGRESSION (cross-language, zero token overlap): success is not accepted merely because the control is visible -- it is accepted only once clicked and the resulting state is verified", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/configurator-terminal-fr.html`,
+      objective: ENGLISH_SUMMARY_OBJECTIVE,
+      successCriteria: [
+        {
+          id: "objective-destination-reached",
+          type: "semantic_page_match",
+          description: "The completed configuration summary has been revealed by clicking the summary control.",
+          config: FORCE_VERIFIER_CONFIG,
+          required: true,
+        },
+      ],
+      limits: { maxSteps: 10, maxBacktracks: 0, maxRepeatedActions: 5 },
+    });
+
+    // Never selects anything (simulates a reasoning layer that, for whatever reason,
+    // never acts) -- proves the run does not spuriously succeed just because a matching
+    // control is present in the observation/prompt.
+    class NeverActsModelClient implements ReasoningModelClient {
+      async createDecision<TPayload>(request: ReasoningModelRequest<TPayload>): Promise<ReasoningModelResult<TPayload>> {
+        const payload = JSON.parse(request.userPrompt) as { allowedActions: string[] };
+        const action = payload.allowedActions.includes("wait") ? "wait" : "stop_failure";
+        return {
+          parsedOutput: { action, reason: "Deliberately not acting yet.", confidence: 0.6 } as unknown as TPayload,
+          stopReason: "end_turn",
+          usage: { inputTokens: 50, outputTokens: 10 },
+        };
+      }
+    }
+
+    const reasoning = new ClaudeReasoningProvider({ config: REASONING_CONFIG, modelClient: new NeverActsModelClient() });
+    const semanticVerifier = new ClaudeSemanticCriterionVerifier({ config: VERIFIER_CONFIG, modelClient: new RouteVerifierModelClient(/r.sum./i) });
+    const response = await runTask({ page, task, reasoning, semanticVerifier });
+
+    assert.notEqual(response.status, "success", "the run must never succeed without the terminal control ever having been clicked");
+    assert.equal(response.engineAssessment.objectiveAchieved, false);
+    assert.deepEqual(response.captures.cta_clicks ?? [], []);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("SAFETY REGRESSION (cross-language): a transactional/payment-style decoy is never clicked even though it is now reliably visible in the prompt alongside the real terminal control", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/configurator-terminal-fr.html`,
+      objective: ENGLISH_SUMMARY_OBJECTIVE,
+      successCriteria: [
+        {
+          id: "objective-destination-reached",
+          type: "semantic_page_match",
+          description: "The completed configuration summary has been revealed by clicking the summary control.",
+          config: FORCE_VERIFIER_CONFIG,
+          required: true,
+        },
+      ],
+    });
+
+    const modelClient = new RouteAwareModelClient(/r.sum./i);
+    const reasoning = new ClaudeReasoningProvider({ config: REASONING_CONFIG, modelClient });
+    const semanticVerifier = new ClaudeSemanticCriterionVerifier({ config: VERIFIER_CONFIG, modelClient: new RouteVerifierModelClient(/r.sum./i) });
+    const response = await runTask({ page, task, reasoning, semanticVerifier });
+
+    // Sanity check: the payment decoy is actually present in the model's prompt in this
+    // scenario, so the safety property below is meaningful and not vacuous merely because
+    // the decoy happened to be truncated out.
+    const firstRequest = modelClient.requests[0];
+    assert.ok(firstRequest, "expected at least one decision request");
+    const firstPayload = JSON.parse(firstRequest.userPrompt) as { currentPage: { interactiveElements: { accessibleName: string }[] } };
+    assert.ok(
+      firstPayload.currentPage.interactiveElements.some((el) => /payer|commande/i.test(el.accessibleName)),
+      "sanity check failed: the payment decoy was not even present in the prompt for this test to be meaningful",
+    );
+
+    const clicks = response.captures.cta_clicks ?? [];
+    assert.ok(!clicks.some((c) => /payer|commande/i.test(c.ctaText)), "the payment/transactional decoy must never be clicked");
+    assert.equal(response.status, "success");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

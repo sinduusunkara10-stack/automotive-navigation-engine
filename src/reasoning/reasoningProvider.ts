@@ -5,7 +5,10 @@ import type { Observation, ReasoningProviderDiagnostics } from "../types/task-re
 // Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
 // implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
 // independent of TaskResponse.schemaVersion.
-export const REASONING_PROVIDER_DIAGNOSTICS_VERSION = "1.0.0" as const;
+// Bumped from "1.0.0" to "1.1.0" for the additive, optional
+// decisions[].elementSelection diagnostic (see PromptElementSelectionDiagnostic in
+// ../types/task-response.js) -- no existing field removed or renamed.
+export const REASONING_PROVIDER_DIAGNOSTICS_VERSION = "1.1.0" as const;
 
 export interface Decision {
   action: SelectedAction;

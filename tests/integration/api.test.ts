@@ -83,6 +83,10 @@ async function pollUntilTerminal(apiBaseUrl: string, runId: string, timeoutMs = 
 }
 
 test("GET /v1/health reports availability without authentication and without leaking environment details", async () => {
+  const previousRender = process.env.RENDER_GIT_COMMIT;
+  const previousGeneric = process.env.GIT_COMMIT_SHA;
+  delete process.env.RENDER_GIT_COMMIT;
+  delete process.env.GIT_COMMIT_SHA;
   const api = await startApiServer();
   try {
     const res = await fetch(`${api.baseUrl}/v1/health`);
@@ -91,9 +95,50 @@ test("GET /v1/health reports availability without authentication and without lea
     assert.equal(body.status, "ok");
     assert.equal(body.service, "navigation-engine");
     assert.equal(typeof body.version, "string");
+    // No RENDER_GIT_COMMIT/GIT_COMMIT_SHA set in this test -- the optional `commit` field
+    // must be entirely absent, not present-as-undefined/null, and no other environment
+    // detail leaks in either.
     assert.equal(Object.keys(body).sort().join(","), "service,status,version");
   } finally {
     await api.close();
+    if (previousRender !== undefined) process.env.RENDER_GIT_COMMIT = previousRender;
+    if (previousGeneric !== undefined) process.env.GIT_COMMIT_SHA = previousGeneric;
+  }
+});
+
+test("GET /v1/health exposes the deployed commit SHA when the deployment platform provides RENDER_GIT_COMMIT", async () => {
+  const previousRender = process.env.RENDER_GIT_COMMIT;
+  const previousGeneric = process.env.GIT_COMMIT_SHA;
+  delete process.env.GIT_COMMIT_SHA;
+  process.env.RENDER_GIT_COMMIT = "abc123deadbeef0000000000000000000000001";
+  const api = await startApiServer();
+  try {
+    const res = await fetch(`${api.baseUrl}/v1/health`);
+    const body = await res.json();
+    assert.equal(body.commit, "abc123deadbeef0000000000000000000000001");
+  } finally {
+    await api.close();
+    if (previousRender === undefined) delete process.env.RENDER_GIT_COMMIT;
+    else process.env.RENDER_GIT_COMMIT = previousRender;
+    if (previousGeneric !== undefined) process.env.GIT_COMMIT_SHA = previousGeneric;
+  }
+});
+
+test("GET /v1/health falls back to the generic GIT_COMMIT_SHA when RENDER_GIT_COMMIT is not set (non-Render deployments)", async () => {
+  const previousRender = process.env.RENDER_GIT_COMMIT;
+  const previousGeneric = process.env.GIT_COMMIT_SHA;
+  delete process.env.RENDER_GIT_COMMIT;
+  process.env.GIT_COMMIT_SHA = "fedcba9876543210000000000000000000000002";
+  const api = await startApiServer();
+  try {
+    const res = await fetch(`${api.baseUrl}/v1/health`);
+    const body = await res.json();
+    assert.equal(body.commit, "fedcba9876543210000000000000000000000002");
+  } finally {
+    await api.close();
+    if (previousRender !== undefined) process.env.RENDER_GIT_COMMIT = previousRender;
+    if (previousGeneric === undefined) delete process.env.GIT_COMMIT_SHA;
+    else process.env.GIT_COMMIT_SHA = previousGeneric;
   }
 });
 

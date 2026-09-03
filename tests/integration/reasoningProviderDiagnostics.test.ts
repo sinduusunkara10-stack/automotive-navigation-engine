@@ -104,7 +104,7 @@ test("a full run through a real ClaudeReasoningProvider (fake model client) surf
 
     const diagnostics = response.diagnostics.reasoningProvider;
     assert.ok(diagnostics, "expected diagnostics.reasoningProvider to be present");
-    assert.equal(diagnostics?.version, "1.0.0");
+    assert.equal(diagnostics?.version, "1.1.0");
     assert.equal(diagnostics?.provider, "claude");
     assert.equal(diagnostics?.model, "claude-sonnet-5");
     assert.equal(diagnostics?.callCount, 3);
