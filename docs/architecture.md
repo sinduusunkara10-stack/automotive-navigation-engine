@@ -91,7 +91,8 @@ produces an `Observation`:
 - page `url` and `title`
 - a condensed list of `interactiveElements` (role, accessible name, a stable `id` the engine
   can resolve back to a Playwright locator, visibility, and optionally `disabled`, `ariaState`,
-  and `covered`) — sourced from the accessibility tree and visible DOM, not a full serialization
+  `covered`, and `frameOrigin`) — sourced from the accessibility tree and visible DOM, not a
+  full serialization
 - a short list of `notableText` snippets (headings, banners, prices) when relevant
 - an optional `progressIndicatorText` list, when the page marks up a progress/step indicator
 
@@ -126,14 +127,14 @@ optional `ariaState`/`progressText` evidence, forwarded only to an optional `sem
 never scored by the deterministic lexical evaluator) so success evaluation never sees narrower
 evidence than the reasoning layer's own observation.
 
-This still never traverses into an `<iframe>` or a shadow DOM — `document.querySelectorAll`
-only reaches the light DOM of the top-level document, exactly as before. That stays deliberately
-out of scope: nothing in this repo's fixtures, examples, or reported production behaviour has
-shown a target site's configurator/lead-form controls living inside an iframe or a shadow root,
-so adding that traversal now would be speculative complexity with no concrete evidence backing
-it. If a future task surfaces a site where the reasoning layer legitimately cannot see or
-interact with a control because it is inside an iframe/shadow root, that is the point to revisit
-this — with the concrete site/DOM evidence in hand, not before.
+One level of generic, same-origin child-frame scanning is now in scope (see "Frame-aware
+observation" below) — a real production run showed a blocker's live control living inside an
+`<iframe>`. Shadow DOM traversal remains out of scope: nothing in this repo's fixtures, examples,
+or reported production behaviour has shown a target site's configurator/lead-form controls living
+inside a shadow root, so adding that traversal now would be speculative complexity with no
+concrete evidence backing it. Nested iframes (a frame within a frame) are likewise still out of
+scope for the same reason. If a future task surfaces concrete evidence either is needed, that is
+the point to revisit this.
 
 Element `id`s are assigned once via a `data-nav-engine-id` DOM attribute the first time an
 element is scanned, and reused on every later scan of the same node -- so an id stays stable
@@ -153,26 +154,126 @@ still handles them safely at execution time, below.
 
 Because deciding an action is asynchronous (a real reasoning-provider call, or a retry), the
 page can change between when an element was observed and when the engine is ready to act on it
--- an SPA re-render, a transient overlay, content removed entirely. `src/core/loop.ts`
-revalidates a selected `click` target's live actionability (attached, visible, enabled, not
-covered by another element) immediately before dispatching it. A target that has gone stale is
-never blindly clicked: the reasoning provider is asked once more, with a freshly rebuilt
-observation, so it can pick a different, currently-valid target; if that retry still can't
-produce an actionable target, the original decision is dispatched unchanged.
+-- an SPA re-render, a transient overlay appearing or clearing itself, content removed or
+replaced entirely. `src/core/loop.ts` revalidates a selected `click` target's live actionability
+(attached, visible, enabled, not covered by another element, its owning frame still available)
+immediately before dispatching it, in a small bounded loop (`MAX_STALE_TARGET_RECOVERY_ATTEMPTS`,
+currently 3): a target that has gone stale is never blindly clicked -- the reasoning provider is
+asked again, with a freshly rebuilt observation, so it can pick a different, currently-valid
+target. If every attempt in the loop is exhausted, the *last* decision is dispatched unchanged --
+`src/actions/click.ts`'s own pre-dispatch check and `destinationUrl` fallback (below) remain the
+final safety net, and a resulting failure is itself non-fatal (see "Blocker recovery" below)
+rather than ending the run.
 
 `src/actions/click.ts` is the last line of defence: it revalidates the target itself right
-before clicking, and if the click still fails for a recoverable (timeout-class) reason -- the
-element was hidden/disabled/covered/detached, or a race changed it at the exact moment of the
-click -- it attempts a generic fallback: navigating directly to the element's `destinationUrl`.
-This is only ever possible for a real `<a href>` (`destinationUrl` is only ever populated from
-`HTMLAnchorElement.href`, never inferred from anchor text), and only when that URL uses an
-allowed protocol and is within `allowedDomains` -- otherwise the fallback is rejected and the
-action fails normally. A used or rejected fallback, along with the target's role/visible/
-attached/enabled state, locator-resolution result, click-error category, and whether
-re-observation was attempted, is folded into the existing `errors` capture's free-text
-`message` (via the `navigate`-style `navigation_failure` warning on success, or the normal
-critical action-failure diagnostic on failure) -- no schema change, since `ErrorCapture.message`
-is already generic, free-form text.
+before clicking (resolving a frame-scoped id against its *live* owning frame every time -- see
+"Frame-aware observation" below), and if the click still fails for a recoverable (timeout-class)
+reason -- the element was hidden/disabled/covered/detached, its frame became unavailable, or a
+race changed it at the exact moment of the click -- it attempts a generic fallback: navigating
+directly to the element's `destinationUrl`. This is only ever possible for a real `<a href>`
+(`destinationUrl` is only ever populated from `HTMLAnchorElement.href`, never inferred from
+anchor text), and only when that URL uses an allowed protocol (`http`/`https` only -- never
+`javascript:`, `data:`, or any other scheme) and is within `allowedDomains` -- otherwise the
+fallback is rejected and the action fails normally. A used or rejected fallback, along with the
+target's role/visible/attached/enabled state, locator-resolution result, click-error category,
+and whether re-observation was attempted, is folded into the existing `errors` capture's
+free-text `message` (via the `navigate`-style `navigation_failure` warning on success, or the
+`stale_target_recovery`/normal critical action-failure diagnostic on failure).
+
+### Blocker recovery
+
+A real production run can encounter a control that looks identical, in one observation, to a
+genuinely clickable one -- reachable when it was observed, but gone (hidden, detached, covered,
+timed out, or its owning frame removed) by the time the engine actually tries to dispatch a click
+on it. A consent/preference banner is the most common source of this (a CMP re-rendering or
+auto-clearing itself right as a decision is made), but nothing in this mechanism is specific to
+consent, cookies, or any vendor -- it applies to any control that races between decision and
+dispatch.
+
+`ActionResult.staleTarget` (set by `src/actions/click.ts`) marks a failed click whose cause was
+mechanically classified this way -- as distinct from `disabled` (a legitimate, already-visible
+fact, not a race) and from a genuinely unknown Playwright error. `src/core/loop.ts` tracks
+*consecutive* staleTarget failures in `RunState.consecutiveStaleTargetFailures`, reset to 0 the
+moment a step makes real progress (any successful action, or a non-click action). A staleTarget
+failure does not by itself end the run: the step simply completes without a terminal status, and
+the outer loop (`src/core/engine.ts`) calls `runStep` again, which starts with a brand-new
+`buildObservation` -- another chance for the reasoning provider to see the current, accurate
+state and choose accordingly. Only once the *same* fixed, generic bound
+(`MAX_STALE_TARGET_RECOVERY_ATTEMPTS`) is exceeded does the run stop, with the precise
+`stale_target_recovery_exhausted` reason (never the generic `action_execution_error`) -- this is
+deliberately a *tighter*, dedicated bound, independent of (and reached well before) the existing
+repeated-action guard and `maxSteps`, both of which remain fully in effect as secondary
+safety nets if a reasoning provider keeps proposing the exact same broken target.
+
+The reasoning layer's own latitude to interact with a consent/preference-shaped control at all is
+governed by `safety.consentInteractionPolicy` (`types/task-request.ts`) -- `"reject_optional"`
+(the default), `"essential_only"`, `"accept_optional"` (an explicit, never-default opt-in), or
+`"do_not_interact"`. This is surfaced to the model as one short, plain-language system-prompt
+clause (`src/reasoning/promptBuilder.ts`) driven entirely by the enum value -- there is no
+CTA-word dictionary, translation table, or vendor-specific selector anywhere in the engine. Which
+*specific* control best fits the resulting semantic description (e.g. "a control that declines
+optional data collection") is left to the model's own judgement, exactly like every other action
+choice in this prompt (e.g. preferring a "summary" vs. "continue"-purposed control). The engine
+never keyword-matches "accept"/"reject" text and never itself decides which button is which.
+
+Dismissing a blocker is never itself treated as satisfying the objective: a click's
+`actionAnalytics.newlySatisfiedCriteriaIds` only ever reflects a success criterion the engine
+independently evaluated as newly true, and a criterion is never written to be trivially satisfied
+by any click.
+
+### Frame-aware observation
+
+One level of generic, same-origin child-frame scanning (`src/observation/frames.ts`) lets the
+engine see and act on a blocker (or any control) whose live element happens to live inside an
+`<iframe>`, without any vendor/CMP-specific iframe selector: `buildObservation` runs the exact
+same interactive-element scan against each accessible direct child frame of the main document,
+and each resulting element carries a frame-scoped id (`frameN:<local-id>`) plus `frameOrigin`
+(scheme+host+port only, never a full URL) so the reasoning layer and diagnostics can tell it
+apart from a main-document element. `readElementState` and `actions/click.ts` re-resolve a
+frame-scoped id against the *live* frame list every time (never a cached handle), since frames
+are dynamic. A frame the engine cannot evaluate script in at all -- removed between the
+accessibility probe and the scan, or otherwise inaccessible, including a cross-origin frame a
+given embed configuration refuses script access to -- is never silently skipped in a way that
+could let the engine fall back to clicking an unrelated, possibly-hidden main-document element
+instead: it contributes no candidates, is reported only as an origin on
+`Observation.inaccessibleFrameOrigins` (bounded, capped small), and a click that later targets it
+(a frame-scoped id whose frame no longer resolves) is classified `frame_unavailable` -- the same
+staleTarget-recoverable category as any other race. This stays deliberately shallow (one level,
+not recursive into nested frames, and no shadow-DOM traversal) -- see the "Observation evidence"
+note above on why iframe/shadow-DOM support otherwise stays out of scope until a concrete site
+shows it's needed; a real production run has now shown exactly that need for one level of
+same-origin iframe support.
+
+### Diagnostics for blocker recovery
+
+Beyond the free-text diagnostics above, three structured fields let a caller answer "was a
+blocker genuinely present, and how did the engine recover" directly from Get Task Result, without
+parsing message text: `StepLog.reObservationAttempted` and `StepLog.recoveryAttempts` (was the
+pre-dispatch bounded loop used this step, and how many cycles), and `ActionResult.staleTarget` on
+any action that failed for a recoverable reason. Combined with the already-untruncated
+`StepLog.observation.interactiveElements[].covered`/`visible`/`disabled` on every step, these are
+enough to reconstruct, for any step: which candidate was selected, whether it was actionable when
+observed, whether recovery was attempted, and whether the run ultimately proceeded -- without the
+engine ever computing or asserting a semantic judgement like "this was the consent banner" on the
+caller's behalf (it has no generic, reliable way to know that, and inventing one would violate the
+same rule that keeps CTA wording out of the core loop).
+
+The optional `host_context_snapshot` capture module (`src/capture-modules/hostContext.ts`)
+answers a narrower, related question -- did state actually carry across a cross-host transition
+-- with a bounded, **names-only** footprint: cookie name/domain pairs from the whole browser
+context's cookie jar, and localStorage/sessionStorage key names from the current page's own
+origin, captured only on the step a run's hostname changes (including the very first step, as a
+landing-host baseline). Never a cookie or storage *value*. It deliberately never attempts to
+classify a name/key as "consent-related" -- that would require exactly the kind of
+vendor-specific dictionary the core must not contain; every name/key present is reported, and a
+human or downstream analysis decides what's relevant. `src/core/engine.ts`'s single Playwright
+`Page`/`BrowserContext` is reused for the whole run (a normal same-tab navigation keeps the same
+cookie jar throughout, whether or not it ends up crossing hosts); localStorage/sessionStorage,
+by ordinary browser design, are always scoped to the origin that's currently loaded, so a
+same-registrable-domain transition between two different hostnames (e.g. a landing page and a
+configurator on separate subdomains) inherently starts each with fresh, empty storage even though
+cookies set on a shared parent domain may still be present -- this snapshot lets a caller confirm
+that empirically for a real run instead of the engine having to guess at or assert it.
 
 ## 6. Reasoning layer
 
@@ -323,9 +424,19 @@ than waiting for `maxSteps` or the repeated-action guard. See `docs/n8n-integrat
 - **no personal-data entry** — same treatment as payment/purchase
 - **no form submission unless explicitly enabled** — `safety.allowFormSubmission` defaults to
   `false`; a `click` that would submit a form is blocked unless the task opts in
+- **bounded, non-fatal recovery for a stale click target** — see "Blocker recovery" above; a
+  fixed, generic ceiling independent of the general guardrails below it
 - **screenshot + diagnostic capture on failure** — any `stop_failure`, unhandled error, or
   guardrail trip triggers a diagnostic screenshot/log capture regardless of which capture
   modules the task requested
+
+`safety.consentInteractionPolicy` (see "Blocker recovery" above) is a different kind of control
+from the hard guardrails above it: it is advisory, surfaced to the reasoning layer as plain
+system-prompt instruction, the same way the engine already asks the model to prefer an
+objective-matching control by meaning rather than a fixed wordlist. The engine has no generic,
+non-vendor-specific way to deterministically verify a specific click honoured the policy (that
+would require exactly the CTA-word/vendor dictionary this repo's core must not contain), so this
+is not a hard guardrail like domain enforcement or the payment/personal-data locks above.
 
 Guardrail trips are recorded as `safetyFlags` on the relevant `StepLog` entry so the response
 always explains *why* a run stopped, not just *that* it stopped.
@@ -347,8 +458,11 @@ Capture modules are the only place task-specific extraction logic lives. Each mo
 
 v1 ships the module set implied by the two example use cases (`page_visits`, `page_metadata`,
 `cta_clicks`, `finish_page_ctas`, `journey_path`, `data_layer_evidence`, `ga4_network_events`,
-`screenshots`, `errors`, `offer_extraction`), but the registry is designed to accept new modules
-without touching the core loop. `page_metadata` and `finish_page_ctas` were added to the enum by
+`screenshots`, `errors`, `offer_extraction`, `host_context_snapshot`), but the registry is
+designed to accept new modules without touching the core loop. `host_context_snapshot` (see
+"Blocker recovery" above) is the newest: a bounded, names-only cookie/storage footprint captured
+only when a run's hostname changes, letting a caller empirically confirm whether state carried
+across a cross-host transition. `page_metadata` and `finish_page_ctas` were added to the enum by
 the local-evidence-capture proof of concept (see `docs/v1-scope.md`). `cta_clicks` and
 `journey_path` were added by the action-tracking / journey-path proof of concept: `cta_clicks`
 records only the CTAs the engine actually clicked (a different shape — and a different trigger,

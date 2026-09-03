@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { ActionAnalytics, ActionResult, CtaClickCapture } from "../types/task-response.js";
-import { elementLocatorSelector } from "../observation/observationBuilder.js";
+import { elementLocatorSelector, resolveElementActionTarget } from "../observation/observationBuilder.js";
 
 interface ClickedElementDetails {
   ctaText: string;
@@ -11,14 +11,20 @@ interface ClickedElementDetails {
 
 /**
  * Must be read before the click executes: a click can navigate away, and the
- * originating element (and its attributes) are gone once the new page loads.
+ * originating element (and its attributes) are gone once the new page loads. Frame-aware
+ * (see observation/frames.ts) so an element inside a same-origin child frame is read from
+ * its own frame, not silently missed by only ever querying the main document.
  */
 export async function readClickedElementDetails(
   page: Page,
   elementId: string,
 ): Promise<ClickedElementDetails | undefined> {
   const selector = elementLocatorSelector(elementId);
-  const details = await page
+  const target = await resolveElementActionTarget(page, elementId);
+  if (!target) {
+    return undefined;
+  }
+  const details = await target
     .evaluate((sel) => {
       const el = document.querySelector<HTMLElement>(sel);
       if (!el) {

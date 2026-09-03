@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.4.0\". Bumped from \"1.3.0\" to \"1.4.0\" because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.2.0\" to \"1.3.0\" earlier because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.5.0\". Bumped from \"1.4.0\" to \"1.5.0\" because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.4.0"
+      "const": "1.5.0"
     },
     "taskId": {
       "type": "string",
@@ -121,6 +121,10 @@
         "resultingUrl": {
           "type": "string",
           "format": "uri"
+        },
+        "staleTarget": {
+          "type": "boolean",
+          "description": "True only when a failed action's cause was mechanically classified as the target having gone stale (hidden, detached, covered/intercepted, timed out, or its owning frame becoming unavailable) between decision and dispatch -- never a genuinely wrong or unsafe decision. Drives the engine's bounded, non-fatal recovery for exactly this class of failure."
         }
       }
     },
@@ -208,6 +212,10 @@
               "covered": {
                 "type": "boolean",
                 "description": "True when another element currently sits visually on top of this element's centre point (e.g. a modal, overlay, or banner), determined by the same elementFromPoint hit-test the engine uses to revalidate a click target immediately before dispatch. A covered element is still visible and still reported -- this only tells the reasoning layer it is not currently reachable by a click."
+              },
+              "frameOrigin": {
+                "type": "string",
+                "description": "Origin (scheme+host+port, never a full URL) of the same-origin child frame this element was found in -- present only for an element outside the main document. Absent for every main-document element, which remains the overwhelming common case."
               }
             }
           }
@@ -222,6 +230,13 @@
         "progressIndicatorText": {
           "type": "array",
           "description": "Generic, brand-agnostic progress-indicator text (e.g. \"Step 2 of 4\"), read from any element the page itself marks up as a progress/step indicator (role=\"progressbar\", aria-valuenow, aria-current=\"step\").",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inaccessibleFrameOrigins": {
+          "type": "array",
+          "description": "Bounded (capped small), deduplicated list of origins of same-origin-scan-eligible child frames the engine detected but could not evaluate script in at the time of this observation (removed mid-scan, or otherwise inaccessible). Never frame content, never a reason beyond the fact that it couldn't be read.",
           "items": {
             "type": "string"
           }
@@ -277,6 +292,15 @@
           "items": {
             "type": "string"
           }
+        },
+        "reObservationAttempted": {
+          "type": "boolean",
+          "description": "True when this step's pre-dispatch revalidation found the originally-decided click target no longer actionable and asked the reasoning provider again against a freshly rebuilt observation before dispatching anything."
+        },
+        "recoveryAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many additional decision/revalidation cycles this step's pre-dispatch recovery used before settling on the action it actually dispatched -- bounded by a small fixed constant."
         }
       }
     },
@@ -668,7 +692,8 @@
                   "action_timeout",
                   "target_element_missing",
                   "safety_guard_stop",
-                  "limit_stop"
+                  "limit_stop",
+                  "stale_target_recovery"
                 ]
               },
               "severity": {
@@ -748,6 +773,62 @@
               "timestamp": {
                 "type": "string",
                 "format": "date-time"
+              }
+            }
+          }
+        },
+        "host_context_snapshot": {
+          "type": "array",
+          "description": "Bounded, names-only footprint of cookies and localStorage/sessionStorage keys, captured only on the step this run's hostname changes (including the very first step, giving a landing-host baseline). Never a cookie or storage value -- see docs/architecture.md 'Blocker recovery'.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "stepIndex",
+              "timestamp",
+              "hostname",
+              "cookieNames",
+              "storageKeyNames"
+            ],
+            "properties": {
+              "stepIndex": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "hostname": {
+                "type": "string"
+              },
+              "cookieNames": {
+                "type": "array",
+                "description": "Cookie name/domain pairs from the whole browser context's cookie jar at this point -- never a value.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["name", "domain"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "domain": { "type": "string" }
+                  }
+                }
+              },
+              "storageKeyNames": {
+                "type": "array",
+                "description": "localStorage/sessionStorage key names present on the current page's own origin -- never a value.",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["store", "key"],
+                  "properties": {
+                    "store": {
+                      "type": "string",
+                      "enum": ["local", "session"]
+                    },
+                    "key": { "type": "string" }
+                  }
+                }
               }
             }
           }

@@ -442,3 +442,55 @@ test("REGRESSION: a control marked not visible is never prioritised by the struc
     assert.equal(invisibleEntry.visible, false, "an invisible element must never be reported as visible");
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// consentInteractionPolicy (types/task-request.ts): a plain-language, generic system-
+// prompt instruction driven entirely by the request's own consent policy enum -- no CTA
+// wordlist, no translation table, no vendor/CMP-specific selector. The engine only ever
+// decides WHETHER/HOW MUCH latitude the model has; which specific control best fits the
+// resulting semantic description is left to the model, exactly like every other choice in
+// this prompt.
+// ---------------------------------------------------------------------------------------
+
+test("REGRESSION: the default policy (reject_optional) instructs the model to prefer a non-accepting control and never grant broad/optional consent", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" });
+  const prompt = buildReasoningPrompt(context);
+  assert.match(prompt.system, /"reject_optional"/);
+  assert.match(prompt.system, /decline or continue without granting/i);
+  assert.match(prompt.system, /never click a control whose purpose is to grant broad or optional consent/i);
+});
+
+test("REGRESSION: do_not_interact forbids clicking any consent/tracking-preference control at all, even to clear a blocker", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "do_not_interact" });
+  const prompt = buildReasoningPrompt(context);
+  assert.match(prompt.system, /"do_not_interact"/);
+  assert.match(prompt.system, /never click any control whose semantic purpose is to manage consent/i);
+});
+
+test("REGRESSION: accept_optional is the only policy that permits granting optional consent, and only to clear a genuine blocker", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" });
+  const prompt = buildReasoningPrompt(context);
+  assert.match(prompt.system, /"accept_optional"/);
+  assert.match(prompt.system, /you may click a control that grants optional consent/i);
+
+  // No other policy's prompt ever grants this latitude.
+  for (const policy of ["reject_optional", "essential_only", "do_not_interact"] as const) {
+    const otherPrompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: policy }));
+    assert.doesNotMatch(otherPrompt.system, /you may click a control that grants optional consent/i);
+  }
+});
+
+test("REGRESSION: essential_only never permits granting broad/optional consent, and never claims to alter a granular settings screen", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "essential_only" });
+  const prompt = buildReasoningPrompt(context);
+  assert.match(prompt.system, /"essential_only"/);
+  assert.match(prompt.system, /never click a control whose purpose is to grant broad or optional consent/i);
+  assert.match(prompt.system, /never guess at or alter a granular settings screen/i);
+});
+
+test("REGRESSION: the system prompt never mentions accepting/granting consent as a preference under any policy except the explicit accept_optional opt-in", () => {
+  // Guards against a future edit accidentally biasing the *default* wording toward
+  // acceptance -- the one behaviour this whole mechanism must never default to.
+  const defaultPrompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" }));
+  assert.doesNotMatch(defaultPrompt.system, /prefer.{0,40}accept/i);
+});

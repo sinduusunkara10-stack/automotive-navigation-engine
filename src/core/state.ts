@@ -17,6 +17,18 @@ export class RunState {
    */
   lastRejectedStopSuccessFingerprint: string | undefined;
 
+  /**
+   * Consecutive count of steps that ended in a staleTarget-classified action failure (see
+   * ActionResult.staleTarget) -- reset to 0 the moment a step makes real progress (a
+   * successful action, or a non-click action). Bounds core/loop.ts's non-fatal blocker
+   * recovery independently of, and tighter than, the existing repeated-action guard, which
+   * only catches the *same* action repeated identically.
+   */
+  consecutiveStaleTargetFailures = 0;
+
+  /** Hostname of the previous step's observation, or undefined before the first step -- lets core/loop.ts detect a cross-host transition to trigger the (opt-in) host_context_snapshot capture. */
+  lastObservedHostname: string | undefined;
+
   recordVisit(url: string): void {
     this.visitedUrls.push(url);
   }

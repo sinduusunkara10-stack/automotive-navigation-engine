@@ -14,6 +14,7 @@ import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modu
 import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
+import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
@@ -25,6 +26,14 @@ export type TerminalStatus =
   | "max_steps_reached"
   | "max_backtracks_reached"
   | "max_duration_reached";
+
+// Bounds both stages of blocker/stale-target recovery (item 4 of the fix): how many extra
+// decision/revalidation cycles a step's pre-dispatch check may spend before dispatching
+// anyway, and how many *consecutive* dispatched-but-stale failures the run tolerates
+// before giving up with a precise reason. Fixed and generic -- not consent-specific, not
+// task-configurable -- because it exists purely to stop an unproductive loop, not to
+// express any policy about what the reasoning layer should do.
+const MAX_STALE_TARGET_RECOVERY_ATTEMPTS = 3;
 
 export interface LoopStepOutcome {
   stepLog: StepLog;
@@ -46,6 +55,23 @@ export async function runStep(params: {
 
   let observation = await buildObservation(page);
   state.recordVisit(observation.url);
+
+  // Bounded, names-only cookie/storage footprint (never a value -- see
+  // capture-modules/hostContext.ts), captured only on the step this run's hostname
+  // actually changes (including the very first step, giving a landing-host baseline) --
+  // lets a caller empirically confirm from Get Task Result whether state carried across a
+  // cross-host navigation, without the engine ever guessing at what any of it means.
+  let currentHostname: string | undefined;
+  try {
+    currentHostname = new URL(observation.url).hostname;
+  } catch {
+    currentHostname = undefined;
+  }
+  if (task.captureModules.includes("host_context_snapshot") && currentHostname !== state.lastObservedHostname) {
+    const snapshot = await captureHostContextSnapshot(page, stepIndex);
+    captures.host_context_snapshot = [...(captures.host_context_snapshot ?? []), snapshot];
+  }
+  state.lastObservedHostname = currentHostname;
 
   // Unlike the explicit `capture` action, dataLayer evidence must reflect every page in
   // the journey (its initial pushes and whatever accumulated by the time each step runs),
@@ -90,6 +116,8 @@ export async function runStep(params: {
       actionResult: { success: true },
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
       safetyFlags: [limitsBreach],
+      reObservationAttempted: false,
+      recoveryAttempts: 0,
     });
     recordJourneyPathEntry(captures, task.captureModules, stepLog);
     return {
@@ -106,37 +134,51 @@ export async function runStep(params: {
 
   let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
 
-  // Before dispatching a click, revalidate the target against the *live* page rather
-  // than trusting the (possibly now-stale) observation the decision was made from --
-  // the async round trip to the reasoning provider is enough time for an SPA to re-
-  // render, an overlay to appear, or an element to be removed entirely. A target that
-  // has gone stale is never blindly clicked: the reasoning provider is asked once more,
-  // with a fresh observation, so it can pick a different, currently-valid target. If
-  // that retry still can't produce an actionable click target, the *original* decision
-  // is dispatched unchanged -- the click executor's own last-resort destinationUrl
-  // fallback (actions/click.ts) is the final line of defence for a target that stays
-  // stale even after giving the reasoning layer a second look.
-  let reObservationAttempted = false;
-  if (effectiveAction.type === "click" && effectiveAction.target) {
-    const liveState = await readElementState(page, effectiveAction.target);
-    if (!liveState.actionable) {
-      reObservationAttempted = true;
-      const freshObservation = await buildObservation(page);
-      const retry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
-
-      let retryTargetActionable = true;
-      if (retry.effectiveAction.type === "click" && retry.effectiveAction.target) {
-        const retryState = await readElementState(page, retry.effectiveAction.target);
-        retryTargetActionable = retryState.actionable;
-      }
-
-      if (retryTargetActionable) {
-        observation = freshObservation;
-        decision = retry.decision;
-        safetyResult = retry.safetyResult;
-        effectiveAction = retry.effectiveAction;
+  // Before dispatching a click, revalidate the target against the *live* page rather than
+  // trusting the (possibly now-stale) observation the decision was made from -- the async
+  // round trip to the reasoning provider is enough time for an SPA to re-render, an
+  // overlay to appear/disappear, or an element to be removed entirely. A target that has
+  // gone stale is never blindly clicked: the reasoning provider is asked again, with a
+  // fresh observation, so it can pick a different, currently-valid target -- bounded (item
+  // 4 of the blocker-recovery fix) so a page that keeps re-rendering a still-unusable
+  // target cannot spin this step forever. If every attempt is exhausted, the *last*
+  // decision is dispatched unchanged -- the click executor's own pre-dispatch check and
+  // last-resort destinationUrl fallback (actions/click.ts) remain the final safety net,
+  // and a resulting staleTarget failure is itself now non-fatal (see below) rather than
+  // ending the whole run.
+  // Accumulates destinationUrl evidence for every element id seen in *any* observation
+  // taken this step (not just the latest one) -- a target that keeps getting re-proposed
+  // across bounded recovery attempts can go from present-with-a-destinationUrl to fully
+  // detached (dropped from the observation entirely) between one buildObservation call and
+  // the next, and the click executor's last-resort fallback (actions/click.ts) still needs
+  // that evidence even though the *current* observation no longer carries it.
+  const knownDestinationUrls = new Map<string, string>();
+  const rememberDestinationUrls = (obs: Observation) => {
+    for (const el of obs.interactiveElements) {
+      if (el.destinationUrl) {
+        knownDestinationUrls.set(el.id, el.destinationUrl);
       }
     }
+  };
+  rememberDestinationUrls(observation);
+
+  let reObservationAttempted = false;
+  let recoveryAttempts = 0;
+  while (
+    effectiveAction.type === "click" &&
+    effectiveAction.target &&
+    recoveryAttempts < MAX_STALE_TARGET_RECOVERY_ATTEMPTS &&
+    !(await readElementState(page, effectiveAction.target)).actionable
+  ) {
+    reObservationAttempted = true;
+    recoveryAttempts += 1;
+    const freshObservation = await buildObservation(page);
+    rememberDestinationUrls(freshObservation);
+    const retry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
+    observation = freshObservation;
+    decision = retry.decision;
+    safetyResult = retry.safetyResult;
+    effectiveAction = retry.effectiveAction;
   }
 
   if (!safetyResult.allowed && task.captureModules.includes("errors")) {
@@ -186,31 +228,65 @@ export async function runStep(params: {
     actionNavigationTimeoutMs,
     reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
     knownDestinationUrl:
-      effectiveAction.type === "click"
-        ? observation.interactiveElements.find((el) => el.id === effectiveAction.target)?.destinationUrl
+      effectiveAction.type === "click" && effectiveAction.target
+        ? knownDestinationUrls.get(effectiveAction.target)
         : undefined,
   });
 
-  if (!actionResult.success && task.captureModules.includes("errors")) {
-    const targetKnownMissing =
-      effectiveAction.type === "click" &&
-      (!effectiveAction.target || !observation.interactiveElements.some((el) => el.id === effectiveAction.target));
-    const category = classifyActionFailure({
-      actionType: effectiveAction.type,
-      targetKnownMissing,
-      errorMessage: actionResult.error,
-    });
-    recordDiagnosticError(captures, {
-      stepIndex,
-      category,
-      severity: "critical",
-      pageUrl: observation.url,
-      actionType: effectiveAction.type,
-      ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
-      message: actionResult.error ?? `${effectiveAction.type} action failed.`,
-      recoverable: false,
-      stoppedRun: true,
-    });
+  // A staleTarget-classified failure (see actions/click.ts) means the target went stale
+  // between decision and dispatch, not that the decision was actually wrong -- it is
+  // tracked as a bounded, non-fatal recovery condition (item 4 of the blocker-recovery
+  // fix) rather than immediately ending the run, exactly like the reported production
+  // failure needed. staleTargetExhausted is computed here and consulted again at the
+  // terminal-status decision near the end of this function.
+  let staleTargetExhausted = false;
+  if (!actionResult.success && actionResult.staleTarget) {
+    state.consecutiveStaleTargetFailures += 1;
+    staleTargetExhausted = state.consecutiveStaleTargetFailures > MAX_STALE_TARGET_RECOVERY_ATTEMPTS;
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        stepIndex,
+        category: "stale_target_recovery",
+        severity: staleTargetExhausted ? "critical" : "warning",
+        pageUrl: observation.url,
+        actionType: effectiveAction.type,
+        ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
+        message: staleTargetExhausted
+          ? `Click target repeatedly went stale before dispatch could succeed ` +
+            `(${state.consecutiveStaleTargetFailures} consecutive occurrences, limit ` +
+            `${MAX_STALE_TARGET_RECOVERY_ATTEMPTS}); giving up. ${actionResult.error ?? ""}`
+          : `Click target went stale before dispatch could succeed (${state.consecutiveStaleTargetFailures}/` +
+            `${MAX_STALE_TARGET_RECOVERY_ATTEMPTS} consecutive occurrences); re-observing and continuing. ` +
+            `${actionResult.error ?? ""}`,
+        recoverable: !staleTargetExhausted,
+        stoppedRun: staleTargetExhausted,
+      });
+    }
+  } else if (!actionResult.success) {
+    state.consecutiveStaleTargetFailures = 0;
+    if (task.captureModules.includes("errors")) {
+      const targetKnownMissing =
+        effectiveAction.type === "click" &&
+        (!effectiveAction.target || !observation.interactiveElements.some((el) => el.id === effectiveAction.target));
+      const category = classifyActionFailure({
+        actionType: effectiveAction.type,
+        targetKnownMissing,
+        errorMessage: actionResult.error,
+      });
+      recordDiagnosticError(captures, {
+        stepIndex,
+        category,
+        severity: "critical",
+        pageUrl: observation.url,
+        actionType: effectiveAction.type,
+        ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
+        message: actionResult.error ?? `${effectiveAction.type} action failed.`,
+        recoverable: false,
+        stoppedRun: true,
+      });
+    }
+  } else {
+    state.consecutiveStaleTargetFailures = 0;
   }
 
   // After-state evidence for this same click, gathered before success criteria are
@@ -333,6 +409,8 @@ export async function runStep(params: {
           ...(noProgressDetected ? ["no_progress_detected"] : []),
         ]
       : safetyResult.flags,
+    reObservationAttempted,
+    recoveryAttempts,
   });
   recordJourneyPathEntry(captures, task.captureModules, stepLog);
 
@@ -355,7 +433,20 @@ export async function runStep(params: {
     return { stepLog, terminal: "failure", finishReason: "stop_failure_action" };
   }
   if (!actionResult.success) {
-    return { stepLog, terminal: "failure", finishReason: "action_execution_error" };
+    // A staleTarget failure that hasn't exhausted its bounded allowance is not terminal:
+    // fall through so the outer loop (core/engine.ts) calls runStep again, which starts
+    // with a brand-new buildObservation and gives the reasoning provider another chance --
+    // exactly the behaviour the reported production failure needed instead of ending the
+    // whole task on one race. Once exhausted (or for any non-stale failure), this remains
+    // a hard stop with a precise, distinct reason.
+    if (actionResult.staleTarget && !staleTargetExhausted) {
+      return { stepLog };
+    }
+    return {
+      stepLog,
+      terminal: "failure",
+      finishReason: actionResult.staleTarget ? "stale_target_recovery_exhausted" : "action_execution_error",
+    };
   }
 
   return { stepLog };
@@ -369,9 +460,20 @@ function buildStepLog(params: {
   actionResult: StepLog["actionResult"];
   satisfiedCriteriaIds: string[];
   safetyFlags: string[];
+  reObservationAttempted: boolean;
+  recoveryAttempts: number;
 }): StepLog {
-  const { stepIndex, observation, decision, selectedAction, actionResult, satisfiedCriteriaIds, safetyFlags } =
-    params;
+  const {
+    stepIndex,
+    observation,
+    decision,
+    selectedAction,
+    actionResult,
+    satisfiedCriteriaIds,
+    safetyFlags,
+    reObservationAttempted,
+    recoveryAttempts,
+  } = params;
   return {
     stepIndex,
     timestamp: new Date().toISOString(),
@@ -385,6 +487,8 @@ function buildStepLog(params: {
       estimatedCompletion: satisfiedCriteriaIds.length === 0 ? 0 : 1,
     },
     ...(safetyFlags.length > 0 ? { safetyFlags } : {}),
+    ...(reObservationAttempted ? { reObservationAttempted } : {}),
+    ...(recoveryAttempts > 0 ? { recoveryAttempts } : {}),
   };
 }
 
@@ -431,6 +535,7 @@ async function obtainDecision(params: {
     observation,
     recentActions: state.actionHistory,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+    consentInteractionPolicy: task.safety.consentInteractionPolicy ?? "reject_optional",
   });
 
   const safetyResult = validateDecision({

@@ -2,7 +2,12 @@ import type { Frame, Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
 import type { ActionResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
-import { elementLocatorSelector, readElementState, type ElementState } from "../observation/observationBuilder.js";
+import {
+  elementLocatorSelector,
+  readElementState,
+  resolveElementActionTarget,
+  type ElementState,
+} from "../observation/observationBuilder.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { assessNavigationRecovery, robustGoto, PAGE_SETTLE_DELAY_MS, type RobustGotoOutcome } from "../core/robustNavigation.js";
 import { recordDiagnosticError } from "../capture-modules/errors.js";
@@ -45,7 +50,21 @@ export interface ExecuteClickParams {
   knownDestinationUrl?: string;
 }
 
-type ClickErrorCategory = "detached" | "hidden" | "disabled" | "intercepted" | "timeout" | "unknown";
+type ClickErrorCategory = "detached" | "hidden" | "disabled" | "intercepted" | "timeout" | "frame_unavailable" | "unknown";
+
+// A target in one of these categories failed only because it went stale (the DOM changed)
+// between when it was decided on and when it was actually acted on -- never because it was
+// a genuinely wrong or unsafe decision. "disabled" is deliberately excluded: a disabled
+// control is a legitimate, already-visible-as-such fact the reasoning layer could already
+// see, not a race condition. Drives ActionResult.staleTarget (see core/loop.ts's bounded,
+// non-fatal recovery for exactly this class of failure).
+const STALE_TARGET_CATEGORIES = new Set<ClickErrorCategory>([
+  "detached",
+  "hidden",
+  "intercepted",
+  "timeout",
+  "frame_unavailable",
+]);
 
 interface ClickDiagnostics {
   targetElementId: string;
@@ -75,6 +94,9 @@ function formatClickDiagnostics(d: ClickDiagnostics): string {
 }
 
 function categorizeUnactionableState(state: ElementState): ClickErrorCategory {
+  if (state.frameUnavailable) {
+    return "frame_unavailable";
+  }
   if (!state.attached) {
     return "detached";
   }
@@ -218,6 +240,11 @@ async function resolveUnactionableClick(params: {
     error:
       `click target not actionable (${category}); ${fallbackDetail}. ${formatClickDiagnostics(diagnostics)}` +
       (originalErrorMessage ? ` Original click error: ${originalErrorMessage}` : ""),
+    // See STALE_TARGET_CATEGORIES above: this failure's category means the target went
+    // stale between decision and dispatch, not that the decision was actually wrong --
+    // core/loop.ts uses this to give Navigation Claude a bounded number of further chances
+    // (a fresh observation, a new decision) instead of ending the whole run on the spot.
+    ...(STALE_TARGET_CATEGORIES.has(category) ? { staleTarget: true } : {}),
   };
 }
 
@@ -275,6 +302,25 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     });
   }
 
+  // Resolved fresh right before dispatch (never a cached handle from the readElementState
+  // call above) -- a same-origin child frame can itself be removed in the gap between the
+  // two, same as any other element going stale. See observation/frames.ts.
+  const clickTarget = await resolveElementActionTarget(page, targetElementId);
+  if (!clickTarget) {
+    return resolveUnactionableClick({
+      page,
+      targetElementId,
+      category: "frame_unavailable",
+      state: { ...preClickState, destinationUrl: preClickState.destinationUrl ?? knownDestinationUrl },
+      allowedDomains,
+      timeoutMs,
+      captures,
+      stepIndex,
+      captureModules,
+      reObservationAttempted: reObservationAttempted ?? false,
+    });
+  }
+
   const urlBeforeClick = safePageUrl(page) ?? "";
 
   let mainFrameNavigated = false;
@@ -287,7 +333,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   page.on("framenavigated", onFrameNavigated);
 
   try {
-    await page.click(selector, { timeout: CLICK_ELEMENT_TIMEOUT_MS });
+    await clickTarget.click(selector, { timeout: CLICK_ELEMENT_TIMEOUT_MS });
   } catch (error) {
     page.off("framenavigated", onFrameNavigated);
     const message = error instanceof Error ? error.message : String(error);
@@ -323,6 +369,12 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   page.off("framenavigated", onFrameNavigated);
 
   if (!mainFrameNavigated) {
+    // Generic settle wait, same fixed budget as the post-navigation case below -- lets a
+    // CSS transition/animation a click triggered without a document navigation (e.g.
+    // dismissing an overlay) finish before the caller's next observation runs. Applies to
+    // every non-navigating click uniformly; nothing here knows or cares what kind of
+    // element was clicked.
+    await page.waitForTimeout(PAGE_SETTLE_DELAY_MS).catch(() => {});
     return { success: true, resultingUrl: safePageUrl(page) ?? urlBeforeClick };
   }
 

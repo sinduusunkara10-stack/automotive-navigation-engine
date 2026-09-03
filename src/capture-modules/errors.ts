@@ -2,7 +2,12 @@ import type { ConsoleMessage, Page, Request, Response } from "playwright";
 import type { ActionType } from "../types/actions.js";
 import type { Captures, ErrorCapture, ErrorCategory, ErrorSeverity } from "../types/task-response.js";
 
-const MAX_MESSAGE_LENGTH = 500;
+// Bumped from 500: the stale-target-recovery diagnostic (core/loop.ts) wraps the click
+// executor's own already-detailed diagnostics string (actions/click.ts's
+// formatClickDiagnostics) with a short recovery-progress prefix, and the combination can
+// exceed 500 chars while still being exactly the bounded, non-sensitive text this cap
+// exists to bound -- never raw HTML, cookies, or a stack trace.
+const MAX_MESSAGE_LENGTH = 800;
 
 // Deliberately built only from Error#message / ConsoleMessage#text() / short generated
 // strings, never Error#stack, so diagnostics never carry Node/Playwright stack frames

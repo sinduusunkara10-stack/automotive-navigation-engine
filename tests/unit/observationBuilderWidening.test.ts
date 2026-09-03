@@ -2,16 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chromium, type Page } from "playwright";
 
-import { buildObservation } from "../../src/observation/observationBuilder.js";
+import { buildObservation, readElementState } from "../../src/observation/observationBuilder.js";
 
 /**
  * Coverage for the generic observation-evidence widening (src/observation/
  * observationBuilder.ts): a broader interactive-element selector (tabs, options, radio/
  * checkbox-style controls, submit/button inputs), ARIA selection/toggle-state and disabled
  * flags, heading levels h1-h4, and generic progress-indicator text -- all read verbatim
- * from whatever markup the page itself uses, never a brand/site-specific selector. No
- * iframe/shadow-DOM traversal is added here (still document.querySelectorAll only) -- see
- * docs/architecture.md "Observation evidence" for why.
+ * from whatever markup the page itself uses, never a brand/site-specific selector. Shadow
+ * DOM traversal is still out of scope -- see docs/architecture.md "Observation evidence".
+ * One level of generic, same-origin child-frame scanning (src/observation/frames.ts) *is*
+ * now in scope, covered separately below.
  */
 
 async function withPage<T>(html: string, run: (page: Page) => Promise<T>): Promise<T> {
@@ -161,5 +162,91 @@ test("progressIndicatorText is absent (not an empty array) when the page has no 
   await withPage(html, async (page) => {
     const observation = await buildObservation(page);
     assert.equal(observation.progressIndicatorText, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Generic, one-level same-origin child-frame support (src/observation/frames.ts). A
+// consent/preference blocker's live control can legitimately live inside a same-origin
+// iframe rather than the main document -- these tests prove the engine can see and
+// resolve such an element without any vendor/CMP-specific iframe selector: the exact same
+// interactive-element scan runs against the frame's own document, and the resulting
+// element id is frame-scoped so core/loop.ts and actions/click.ts can act on it directly.
+// A `srcdoc` iframe (no `sandbox` attribute) is same-origin with its parent in Chromium,
+// so this needs no second HTTP origin to exercise faithfully.
+// ---------------------------------------------------------------------------------------
+
+test("an interactive element inside a same-origin iframe is scanned and carries frameOrigin; a main-document element does not", async () => {
+  const html = `<!doctype html><html><body>
+    <button id="main-btn">Main document control</button>
+    <iframe srcdoc="&lt;button&gt;Frame control&lt;/button&gt;"></iframe>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    const observation = await buildObservation(page);
+    const mainEl = observation.interactiveElements.find((el) => el.accessibleName === "Main document control");
+    const frameEl = observation.interactiveElements.find((el) => el.accessibleName === "Frame control");
+    assert.ok(mainEl, "expected the main-document control to be scanned");
+    assert.ok(frameEl, "expected the same-origin iframe's control to be scanned too");
+    assert.equal(mainEl?.frameOrigin, undefined);
+    assert.ok(frameEl?.frameOrigin, "expected the frame-scoped element to carry its frame's origin");
+    assert.notEqual(frameEl?.id, mainEl?.id);
+  });
+});
+
+test("readElementState resolves a frame-scoped element id against its live owning frame (visible and covered both work)", async () => {
+  const html = `<!doctype html><html><body>
+    <iframe srcdoc="&lt;button&gt;Frame control&lt;/button&gt;"></iframe>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    const observation = await buildObservation(page);
+    const frameEl = observation.interactiveElements.find((el) => el.accessibleName === "Frame control");
+    assert.ok(frameEl);
+    const state = await readElementState(page, frameEl!.id);
+    assert.equal(state.attached, true);
+    assert.equal(state.visible, true);
+    assert.equal(state.actionable, true);
+    assert.equal(state.frameUnavailable, false);
+  });
+});
+
+test("a frame-scoped element id whose owning frame no longer exists resolves as frameUnavailable, never crashing or silently substituting the main document", async () => {
+  const html = `<!doctype html><html><body>
+    <iframe id="the-frame" srcdoc="&lt;button&gt;Frame control&lt;/button&gt;"></iframe>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    const observation = await buildObservation(page);
+    const frameEl = observation.interactiveElements.find((el) => el.accessibleName === "Frame control");
+    assert.ok(frameEl);
+
+    await page.evaluate(() => document.getElementById("the-frame")?.remove());
+
+    const state = await readElementState(page, frameEl!.id);
+    assert.equal(state.frameUnavailable, true);
+    assert.equal(state.actionable, false);
+    assert.equal(state.attached, false);
+  });
+});
+
+test("an inaccessible (removed mid-scan) child frame is reported by origin only on the Observation, and contributes no candidates", async () => {
+  const html = `<!doctype html><html><body>
+    <button>Main document control</button>
+    <iframe id="the-frame" srcdoc="&lt;button&gt;Frame control&lt;/button&gt;"></iframe>
+  </body></html>`;
+  await withPage(html, async (page) => {
+    // Remove the iframe right after it has committed but before buildObservation ever
+    // gets a chance to scan it -- reproduces the same "frame no longer accessible" class
+    // of race actions/click.ts's frame_unavailable category also protects against.
+    await page.waitForSelector("iframe");
+    await page.evaluate(() => document.getElementById("the-frame")?.remove());
+
+    const observation = await buildObservation(page);
+    assert.ok(
+      !observation.interactiveElements.some((el) => el.accessibleName === "Frame control"),
+      "a removed frame must never contribute a candidate",
+    );
+    assert.ok(
+      observation.interactiveElements.some((el) => el.accessibleName === "Main document control"),
+      "the main document must still be scanned normally",
+    );
   });
 });

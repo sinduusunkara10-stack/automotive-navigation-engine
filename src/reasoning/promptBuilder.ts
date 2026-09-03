@@ -1,6 +1,51 @@
 import type { ReasoningContext } from "./reasoningProvider.js";
+import type { ConsentInteractionPolicy } from "../types/task-request.js";
 import type { InteractiveElement, PromptElementSelectionDiagnostic } from "../types/task-response.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
+
+/**
+ * Plain-language instruction for this run's consentInteractionPolicy (see
+ * types/task-request.ts for the full policy doc). Deliberately generic: no CTA wordlist,
+ * no vendor/CMP-specific attribute or selector, no translation table -- the same
+ * language-agnostic semantic judgement the model already applies elsewhere (accessibleName
+ * /type/ariaState, never a fixed word) is what it is asked to apply here too. The engine
+ * enforces the vocabulary/domain/safety boundaries; which specific control best fits a
+ * semantic description is left to the model, exactly like every other action choice in
+ * this prompt.
+ */
+function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): string {
+  switch (policy) {
+    case "do_not_interact":
+      return (
+        "This run's consent-interaction policy is \"do_not_interact\": never click any control whose " +
+        "semantic purpose is to manage consent or tracking preferences, even solely to clear a blocking " +
+        "overlay -- if such a control is the only way to make progress, treat the objective-relevant " +
+        "control as unreachable and choose accordingly from the allowed actions instead."
+      );
+    case "accept_optional":
+      return (
+        "This run's consent-interaction policy is \"accept_optional\": you may click a control that grants " +
+        "optional consent, but only when doing so is genuinely necessary to clear a blocking overlay that " +
+        "prevents reaching the objective -- never when the objective is already reachable without it, and " +
+        "never for a control whose purpose is unrelated to consent/tracking preferences."
+      );
+    case "essential_only":
+      return (
+        "This run's consent-interaction policy is \"essential_only\": when clearing a blocking overlay is " +
+        "necessary, prefer a control whose semantic purpose keeps only strictly required functionality " +
+        "active and does not grant optional/broad consent; never click a control whose purpose is to grant " +
+        "broad or optional consent, and never guess at or alter a granular settings screen."
+      );
+    case "reject_optional":
+    default:
+      return (
+        "This run's consent-interaction policy is \"reject_optional\": when clearing a blocking overlay is " +
+        "necessary, prefer a control whose semantic purpose is to decline or continue without granting " +
+        "optional/non-essential data collection; never click a control whose purpose is to grant broad or " +
+        "optional consent."
+      );
+  }
+}
 
 export type { PromptElementSelectionDiagnostic } from "../types/task-response.js";
 
@@ -192,8 +237,17 @@ export interface ReasoningPrompt {
  * function's input in the first place.
  */
 export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt {
-  const { objective, successCriteria, allowedActions, allowedDomains, limits, observation, recentActions, satisfiedCriteriaIds } =
-    context;
+  const {
+    objective,
+    successCriteria,
+    allowedActions,
+    allowedDomains,
+    limits,
+    observation,
+    recentActions,
+    satisfiedCriteriaIds,
+    consentInteractionPolicy,
+  } = context;
 
   const system =
     "You are the decision component of an automated browser-navigation engine. " +
@@ -217,7 +271,9 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "that uncovered control over a covered one. Only choose a covered control when clearing " +
     "whatever is covering the page is itself a necessary step before the objective can be " +
     "reached, and remember that dismissing or clearing a covering element is never itself " +
-    "the objective -- it only clears the way for a later action that is. When more than one visible control could " +
+    "the objective -- it only clears the way for a later action that is. " +
+    consentInteractionPolicyClause(consentInteractionPolicy) +
+    " When more than one visible control could " +
     "plausibly apply, choose the one whose semantic purpose most specifically matches the " +
     "objective/successCriteria wording (for example: prefer whichever of a " +
     "\"summary\"-purposed control or a \"continue\"-purposed control the objective actually " +

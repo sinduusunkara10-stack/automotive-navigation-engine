@@ -197,6 +197,35 @@ own `schemaVersion` both moved to `"1.4.0"` too, even though no other request fi
 n8n workflow must update both version strings it sends to `"1.4.0"` — see the `examples/*.json`
 fixtures in this repo, all of which were updated the same way.
 
+**Example (already applied, again): `"1.4.0"` → `"1.5.0"`.** The blocker-recovery fix
+(§"Blocker recovery" and §"Frame-aware observation" in `docs/architecture.md`) widened both
+contracts:
+
+- **Request** (additive, optional): `safety.consentInteractionPolicy` — one of
+  `"reject_optional"` (the default when omitted — no existing n8n workflow needs to send this to
+  keep its current behaviour), `"essential_only"`, `"accept_optional"`, or `"do_not_interact"`.
+  Also additive to `captureModules`: the new opt-in `"host_context_snapshot"` module.
+- **Response** (all additive): `observation.interactiveElements[].frameOrigin` and
+  `observation.inaccessibleFrameOrigins` (generic, one-level same-origin iframe evidence);
+  `actionResult.staleTarget` (a failed action's cause was mechanically classified as the target
+  going stale, not a genuinely wrong decision); `steps[].reObservationAttempted` and
+  `steps[].recoveryAttempts` (was the bounded pre-dispatch recovery loop used this step, and how
+  many cycles); `errors[].category` gained the additive `"stale_target_recovery"` value; and the
+  new `captures.host_context_snapshot[]` array (bounded, names-only cookie/storage footprint,
+  populated only when the `host_context_snapshot` capture module is requested).
+
+No existing field on either contract was removed, renamed, or had its meaning changed. Per this
+repo's own stated convention, the response contract's `schemaVersion` moved from `"1.4.0"` to
+`"1.5.0"`, and the request contract's `outputSchemaVersion` and its own `schemaVersion` both moved
+to `"1.5.0"` too, even though `safety.consentInteractionPolicy` is the only other request-visible
+change. **An n8n workflow must update both version strings it sends to `"1.5.0"`** — see the
+`examples/*.json` fixtures in this repo, all of which were updated the same way. No other n8n-side
+change is required: every new field on both contracts is optional/additive, so a workflow that
+only bumps the two version strings continues to behave exactly as before. A workflow that wants
+the new recovery behaviour's policy latitude explicitly configured should add
+`safety.consentInteractionPolicy` to its request body; a workflow that wants the new cross-host
+cookie/storage diagnostic should add `"host_context_snapshot"` to `captureModules`.
+
 ## 8. Task store and instance limitations
 
 Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
