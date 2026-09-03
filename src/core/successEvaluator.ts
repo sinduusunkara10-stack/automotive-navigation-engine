@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SuccessCriterion } from "../types/task-request.js";
-import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
+import type { LastActionEvidence, SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import {
   ALL_SEMANTIC_SIGNALS,
   gatherSemanticPageSignals,
@@ -39,6 +39,17 @@ const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
  * cost control" for the caching/no-progress guard this complements, and the design
  * discussion in this session for why URL- or content-based caching was rejected in favour
  * of this narrower, zero-new-false-positive/false-negative optimisation.
+ *
+ * `lastActionEvidence` is optional and off by default: when supplied (src/core/loop.ts
+ * passes the same clicked-element details it already reads for the cta_clicks capture --
+ * see readClickedElementDetails in src/capture-modules/ctaClicks.ts), it is forwarded only
+ * to a semantic_page_match criterion that still needs to consult semanticVerifier, as
+ * extra evidence about the specific control the engine most recently clicked. This lets a
+ * criterion's own description generically require that a specific completion control was
+ * activated (e.g. "the final completion control -- Summary, Continue, or an equivalent --
+ * was clicked"), verified by meaning against the actual click, rather than being satisfied
+ * merely by landing on a right-looking page some other way. It never affects the
+ * deterministic lexical path or any non-semantic criterion type.
  */
 export async function evaluateSuccessCriteria(
   page: Page,
@@ -46,13 +57,14 @@ export async function evaluateSuccessCriteria(
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
   alreadySatisfiedCriteriaIds?: ReadonlySet<string>,
+  lastActionEvidence?: LastActionEvidence,
 ): Promise<string[]> {
   const satisfied: string[] = [];
   for (const criterion of criteria) {
     if (alreadySatisfiedCriteriaIds?.has(criterion.id)) {
       continue;
     }
-    if (await evaluateSingle(page, criterion, objective, semanticVerifier)) {
+    if (await evaluateSingle(page, criterion, objective, semanticVerifier, lastActionEvidence)) {
       satisfied.push(criterion.id);
     }
   }
@@ -81,6 +93,7 @@ async function evaluateSingle(
   criterion: SuccessCriterion,
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
+  lastActionEvidence?: LastActionEvidence,
 ): Promise<boolean> {
   switch (criterion.type) {
     case "url_pattern": {
@@ -95,7 +108,7 @@ async function evaluateSingle(
       return (await page.locator(selector).count()) > 0;
     }
     case "semantic_page_match": {
-      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier);
+      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier, lastActionEvidence);
     }
     // data_layer_event / network_event / custom are not evaluated by this generic
     // core evaluator; a capture module or a future criterion handler owns them.
@@ -125,6 +138,7 @@ async function evaluateSemanticPageMatch(
   criterion: SuccessCriterion,
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
+  lastActionEvidence?: LastActionEvidence,
 ): Promise<boolean> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
@@ -154,6 +168,7 @@ async function evaluateSemanticPageMatch(
     objective,
     criterionDescription: criterion.description,
     pageEvidence: pageSignals,
+    ...(lastActionEvidence ? { lastActionEvidence } : {}),
   });
   return verification.satisfied;
 }

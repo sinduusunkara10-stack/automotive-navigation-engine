@@ -24,6 +24,26 @@ export interface SemanticPageEvidence {
   title: string;
   headings: string[];
   interactiveText: string[];
+  /** Optional generic ARIA selection/toggle-state evidence -- see SemanticPageSignals.ariaState. */
+  ariaState?: string[];
+  /** Optional generic progress-indicator text -- see SemanticPageSignals.progressText. */
+  progressText?: string[];
+}
+
+/**
+ * Optional, generic evidence about the single most recent click the engine dispatched,
+ * read from the same element attributes src/capture-modules/ctaClicks.ts already reads
+ * for the cta_clicks capture -- never a second read, never anything not already visible
+ * to the engine. Lets a criterion description like "the final completion control (Summary,
+ * Continue, or an equivalent) was clicked" be verified against what was *actually clicked*,
+ * not merely inferred from the resulting page -- without adding a brand/label-specific
+ * check anywhere in the engine: the comparison is still made by the model, on meaning, the
+ * same as every other semantic_page_match verification.
+ */
+export interface LastActionEvidence {
+  ctaText?: string;
+  accessibleName?: string;
+  elementType?: string;
 }
 
 export interface SemanticVerificationInput {
@@ -33,6 +53,8 @@ export interface SemanticVerificationInput {
   criterionDescription: string;
   /** Compact page evidence already safe to send to a model -- never raw HTML. */
   pageEvidence: SemanticPageEvidence;
+  /** Optional -- see LastActionEvidence. Absent for the common case (no specific click to attribute). */
+  lastActionEvidence?: LastActionEvidence;
 }
 
 export interface SemanticVerificationOutcome {
@@ -70,13 +92,18 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "The objective/description and the page evidence may be written in different languages " +
     "-- compare their real-world MEANING, not their literal words; a page in one language can " +
     "correctly satisfy an objective written in another. Base your answer only on the page " +
-    "evidence given to you here (title, headings, visible interactive-element text) -- never " +
+    "evidence given to you here (title, headings, visible interactive-element text, and, when " +
+    "present, ARIA selection/progress state and the last click the engine made) -- never " +
     "assume or invent content that is not present. Generic words alone (e.g. a single shared " +
     "word like \"vehicle\" or \"continue\") are not sufficient evidence by themselves; require " +
     "the page evidence, taken together, to genuinely correspond to the specific state " +
-    "described. Never output an action, URL, selector, or code. Give an honest confidence for " +
-    "how sure you are, and always cite the specific page evidence (a short quote) that " +
-    "supports your verdict, even when the verdict is that the page does not match.";
+    "described. When the criterion description refers to a specific control having been " +
+    "activated (e.g. a final completion control, by whatever label the page itself uses), " +
+    "you must find evidence of that specific control in the given page/click evidence -- an " +
+    "unrelated control being clicked, or the right-looking page being reached by some other " +
+    "route, is not sufficient. Never output an action, URL, selector, or code. Give an honest " +
+    "confidence for how sure you are, and always cite the specific page evidence (a short " +
+    "quote) that supports your verdict, even when the verdict is that the page does not match.";
 
   const payload = {
     objective: input.objective,
@@ -85,7 +112,10 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
       title: input.pageEvidence.title,
       headings: input.pageEvidence.headings,
       interactiveElementText: input.pageEvidence.interactiveText,
+      ...(input.pageEvidence.ariaState ? { ariaState: input.pageEvidence.ariaState } : {}),
+      ...(input.pageEvidence.progressText ? { progressIndicatorText: input.pageEvidence.progressText } : {}),
     },
+    ...(input.lastActionEvidence ? { lastActionEvidence: input.lastActionEvidence } : {}),
   };
 
   return { system, user: JSON.stringify(payload) };
@@ -98,6 +128,9 @@ function buildCacheKey(input: SemanticVerificationInput): string {
     title: input.pageEvidence.title,
     headings: input.pageEvidence.headings,
     interactiveText: input.pageEvidence.interactiveText,
+    ariaState: input.pageEvidence.ariaState,
+    progressText: input.pageEvidence.progressText,
+    lastActionEvidence: input.lastActionEvidence,
   });
 }
 

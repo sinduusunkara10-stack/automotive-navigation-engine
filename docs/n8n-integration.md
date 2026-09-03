@@ -170,6 +170,22 @@ convention (every request-contract change bumps the const, even an additive one)
 now only accepts the literal string `"1.2.0"`, so every caller must update the value it sends,
 whether or not it uses the new criterion type.
 
+**Example (already applied, again): `"1.2.0"` → `"1.3.0"`.** Adding the generic
+action-attributed analytics capture (§9d below) and widening observation evidence
+(§"Observation evidence" in `docs/architecture.md`) added new, purely additive fields to the
+**response** contract only: `captures.cta_clicks[].resultingTitle`/`actionAnalytics`, and
+`observation.interactiveElements[].disabled`/`ariaState`/`observation.progressIndicatorText`.
+No existing response field was removed, renamed, or had its meaning changed. Per this repo's own
+stated convention above (every contract change bumps the const, additive or not), the response
+contract's `schemaVersion` moved from `"1.2.0"` to `"1.3.0"`. The **request** contract's own
+shape did not change at all — but the request's `outputSchemaVersion` field is defined to always
+track the response contract's version (see its own schema description), so its required literal
+value also moved to `"1.3.0"`, which in turn is itself a request-contract change under this
+repo's convention, so the request contract's own `schemaVersion` moved from `"1.2.0"` to
+`"1.3.0"` too, even though no other request field changed. An n8n workflow must update **both**
+version strings it sends (`schemaVersion` and `outputSchemaVersion`) to `"1.3.0"` — see the
+`examples/*.json` fixtures in this repo, all of which were updated the same way.
+
 ## 8. Task store and instance limitations
 
 Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
@@ -467,6 +483,114 @@ proposals, then a repeated-action block), the equivalent scenario now ends after
 two rejected proposals — a reduction from 4 reasoning-provider calls after reaching the
 destination page down to 2.
 
+## 9c. Terminal-route success model: milestone vs. terminal criteria, and any journey
+
+A journey with an intermediate state worth recording but not itself the goal (entering a
+configurator, reaching a lead form) and a true terminal state that must be *reached by the right
+route, not just landed on* (a configuration actually completed, not merely started) is expressed
+entirely with the `successCriteria` structure that already exists — no new schema field, and the
+exact same pattern works for any journey, not only a configurator:
+
+```json
+"successCriteria": [
+  {
+    "id": "configurator-entered",
+    "type": "semantic_page_match",
+    "description": "The vehicle configurator has been entered: configuration controls (e.g. trim, colour, options) are visible.",
+    "required": false
+  },
+  {
+    "id": "configuration-finished",
+    "type": "semantic_page_match",
+    "description": "The configuration process has been completed: the final completion control (for example a Summary or Continue button, or an equivalent control in the page's own language) was actually clicked, and the resulting page confirms the configuration is finished. Being on a right-looking page by itself is not enough; the completion control must have been the one clicked.",
+    "required": true
+  }
+]
+```
+
+- The milestone (`required: false`) is satisfied early and, per PR #20's short-circuit
+  (`alreadySatisfiedCriteriaIds`), never re-evaluated once satisfied — it never gates
+  `stop_success` on its own, but is still reported in `satisfiedSuccessCriteriaIds` as positive
+  evidence of progress.
+- The terminal criterion (`required: true`, the schema default) is the only thing that gates
+  `stop_success`. Its description asks for two things at once — the right resulting page **and**
+  that the completion control specifically was what got clicked — because `SemanticCriterionVerifier`
+  is given both the resulting page's evidence *and* `lastActionEvidence` (the accessible
+  name/text/element type of the most recently clicked control — see §"SemanticCriterionVerifier"
+  in `docs/architecture.md`), and judges the description's meaning against both. This is what
+  stops a right-looking page reached some other way (a direct link, an unrelated CTA that happens
+  to land nearby) from satisfying the criterion — verified by meaning, never by matching a
+  literal word, translation, or brand label anywhere in the engine itself.
+- This same two-criterion shape (an optional milestone plus a required, route-aware terminal
+  criterion) is exactly how the Test Drive example in the next section expresses "reached the
+  booking form" vs. "the booking was actually confirmed" — same mechanism, same fields, no
+  per-journey code.
+
+## 9d. Generic action-attributed analytics capture
+
+For every click the engine dispatches, when a task requests `cta_clicks` together with
+`data_layer_evidence` and/or `ga4_network_events`, the corresponding `captures.cta_clicks[]`
+entry carries an additional `actionAnalytics` object — see `docs/architecture.md` "Generic
+action-attributed analytics capture" for the full field-by-field rationale. Example, for a click
+that both pushed to `dataLayer` and triggered a GA4 request, and that satisfied a success
+criterion:
+
+```json
+{
+  "stepIndex": 3,
+  "timestamp": "2026-09-02T12:00:04.120Z",
+  "sourcePageUrl": "https://configurator.example-automotive-oem.com/trim",
+  "sourcePageTitle": "Choose Your Trim",
+  "ctaText": "Continue",
+  "accessibleName": "Continue to summary",
+  "elementType": "button",
+  "resultingUrl": "https://configurator.example-automotive-oem.com/summary",
+  "resultingTitle": "Configuration Summary",
+  "navigationSucceeded": true,
+  "actionSucceeded": true,
+  "actionAnalytics": {
+    "dataLayerDelta": {
+      "available": true,
+      "replaced": true,
+      "newEntries": [
+        { "event": "page_view", "page": "summary" },
+        { "event": "configuration_step", "step": "summary" }
+      ]
+    },
+    "ga4RequestsObservedDuringActionWindow": [
+      {
+        "stepIndex": 3,
+        "requestUrl": "https://configurator.example-automotive-oem.com/g/collect?v=2&en=page_view&dl=...",
+        "timestamp": "2026-09-02T12:00:04.310Z",
+        "params": { "en": "page_view", "dl": "https://configurator.example-automotive-oem.com/summary" }
+      }
+    ],
+    "advancedJourney": true,
+    "newlySatisfiedCriteriaIds": ["configuration-finished"],
+    "verifierDecisions": [
+      {
+        "attempt": 0,
+        "outcome": "satisfied",
+        "confidence": 0.92,
+        "evidence": "\"Configuration Summary\" heading, reached via the Continue control.",
+        "inputTokens": 410,
+        "outputTokens": 38,
+        "latencyMs": 812
+      }
+    ]
+  }
+}
+```
+
+**The run's final interaction.** There is no separate `finalInteraction` field: the last entry
+in `captures.cta_clicks[]` (or, for a run where the last click didn't reach a terminal state, the
+last entry with `actionAnalytics.newlySatisfiedCriteriaIds` including a `required: true`
+criterion) already *is* the run's final, decisive interaction, with the full
+`actionAnalytics` evidence above attached — n8n's Extract/parse node can read
+`captures.cta_clicks[captures.cta_clicks.length - 1]` for this rather than a new top-level field,
+keeping the response shape additive (no field removed or renamed) and avoiding a second place the
+same information could disagree with `captures.cta_clicks[]`.
+
 ## 10. taskId, and brand/market/language as reporting metadata only
 
 **taskId.** With only `startUrl`, `journeyType`, and `objective` coming out of the Form
@@ -554,9 +678,8 @@ site those fallbacks were written against. Concretely, the Build node should:
 5. **Leave `brand`/`market`/`language` out of the request entirely**, or pass them through
    `metadata` only when the workflow already has them from its own trigger context — never
    look them up or guess them before the run (§10).
-6. **Send `schemaVersion: "1.2.0"` and `outputSchemaVersion: "1.2.0"`** (§7) — required for
-   `semantic_page_match` to validate; a Build node still pinned to `"1.1.0"` will have every
-   request using the new criterion type rejected at `POST /v1/tasks` with a `400`.
+6. **Send `schemaVersion: "1.3.0"` and `outputSchemaVersion: "1.3.0"`** (§7) — a Build node
+   still pinned to `"1.2.0"` will have every request rejected at `POST /v1/tasks` with a `400`.
 
 The minimal generic request this node should now produce (see
 `examples/minimal-preflight-discovery-task.json` for the full, schema-valid worked example,
@@ -565,7 +688,7 @@ and `docs/architecture.md`/`README.md` "Preflight domain discovery" for what hap
 
 ```json
 {
-  "schemaVersion": "1.2.0",
+  "schemaVersion": "1.3.0",
   "taskId": "www-citroen-fr-configurator_entry-20260825T120000Z",
   "objective": "Navigate to the official consumer vehicle configurator and stop when vehicle selection or configuration controls are available.",
   "startUrl": "https://www.citroen.fr/collection.html",
@@ -587,7 +710,7 @@ and `docs/architecture.md`/`README.md` "Preflight domain discovery" for what hap
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.2.0"
+  "outputSchemaVersion": "1.3.0"
 }
 ```
 
@@ -595,3 +718,173 @@ No `brand`, `market`, `language`, `allowedDomains`, destination hostname, CSS se
 success URL pattern appears anywhere in this request — every field is either one of the three
 form fields, a fixed operational default (`limits`/`safety`/`captureModules`, the same for
 every run regardless of target site), or derived generically (`taskId`, `successCriteria`).
+
+### Four worked examples, across journey types, using the terminal-route success model (§9c)
+
+Each of the four Form Trigger submissions below (form fields, then the exact `POST /v1/tasks`
+body the Build node should produce) uses the **same** two-criterion pattern from §9c — an
+optional milestone plus a required, route-verified terminal criterion — and the **same**
+`captureModules`/`limits`/`safety` shape, proving the Build node needs no per-journey branching.
+`captureModules` adds `cta_clicks`, `data_layer_evidence`, and `ga4_network_events` so the
+generic action-attributed analytics capture (§9d) is populated.
+
+**1. Configurator (`journeyType: "configurator_entry"`)** — form fields:
+`startUrl = https://www.example-automotive-oem.com/`,
+`journeyType = configurator_entry`,
+`objective = Find and enter the vehicle configurator, proceed through the configuration steps, click the final completion control (a Summary, Continue, or equivalent control -- whatever label the site itself uses), and stop once the resulting page confirms the configuration is finished.`
+
+```json
+{
+  "schemaVersion": "1.3.0",
+  "taskId": "www-example-automotive-oem-com-configurator_entry-20260902T120000Z",
+  "objective": "Find and enter the vehicle configurator, proceed through the configuration steps, click the final completion control (a Summary, Continue, or equivalent control -- whatever label the site itself uses), and stop once the resulting page confirms the configuration is finished.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "journeyType": "configurator_entry",
+  "successCriteria": [
+    {
+      "id": "configurator-entered",
+      "type": "semantic_page_match",
+      "description": "The vehicle configurator has been entered: configuration controls (e.g. trim, colour, options) are visible.",
+      "required": false
+    },
+    {
+      "id": "configuration-finished",
+      "type": "semantic_page_match",
+      "description": "The configuration process has been completed: the final completion control (for example a Summary or Continue button, or an equivalent control in the page's own language) was actually clicked, and the resulting page confirms the configuration is finished. Being on a right-looking page by itself is not enough; the completion control must have been the one clicked.",
+      "required": true
+    }
+  ],
+  "captureModules": ["page_visits", "cta_clicks", "journey_path", "data_layer_evidence", "ga4_network_events", "screenshots", "errors"],
+  "limits": { "maxSteps": 60, "maxBacktracks": 5, "maxDurationSeconds": 900, "maxRepeatedActions": 3 },
+  "safety": {
+    "allowedActions": ["click", "scroll", "wait", "go_back", "navigate", "capture", "stop_success", "stop_blocked", "stop_failure"],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.3.0"
+}
+```
+
+**2. Test drive booking (`journeyType: "test_drive"`)** — form fields:
+`startUrl = https://www.example-automotive-oem.com/`,
+`journeyType = test_drive`,
+`objective = Reach the test drive booking form and stop as soon as it is displayed. Do not enter any personal information -- only reaching the form matters.`
+
+This is the second, non-configurator journey proving the same mechanism generalises: no fill/
+type action exists anywhere in the engine's action vocabulary (`src/types/actions.ts`), so this
+run can never enter personal data regardless of what any reasoning provider proposes
+(`tests/integration/noPersonalDataEntry.test.ts`).
+
+```json
+{
+  "schemaVersion": "1.3.0",
+  "taskId": "www-example-automotive-oem-com-test_drive-20260902T120000Z",
+  "objective": "Reach the test drive booking form and stop as soon as it is displayed. Do not enter any personal information -- only reaching the form matters.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "journeyType": "test_drive",
+  "successCriteria": [
+    {
+      "id": "test-drive-section-entered",
+      "type": "semantic_page_match",
+      "description": "A test drive / book a test drive section has been reached.",
+      "required": false
+    },
+    {
+      "id": "booking-form-displayed",
+      "type": "semantic_page_match",
+      "description": "A form to book a test drive (fields for contact details) is visible on the page.",
+      "required": true
+    }
+  ],
+  "captureModules": ["page_visits", "cta_clicks", "journey_path", "data_layer_evidence", "ga4_network_events", "screenshots", "errors"],
+  "limits": { "maxSteps": 60, "maxBacktracks": 5, "maxDurationSeconds": 900, "maxRepeatedActions": 3 },
+  "safety": {
+    "allowedActions": ["click", "scroll", "wait", "go_back", "navigate", "capture", "stop_success", "stop_blocked", "stop_failure"],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.3.0"
+}
+```
+
+**3. Dealer locator (`journeyType: "dealer_locator"`)** — form fields:
+`startUrl = https://www.example-automotive-oem.com/`,
+`journeyType = dealer_locator`,
+`objective = Find the dealer locator and stop once a list or map of nearby dealers is displayed.`
+
+```json
+{
+  "schemaVersion": "1.3.0",
+  "taskId": "www-example-automotive-oem-com-dealer_locator-20260902T120000Z",
+  "objective": "Find the dealer locator and stop once a list or map of nearby dealers is displayed.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "journeyType": "dealer_locator",
+  "successCriteria": [
+    {
+      "id": "dealer-locator-entered",
+      "type": "semantic_page_match",
+      "description": "A dealer locator / find a dealer page has been reached.",
+      "required": false
+    },
+    {
+      "id": "dealer-results-shown",
+      "type": "semantic_page_match",
+      "description": "A list or map of nearby dealers is displayed on the page.",
+      "required": true
+    }
+  ],
+  "captureModules": ["page_visits", "cta_clicks", "journey_path", "data_layer_evidence", "ga4_network_events", "screenshots", "errors"],
+  "limits": { "maxSteps": 60, "maxBacktracks": 5, "maxDurationSeconds": 900, "maxRepeatedActions": 3 },
+  "safety": {
+    "allowedActions": ["click", "scroll", "wait", "go_back", "navigate", "capture", "stop_success", "stop_blocked", "stop_failure"],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.3.0"
+}
+```
+
+**4. Brochure / offers (`journeyType: "offers"`)** — form fields:
+`startUrl = https://www.example-automotive-oem.com/`,
+`journeyType = offers`,
+`objective = Find the current offers and incentives page and stop once vehicle offers or a downloadable brochure link are shown.`
+
+```json
+{
+  "schemaVersion": "1.3.0",
+  "taskId": "www-example-automotive-oem-com-offers-20260902T120000Z",
+  "objective": "Find the current offers and incentives page and stop once vehicle offers or a downloadable brochure link are shown.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "journeyType": "offers",
+  "successCriteria": [
+    {
+      "id": "offers-section-entered",
+      "type": "semantic_page_match",
+      "description": "An offers / incentives section has been reached.",
+      "required": false
+    },
+    {
+      "id": "offers-or-brochure-shown",
+      "type": "semantic_page_match",
+      "description": "Vehicle offers are listed, or a downloadable brochure link is shown, on the page.",
+      "required": true
+    }
+  ],
+  "captureModules": ["page_visits", "cta_clicks", "journey_path", "data_layer_evidence", "ga4_network_events", "screenshots", "errors"],
+  "limits": { "maxSteps": 60, "maxBacktracks": 5, "maxDurationSeconds": 900, "maxRepeatedActions": 3 },
+  "safety": {
+    "allowedActions": ["click", "scroll", "wait", "go_back", "navigate", "capture", "stop_success", "stop_blocked", "stop_failure"],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.3.0"
+}
+```

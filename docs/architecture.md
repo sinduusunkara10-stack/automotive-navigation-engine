@@ -90,15 +90,44 @@ produces an `Observation`:
 
 - page `url` and `title`
 - a condensed list of `interactiveElements` (role, accessible name, a stable `id` the engine
-  can resolve back to a Playwright locator, visibility) — sourced from the accessibility tree
-  and visible DOM, not a full serialization
+  can resolve back to a Playwright locator, visibility, and optionally `disabled` and
+  `ariaState`) — sourced from the accessibility tree and visible DOM, not a full serialization
 - a short list of `notableText` snippets (headings, banners, prices) when relevant
+- an optional `progressIndicatorText` list, when the page marks up a progress/step indicator
 
 This keeps prompts small, keeps decisions auditable, and avoids leaking arbitrary page markup
 into the reasoning layer or the logs. The observation builder (`src/observation`) is generic;
 capture modules may pull additional page-specific detail (e.g. offer card text) directly via
 Playwright when a `capture` action runs, but that detail does not need to pass through the
 reasoning prompt.
+
+### Observation evidence: interactive-element selector, ARIA state, headings
+
+The interactive-element selector is intentionally broader than plain anchors and buttons —
+`a, button, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"],
+[role="radio"], [role="checkbox"], input[type="submit"], input[type="button"]` — so a
+configurator's custom tab strip, option chips, or radio/checkbox-style controls are visible
+candidates, not just conventional links and buttons. `notableText` now scans `h1`-`h4` (was
+`h1`-`h2`), since a configuration step's own heading is frequently nested under a page-level
+`h1`/`h2`. Each interactive element optionally carries `disabled` (from the `disabled`
+attribute or `aria-disabled="true"`) and `ariaState` — the element's `aria-selected`/
+`aria-checked`/`aria-pressed`/`aria-current` attribute values, read verbatim and never
+normalised into an engine-defined closed set of states, so no future ARIA value a site might
+use ever requires an engine change. `progressIndicatorText` is read the same way, from any
+element the page marks up via `role="progressbar"`, `aria-valuenow`, or `aria-current="step"`.
+`src/core/semanticPageMatch.ts`'s `gatherSemanticPageSignals` uses the same selectors (plus
+optional `ariaState`/`progressText` evidence, forwarded only to an optional `semanticVerifier`,
+never scored by the deterministic lexical evaluator) so success evaluation never sees narrower
+evidence than the reasoning layer's own observation.
+
+This still never traverses into an `<iframe>` or a shadow DOM — `document.querySelectorAll`
+only reaches the light DOM of the top-level document, exactly as before. That stays deliberately
+out of scope: nothing in this repo's fixtures, examples, or reported production behaviour has
+shown a target site's configurator/lead-form controls living inside an iframe or a shadow root,
+so adding that traversal now would be speculative complexity with no concrete evidence backing
+it. If a future task surfaces a site where the reasoning layer legitimately cannot see or
+interact with a control because it is inside an iframe/shadow root, that is the point to revisit
+this — with the concrete site/DOM evidence in hand, not before.
 
 Element `id`s are assigned once via a `data-nav-engine-id` DOM attribute the first time an
 element is scanned, and reused on every later scan of the same node -- so an id stays stable
@@ -241,7 +270,17 @@ never re-verified. `runTask({ ..., semanticVerifier })` takes this as an optiona
 omitted by default — every existing caller/task gets byte-for-byte the same deterministic-only
 `semantic_page_match` evaluation as before this component existed. `src/api/runner.ts` wires one
 in automatically (reusing the `claude` reasoning provider's own config) exactly when
-`REASONING_PROVIDER=claude`. Its usage is aggregated the same way as
+`REASONING_PROVIDER=claude`. `verify()`'s input optionally carries `ariaState`/`progressText`
+(from the same widened `gatherSemanticPageSignals` observation evidence — see §5) and an
+optional `lastActionEvidence` (the accessible name/text/element type of the most recently
+clicked control, sourced from the same read `src/capture-modules/ctaClicks.ts` already does for
+the `cta_clicks` capture — never a second DOM read). This is what lets a criterion's own
+description generically require that a *specific* control was activated (e.g. "the final
+completion control — Summary, Continue, or an equivalent — was clicked"), verified by the model
+against the actual click by meaning, never by a literal word/brand-label check anywhere in the
+engine: a right-looking page reached some other way does not satisfy such a criterion. All three
+fields are optional and participate in the verifier's own cache key, so omitting them (every
+pre-existing caller) is byte-for-byte unchanged. Its usage is aggregated the same way as
 `ReasoningProviderDiagnostics` above, at `TaskResponse.diagnostics.semanticVerifier`
 (`$defs/semanticVerifierDiagnostics` in `schemas/task-response.schema.json`). Full design
 rationale, false-positive protections, and cost analysis: `docs/n8n-integration.md` §"Generic
@@ -337,6 +376,47 @@ by what the evidence actually requires:
   guardrail (including `maxSteps`/`maxBacktracks`/loop detection) stops the run — none of which
   are tied to the `capture` action either.
 
+### Generic action-attributed analytics capture
+
+Every journey (configurator, test drive, dealer locator, ...) needs the same kind of evidence
+about the clicks the engine actually made: what was clicked, what changed as a result, and
+whether that click actually advanced the journey. Rather than a per-journey capture function,
+this is one generic mechanism, layered onto the existing `cta_clicks` capture (which already
+records every dispatched `click` unconditionally, gated only on `captureModules` — see above):
+when a task also requests `data_layer_evidence` and/or `ga4_network_events`, each `cta_clicks`
+entry additionally carries an `actionAnalytics` object built entirely from evidence the engine
+already reads or already collects elsewhere — no new browser reads beyond a `dataLayer`
+before/after snapshot pair and a `page.title()` read, and no additional model call:
+
+- `dataLayerDelta` — a generic, mechanical before/after **delta** of `window.dataLayer`
+  around this one click (`src/capture-modules/dataLayerDelta.ts`), never a full re-snapshot.
+  `available` distinguishes "no `dataLayer` array exists at all" from "it exists but nothing
+  new was pushed" (empty `newEntries`); `replaced` flags the array having been reset or
+  reassigned (including the ordinary case of a full page navigation, which always starts a
+  fresh JS context) rather than appended to, in which case `newEntries` is the entire post-click
+  array rather than a suffix.
+- `ga4RequestsObservedDuringActionWindow` — GA4-style requests observed in a short, fixed
+  window (`GA4_ACTION_WINDOW_MS`, 300ms) immediately after the click, sliced from the same
+  persistent `ga4_network_events` listener that already runs for the run's whole lifetime (no
+  second listener). Named `...ObservedDuringActionWindow`, deliberately never
+  `...CausedByClick` or similar: a request observed inside this window is temporally
+  correlated with the click, never asserted to have been caused by it.
+- `advancedJourney` — `true` iff the click's resulting URL or title differs from before it, or
+  a success criterion newly became satisfied as a direct result of it. A purely mechanical
+  fact, not a model judgement.
+- `newlySatisfiedCriteriaIds` — ids of success criteria that were unsatisfied before this click
+  and satisfied immediately after it, computed as the delta of the engine's own
+  `satisfiedCriteriaIds` around this one click.
+- `verifierDecisions` — any `SemanticCriterionVerifier` decisions made while evaluating success
+  criteria immediately after this click (sliced from that verifier's own decision log), so a
+  verifier verdict is directly attributable to the click that produced it.
+
+Every field composes with which capture modules the task actually requested: `dataLayerDelta`
+is present only when `data_layer_evidence` was also requested; `ga4RequestsObservedDuringActionWindow`
+only when `ga4_network_events` was; `advancedJourney` is always present whenever `cta_clicks` is
+requested and a click was dispatched, since it costs nothing extra to compute. No new
+capture-module name or task-request field was needed for any of this.
+
 ## 9. HTTP API boundary (n8n integration)
 
 n8n submits a `task-request` JSON (see `schemas/task-request.schema.json`) over HTTP and
@@ -410,10 +490,14 @@ as not-yet-built rather than removed from the plan — see §11.
     pageVisits.ts           # implemented
     pageMetadata.ts         # implemented
     dataLayer.ts             # implemented (data_layer_evidence)
+    dataLayerDelta.ts        # implemented -- generic before/after dataLayer delta used by
+                              # the action-attributed analytics capture below, distinct from
+                              # dataLayer.ts's own per-step full-snapshot capture
     ga4NetworkEvents.ts      # implemented
     screenshots.ts           # implemented
     finishPageCtas.ts        # implemented
-    ctaClicks.ts             # implemented
+    ctaClicks.ts             # implemented -- also builds the optional actionAnalytics
+                              # object (generic action-attributed analytics capture, §8)
     journeyPath.ts           # implemented
     errors.ts                # implemented (errors)
     registry.ts             # tracks which of the schema's captureModule names are implemented

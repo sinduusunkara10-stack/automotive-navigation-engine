@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "1.2.0",
+  "schemaVersion": "1.3.0",
   "taskId": "example-configurator-journey-0001",
-  "objective": "Starting from the homepage, find and enter the vehicle configurator, proceed through the configuration steps to a finish or summary state, and capture the journey taken along with GA4 and dataLayer evidence.",
+  "objective": "Starting from the homepage, find and enter the vehicle configurator, proceed through the configuration steps, click the final completion control (a Summary, Continue, or equivalent control -- whatever label the site itself uses), and stop once the resulting page confirms the configuration is finished. Capture the journey taken along with GA4 and dataLayer evidence.",
   "startUrl": "https://www.example-automotive-oem.com/",
   "allowedDomains": [
     "www.example-automotive-oem.com",
@@ -9,21 +9,15 @@
   ],
   "successCriteria": [
     {
-      "id": "reached-configurator",
-      "type": "url_pattern",
-      "description": "Navigation has entered the configurator sub-application.",
-      "config": {
-        "pattern": "https://configurator.example-automotive-oem.com/**"
-      },
+      "id": "configurator-entered",
+      "type": "semantic_page_match",
+      "description": "The vehicle configurator has been entered: configuration controls (e.g. trim, colour, options) are visible on the page.",
       "required": false
     },
     {
-      "id": "reached-finish-state",
-      "type": "element_present",
-      "description": "The configurator has reached a finish/summary screen showing the completed build.",
-      "config": {
-        "selector": "[data-testid=\"configurator-summary\"]"
-      },
+      "id": "configuration-finished",
+      "type": "semantic_page_match",
+      "description": "The configuration process has been completed: the final completion control (for example a Summary or Continue button, or an equivalent control in the page's own language) was actually clicked, and the resulting page confirms the configuration is finished -- e.g. a summary of the completed build, or an explicit completion/confirmation state. Being on a right-looking page by itself is not enough; the completion control must have been the one clicked.",
       "required": true
     }
   ],
@@ -59,7 +53,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.2.0",
+  "outputSchemaVersion": "1.3.0",
   "metadata": {
     "useCase": "configurator-journey",
     "requestedBy": "n8n-workflow-demo"

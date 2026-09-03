@@ -2,7 +2,24 @@ import type { Page } from "playwright";
 import type { Observation } from "../types/task-response.js";
 
 const ELEMENT_ID_ATTR = "data-nav-engine-id";
-const INTERACTIVE_SELECTOR = 'a, button, [role="button"], [role="link"]';
+// Widened generically (not per-journey) to cover common non-anchor/non-button interactive
+// controls a configurator, form, or wizard-style journey routinely uses -- tabs, options,
+// radio/checkbox-style selectors, and submit-style inputs -- none of which is specific to
+// any one site or brand. Still no iframe/shadow-DOM traversal: querySelectorAll only
+// reaches the light DOM of this document, deliberately -- see docs/architecture.md
+// "Observation evidence" for why that stays out of scope until a concrete site is shown to
+// need it.
+const INTERACTIVE_SELECTOR =
+  'a, button, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], ' +
+  '[role="radio"], [role="checkbox"], input[type="submit"], input[type="button"]';
+// h1-h4 (was h1-h2): a configuration step's own heading is frequently an h3/h4 nested
+// under a page-level h1/h2, and a generic "what state is this page in" signal should not
+// be blind to it.
+const HEADING_SELECTOR = "h1, h2, h3, h4";
+// Generic, brand-agnostic progress-indicator evidence: any element a page marks up as a
+// progress/step indicator via role or common ARIA attributes, read as plain visible text
+// (e.g. "Step 2 of 4"). Never a hardcoded class name, selector, or brand-specific marker.
+const PROGRESS_SELECTOR = '[role="progressbar"], [aria-valuenow], [aria-current="step"]';
 
 export async function buildObservation(page: Page): Promise<Observation> {
   const interactiveElements = await page.evaluate(
@@ -31,23 +48,57 @@ export async function buildObservation(page: Page): Promise<Observation> {
           const visible =
             rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
           const destinationUrl = el instanceof HTMLAnchorElement ? el.href : undefined;
-          return { id, role, accessibleName, visible, ...(destinationUrl ? { destinationUrl } : {}) };
+          const disabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true";
+          // Only the ARIA *selection/toggle-state* attributes a generic reasoning or
+          // verification layer can use to tell "this option is currently chosen" from
+          // "this option is merely offered" -- never a value tied to any one site's
+          // vocabulary. Read as-is (string) rather than normalised to a closed set of
+          // engine-defined states, so no future ARIA state value requires an engine change.
+          const ariaState: Record<string, string> = {};
+          for (const attrName of ["aria-selected", "aria-checked", "aria-pressed", "aria-current"]) {
+            const value = el.getAttribute(attrName);
+            if (value !== null) {
+              ariaState[attrName] = value;
+            }
+          }
+          return {
+            id,
+            role,
+            accessibleName,
+            visible,
+            ...(destinationUrl ? { destinationUrl } : {}),
+            ...(disabled ? { disabled } : {}),
+            ...(Object.keys(ariaState).length > 0 ? { ariaState } : {}),
+          };
         })
         .filter((el) => el.visible);
     },
     { attr: ELEMENT_ID_ATTR, selector: INTERACTIVE_SELECTOR },
   );
 
-  const notableText = await page.evaluate(() => {
-    const headings = Array.from(document.querySelectorAll("h1, h2"));
+  const notableText = await page.evaluate((selector) => {
+    const headings = Array.from(document.querySelectorAll(selector));
     return headings.map((heading) => heading.textContent?.trim()).filter((text): text is string => Boolean(text));
-  });
+  }, HEADING_SELECTOR);
+
+  const progressIndicatorText = await page.evaluate((selector) => {
+    const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
+    return elements
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        return visible ? el.textContent?.trim() : undefined;
+      })
+      .filter((text): text is string => Boolean(text));
+  }, PROGRESS_SELECTOR);
 
   return {
     url: page.url(),
     title: await page.title(),
     interactiveElements,
     ...(notableText.length > 0 ? { notableText } : {}),
+    ...(progressIndicatorText.length > 0 ? { progressIndicatorText } : {}),
   };
 }
 

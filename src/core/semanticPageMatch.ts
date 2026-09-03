@@ -1,12 +1,14 @@
 import type { Page } from "playwright";
 import { objectiveTokenCoverage } from "../discovery/relevance.js";
 
-// Deliberately the same generic heading/interactive-element selectors already used by
-// src/observation/observationBuilder.ts, widened to h1-h3 (observation's notableText is
-// capped at h1/h2 for prompt-size reasons; success evaluation has no such budget). Nothing
-// here is automotive/GA4/brand-specific -- see CLAUDE.md's non-negotiable design rule.
-const HEADING_SELECTOR = "h1, h2, h3";
-const INTERACTIVE_SELECTOR = 'a, button, [role="button"], [role="link"]';
+// Deliberately the same generic heading/interactive-element selectors as
+// src/observation/observationBuilder.ts (kept in sync so success evaluation never sees
+// narrower evidence than the reasoning layer's own observation). Nothing here is
+// automotive/GA4/brand-specific -- see CLAUDE.md's non-negotiable design rule.
+const HEADING_SELECTOR = "h1, h2, h3, h4";
+const INTERACTIVE_SELECTOR =
+  'a, button, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], ' +
+  '[role="radio"], [role="checkbox"], input[type="submit"], input[type="button"]';
 
 export type SemanticSignalName = "title" | "headings" | "interactiveElements";
 
@@ -20,6 +22,18 @@ export interface SemanticPageSignals {
   title: string;
   headings: string[];
   interactiveText: string[];
+  /**
+   * Optional, generic ARIA selection/toggle-state evidence for visible interactive
+   * elements, e.g. "Step 2 (aria-current=step)" or "Blue (aria-selected=true)" -- read
+   * verbatim from whatever attribute values the page itself uses, never normalised into an
+   * engine-defined closed set of states. Extra context only: never fed into the
+   * deterministic token-overlap score (scoreSemanticPageMatch below), only forwarded to an
+   * optional semanticVerifier as additional evidence -- see
+   * src/reasoning/semanticCriterionVerifier.ts.
+   */
+  ariaState?: string[];
+  /** Optional, generic progress-indicator text (e.g. "Step 2 of 4"); same non-scoring role as ariaState. */
+  progressText?: string[];
 }
 
 /**
@@ -30,7 +44,13 @@ export interface SemanticPageSignals {
  */
 export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPageSignals> {
   const title = await page.title();
-  const { headings, interactiveText } = await page.evaluate(
+  // Every visibility check below is inlined (never a shared named helper function) --
+  // esbuild/tsx's dev transform can wrap a const-bound arrow function in a `__name()`
+  // helper call for stack-trace naming, and that helper only exists in the Node module
+  // scope, not in the page.evaluate callback's serialized source once it runs in the
+  // browser -- a real `ReferenceError: __name is not defined` this pattern avoids. See
+  // src/observation/observationBuilder.ts for the same established, all-inline style.
+  const { headings, interactiveText, ariaState, progressText } = await page.evaluate(
     ({ headingSelector, interactiveSelector }) => {
       const headings = Array.from(document.querySelectorAll<HTMLElement>(headingSelector))
         .filter((el) => {
@@ -41,20 +61,51 @@ export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPag
         .map((el) => el.textContent?.trim() ?? "")
         .filter(Boolean);
 
-      const interactiveText = Array.from(document.querySelectorAll<HTMLElement>(interactiveSelector))
+      const interactiveEls = Array.from(document.querySelectorAll<HTMLElement>(interactiveSelector)).filter((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      });
+      const interactiveText = interactiveEls
+        .map((el) => el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "")
+        .filter(Boolean);
+
+      const ariaState: string[] = [];
+      for (const el of interactiveEls) {
+        const name = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "";
+        if (!name) {
+          continue;
+        }
+        for (const attrName of ["aria-selected", "aria-checked", "aria-pressed", "aria-current"]) {
+          const value = el.getAttribute(attrName);
+          if (value !== null) {
+            ariaState.push(`${name} (${attrName}=${value})`);
+          }
+        }
+      }
+
+      const progressText = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="progressbar"], [aria-valuenow], [aria-current="step"]'),
+      )
         .filter((el) => {
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
           return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
         })
-        .map((el) => el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "")
+        .map((el) => el.textContent?.trim() ?? "")
         .filter(Boolean);
 
-      return { headings, interactiveText };
+      return { headings, interactiveText, ariaState, progressText };
     },
     { headingSelector: HEADING_SELECTOR, interactiveSelector: INTERACTIVE_SELECTOR },
   );
-  return { title, headings, interactiveText };
+  return {
+    title,
+    headings,
+    interactiveText,
+    ...(ariaState.length > 0 ? { ariaState } : {}),
+    ...(progressText.length > 0 ? { progressText } : {}),
+  };
 }
 
 export interface SemanticPageMatchScore {

@@ -693,3 +693,91 @@ test("a criterion satisfied earlier is skipped on a later call, while a still-un
     assert.equal(urlCalls, 0, "the already-satisfied url_pattern criterion must never be re-checked");
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// lastActionEvidence (optional 6th param, threaded to semanticVerifier.verify() only):
+// lets a criterion generically require that a *specific* control was clicked -- e.g. a
+// terminal completion control (Summary/Continue/equivalent) -- verified by meaning against
+// the actual click, never by literal word/brand-label matching. Off by default and never
+// affects the deterministic lexical path or any non-semantic criterion type.
+// ---------------------------------------------------------------------------------------
+
+test("lastActionEvidence is forwarded to semanticVerifier.verify() when supplied", async () => {
+  const objective = "Finish the configuration.";
+  const criterion: SuccessCriterion = {
+    id: "configuration-finished",
+    type: "semantic_page_match",
+    description: "The final completion control was clicked and the resulting page confirms completion.",
+  };
+  const html = page_("<h1>Merci</h1><h2>Configuration terminee</h2>", "Recapitulatif");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.9, evidence: "Recapitulatif / Configuration terminee." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      objective,
+      verifier,
+      undefined,
+      { ctaText: "Continuer", accessibleName: "Continuer vers le recapitulatif", elementType: "button" },
+    );
+    assert.ok(satisfied.includes("configuration-finished"));
+  });
+
+  assert.equal(verifier.calls.length, 1);
+  assert.deepEqual(verifier.calls[0]?.lastActionEvidence, {
+    ctaText: "Continuer",
+    accessibleName: "Continuer vers le recapitulatif",
+    elementType: "button",
+  });
+});
+
+test("lastActionEvidence is absent from the verifier call when not supplied (backward compatible)", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>Configurateur de vehicule</h1><h2>Options de configuration visibles</h2>", "Configurez");
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.9, evidence: "Match." }));
+
+  await withPage(html, async (page) => {
+    await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+  });
+
+  assert.equal(verifier.calls.length, 1);
+  assert.equal(verifier.calls[0]?.lastActionEvidence, undefined);
+});
+
+test("a rejecting semanticVerifier that finds lastActionEvidence names the wrong control keeps the terminal criterion unsatisfied, even though the page looks right", async () => {
+  // Models the exact defect a route-agnostic (page-only) verification would miss: the
+  // right-looking page was reached, but not via the completion control -- e.g. a user
+  // navigated to the summary URL directly, or clicked an unrelated link that happens to
+  // land there. A verifier that inspects lastActionEvidence can reject this generically,
+  // by meaning, with no brand/label-specific check anywhere in the engine itself.
+  const objective = "Finish the configuration.";
+  const criterion: SuccessCriterion = {
+    id: "configuration-finished",
+    type: "semantic_page_match",
+    description: "The final completion control was clicked and the resulting page confirms completion.",
+  };
+  const html = page_("<h1>Configuration terminee</h1>", "Recapitulatif");
+  const verifier = fakeVerifier((input) => {
+    const clickedCompletionControl = /continue|summary|terminer|recapitulatif/i.test(
+      input.lastActionEvidence?.accessibleName ?? input.lastActionEvidence?.ctaText ?? "",
+    );
+    return clickedCompletionControl
+      ? { satisfied: true, confidence: 0.9, evidence: "Completion control clicked and page confirms it." }
+      : { satisfied: false, confidence: 0.9, evidence: "Page looks right, but the completion control was not what was clicked." };
+  });
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier, undefined, {
+      ctaText: "Voir les offres",
+      accessibleName: "Voir les offres promotionnelles",
+      elementType: "a",
+    });
+    assert.ok(!satisfied.includes("configuration-finished"));
+  });
+});
