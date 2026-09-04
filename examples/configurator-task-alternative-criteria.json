@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.6.0",
+  "taskId": "example-configurator-alternative-criteria-0001",
+  "objective": "Enter the vehicle configurator, proceed through the configuration steps using default choices, and continue online: click the final completion control (e.g. a 'Continue Online' control, or an equivalent control in the page's own language). Confirm completion however the site itself signals it -- reaching the basket/checkout-entry page, or the completion control being clicked, or the site's own configuration-finished analytics event firing are all equally valid confirmation. Return the final URL reached.",
+  "startUrl": "https://www.example-automotive-oem.com/",
+  "allowedDomains": [
+    "www.example-automotive-oem.com",
+    "configurator.example-automotive-oem.com",
+    "store.example-automotive-oem.com"
+  ],
+  "successCriteria": [
+    {
+      "id": "configurator-entered",
+      "type": "semantic_page_match",
+      "description": "The vehicle configurator has been entered: configuration controls (e.g. trim, colour, options) are visible on the page.",
+      "required": false
+    },
+    {
+      "id": "completion-control-clicked",
+      "type": "semantic_page_match",
+      "description": "The completion control (for example a 'Continue Online' button, or an equivalent control in the page's own language) was actually clicked -- not merely a right-looking page reached some other way.",
+      "required": true,
+      "group": "configuration-completed"
+    },
+    {
+      "id": "basket-page-reached",
+      "type": "url_pattern",
+      "description": "The basket/checkout-entry page was reached.",
+      "config": { "pattern": "**/basket*" },
+      "required": true,
+      "group": "configuration-completed"
+    },
+    {
+      "id": "configuration-finished-event",
+      "type": "data_layer_event",
+      "description": "The site's own configuration-finished analytics event fired.",
+      "config": { "match": { "event": "config_finished" } },
+      "required": true,
+      "group": "configuration-completed"
+    }
+  ],
+  "captureModules": [
+    "page_visits",
+    "cta_clicks",
+    "journey_path",
+    "data_layer_evidence",
+    "ga4_network_events",
+    "screenshots",
+    "errors"
+  ],
+  "limits": {
+    "maxSteps": 60,
+    "maxBacktracks": 5,
+    "maxDurationSeconds": 900,
+    "maxRepeatedActions": 3
+  },
+  "safety": {
+    "allowedActions": [
+      "click",
+      "scroll",
+      "wait",
+      "go_back",
+      "navigate",
+      "capture",
+      "stop_success",
+      "stop_blocked",
+      "stop_failure"
+    ],
+    "allowFormSubmission": false,
+    "allowPaymentOrPurchase": false,
+    "allowPersonalDataEntry": false,
+    "requireDomainConfirmationOnRedirect": true
+  },
+  "outputSchemaVersion": "1.5.0",
+  "metadata": {
+    "useCase": "configurator-journey-alternative-criteria",
+    "requestedBy": "n8n-workflow-demo"
+  }
+}
