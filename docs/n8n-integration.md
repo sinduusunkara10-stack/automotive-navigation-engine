@@ -852,8 +852,10 @@ site those fallbacks were written against. Concretely, the Build node should:
 5. **Leave `brand`/`market`/`language` out of the request entirely**, or pass them through
    `metadata` only when the workflow already has them from its own trigger context — never
    look them up or guess them before the run (§10).
-6. **Send `schemaVersion: "1.3.0"` and `outputSchemaVersion: "1.3.0"`** (§7) — a Build node
-   still pinned to `"1.2.0"` will have every request rejected at `POST /v1/tasks` with a `400`.
+6. **Send `schemaVersion: "1.6.0"` and `outputSchemaVersion: "1.5.0"`** (§7) — both are exact-
+   match `const`s the engine validates on every `POST /v1/tasks`; a Build node still pinned to
+   an older `schemaVersion` will have **every** request rejected with a `400` before a run
+   even starts, regardless of whether it uses any feature added since that version.
 
 The minimal generic request this node should now produce (see
 `examples/minimal-preflight-discovery-task.json` for the full, schema-valid worked example,
@@ -862,7 +864,7 @@ and `docs/architecture.md`/`README.md` "Preflight domain discovery" for what hap
 
 ```json
 {
-  "schemaVersion": "1.3.0",
+  "schemaVersion": "1.6.0",
   "taskId": "www-citroen-fr-configurator_entry-20260825T120000Z",
   "objective": "Navigate to the official consumer vehicle configurator and stop when vehicle selection or configuration controls are available.",
   "startUrl": "https://www.citroen.fr/collection.html",
@@ -884,7 +886,7 @@ and `docs/architecture.md`/`README.md` "Preflight domain discovery" for what hap
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.3.0"
+  "outputSchemaVersion": "1.5.0"
 }
 ```
 
@@ -892,6 +894,27 @@ No `brand`, `market`, `language`, `allowedDomains`, destination hostname, CSS se
 success URL pattern appears anywhere in this request — every field is either one of the three
 form fields, a fixed operational default (`limits`/`safety`/`captureModules`, the same for
 every run regardless of target site), or derived generically (`taskId`, `successCriteria`).
+
+### When to use the alternative-criteria (`group`) pattern instead of §9c's terminal-route model
+
+The single- or two-criterion `semantic_page_match` recipes above (and §9c's terminal-route
+model) remain the right default when the *only* evidence available is what the destination
+page itself displays. When the operator additionally knows a **specific, reliable completion
+signal** the site already emits for this journey — a URL shape it always lands on, a
+`window.dataLayer` event, or a GA4-style network event — §9e's `group` field lets the Build
+node encode "any one of these signals confirms completion" instead of relying solely on
+lexical/semantic page-vocabulary overlap, which is comparatively fragile (no shared vocabulary
+if the page's wording differs from the objective, no signal at all if the confirming page
+looks textually similar to an intermediate one). `examples/configurator-task-alternative-criteria.json`
+is a complete, schema-valid worked example of this pattern for a configurator "continue online"
+journey — a `configuration-completed` group with three alternative members
+(`semantic_page_match` on the completion control being clicked, `url_pattern` on the basket
+page, `data_layer_event` on the site's own completion analytics event), plus an ungrouped,
+optional `configurator-entered` milestone for progress reporting (§9c). Prefer this pattern
+whenever the operator (or an earlier, successful run's own `captures.data_layer_evidence`/
+`captures.ga4_network_events`) can name a concrete event or URL shape the target site actually
+uses — it is strictly more robust than semantic matching alone, since it doesn't depend on the
+destination page's wording resembling the objective's.
 
 ### Four worked examples, across journey types, using the terminal-route success model (§9c)
 
@@ -909,7 +932,7 @@ generic action-attributed analytics capture (§9d) is populated.
 
 ```json
 {
-  "schemaVersion": "1.3.0",
+  "schemaVersion": "1.6.0",
   "taskId": "www-example-automotive-oem-com-configurator_entry-20260902T120000Z",
   "objective": "Find and enter the vehicle configurator, proceed through the configuration steps, click the final completion control (a Summary, Continue, or equivalent control -- whatever label the site itself uses), and stop once the resulting page confirms the configuration is finished.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -937,7 +960,7 @@ generic action-attributed analytics capture (§9d) is populated.
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.3.0"
+  "outputSchemaVersion": "1.5.0"
 }
 ```
 
@@ -953,7 +976,7 @@ run can never enter personal data regardless of what any reasoning provider prop
 
 ```json
 {
-  "schemaVersion": "1.3.0",
+  "schemaVersion": "1.6.0",
   "taskId": "www-example-automotive-oem-com-test_drive-20260902T120000Z",
   "objective": "Reach the test drive booking form and stop as soon as it is displayed. Do not enter any personal information -- only reaching the form matters.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -981,7 +1004,7 @@ run can never enter personal data regardless of what any reasoning provider prop
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.3.0"
+  "outputSchemaVersion": "1.5.0"
 }
 ```
 
@@ -992,7 +1015,7 @@ run can never enter personal data regardless of what any reasoning provider prop
 
 ```json
 {
-  "schemaVersion": "1.3.0",
+  "schemaVersion": "1.6.0",
   "taskId": "www-example-automotive-oem-com-dealer_locator-20260902T120000Z",
   "objective": "Find the dealer locator and stop once a list or map of nearby dealers is displayed.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -1020,7 +1043,7 @@ run can never enter personal data regardless of what any reasoning provider prop
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.3.0"
+  "outputSchemaVersion": "1.5.0"
 }
 ```
 
@@ -1031,7 +1054,7 @@ run can never enter personal data regardless of what any reasoning provider prop
 
 ```json
 {
-  "schemaVersion": "1.3.0",
+  "schemaVersion": "1.6.0",
   "taskId": "www-example-automotive-oem-com-offers-20260902T120000Z",
   "objective": "Find the current offers and incentives page and stop once vehicle offers or a downloadable brochure link are shown.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -1059,6 +1082,6 @@ run can never enter personal data regardless of what any reasoning provider prop
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.3.0"
+  "outputSchemaVersion": "1.5.0"
 }
 ```
