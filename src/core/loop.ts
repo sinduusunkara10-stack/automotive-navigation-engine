@@ -15,7 +15,7 @@ import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
-import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "./successEvaluator.js";
+import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds, type SuccessCriteriaEvidence } from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
 
@@ -82,7 +82,15 @@ export async function runStep(params: {
   }
 
   (
-    await evaluateSuccessCriteria(page, task.successCriteria, task.objective, semanticVerifier, state.satisfiedCriteriaIds)
+    await evaluateSuccessCriteria(
+      page,
+      task.successCriteria,
+      task.objective,
+      semanticVerifier,
+      state.satisfiedCriteriaIds,
+      undefined,
+      buildCriteriaEvidence(captures),
+    )
   ).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
   const limitsBreach = checkLimitsBreach(
@@ -321,6 +329,7 @@ export async function runStep(params: {
     semanticVerifier,
     state.satisfiedCriteriaIds,
     wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
+    buildCriteriaEvidence(captures),
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
 
@@ -498,6 +507,25 @@ function buildStopSuccessFingerprint(url: string, missingRequiredCriteriaIds: st
     missing: [...missingRequiredCriteriaIds].sort(),
     satisfied: [...satisfiedCriteriaIds].sort(),
   });
+}
+
+/**
+ * Builds the evidence a data_layer_event/network_event success criterion is checked
+ * against (see core/successEvaluator.ts) from whatever this run's own captures have
+ * already accumulated -- never a second, independent read. Absent when the corresponding
+ * capture module wasn't requested (undefined field, not an empty array, so the evaluator
+ * can tell "no evidence source" apart from "source present but empty" purely for clarity;
+ * both behave the same way, no match).
+ */
+function buildCriteriaEvidence(captures: Captures): SuccessCriteriaEvidence {
+  return {
+    ...(captures.data_layer_evidence
+      ? { dataLayerEntries: captures.data_layer_evidence.flatMap((entry) => entry.raw) }
+      : {}),
+    ...(captures.ga4_network_events
+      ? { networkEvents: captures.ga4_network_events as unknown as readonly Record<string, unknown>[] }
+      : {}),
+  };
 }
 
 function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModuleName[], stepLog: StepLog): void {

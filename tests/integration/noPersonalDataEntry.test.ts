@@ -50,7 +50,7 @@ class ClickSubmitProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "no-personal-data-entry-test-drive",
     objective:
       "Reach the test drive booking form. Do not enter any personal information -- only reaching the form matters.",

@@ -194,7 +194,7 @@ class StubbornClickProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; successUrlPattern: string }): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "action-execution-consistency",
     objective: "Reach the fixture's target page via the configured control.",
     startUrl: params.startUrl,

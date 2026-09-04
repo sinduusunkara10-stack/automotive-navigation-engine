@@ -26,7 +26,7 @@ test("an unrelated/untrusted domain is blocked before any success criterion -- i
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.5.0",
+      schemaVersion: "1.6.0",
       taskId: "semantic-criterion-domain-blocked",
       objective: "Reach the welcome page.",
       startUrl: `${baseUrl}/start.html`,
@@ -71,7 +71,7 @@ test("semantic_page_match drives a full run to stop_success on the trusted start
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.5.0",
+      schemaVersion: "1.6.0",
       taskId: "semantic-criterion-success",
       objective:
         "Reach the final page and stop once the journey is complete and the success state is confirmed.",

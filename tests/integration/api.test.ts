@@ -44,7 +44,7 @@ async function startApiServer() {
 
 function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules: string[] = ["page_visits"]) {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId,
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${fixturesBaseUrl}/start.html`,

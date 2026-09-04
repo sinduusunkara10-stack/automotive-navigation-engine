@@ -156,7 +156,7 @@ class AlwaysSameTargetProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "blocker-recovery",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],

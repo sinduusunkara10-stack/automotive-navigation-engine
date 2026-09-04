@@ -279,7 +279,10 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "\"summary\"-purposed control or a \"continue\"-purposed control the objective actually " +
     "asks for, in whatever language or label the page itself uses) -- never a control whose " +
     "purpose looks like a purchase, payment, order, booking, lead submission, or any other " +
-    "personal-data/contractual action, regardless of what the objective asks for.";
+    "personal-data/contractual action, regardless of what the objective asks for. When two " +
+    "or more entries in \"successCriteria\" share the same \"group\" value, they are " +
+    "alternatives -- satisfying any one of them is enough to satisfy that whole group, so " +
+    "you do not need every member of a group to hold at once.";
 
   const { selected: interactiveElements, diagnostic: elementSelection } = selectPromptInteractiveElements(
     observation.interactiveElements,
@@ -293,6 +296,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
       id: c.id,
       description: c.description,
       required: c.required !== false,
+      ...(c.group ? { group: c.group } : {}),
     })),
     satisfiedCriteriaIds,
     allowedActions,

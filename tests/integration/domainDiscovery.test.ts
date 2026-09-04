@@ -29,7 +29,7 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
 
 function baseTask(startUrl: string, overrides: Partial<TaskRequest> = {}): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "domain-discovery-poc",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl,

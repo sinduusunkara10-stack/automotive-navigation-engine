@@ -16,6 +16,14 @@ export interface SuccessCriterion {
   description: string;
   config?: Record<string, unknown>;
   required?: boolean;
+  /**
+   * Optional. Criteria sharing the same group value are alternatives -- the group is
+   * satisfied once any one member is satisfied, and is required exactly when at least one
+   * member is (see getMissingRequiredCriteriaIds, src/core/successEvaluator.ts). A
+   * criterion with no group is its own implicit singleton group, so omitting this field
+   * everywhere reproduces the previous AND-of-all-required-criteria behaviour exactly.
+   */
+  group?: string;
 }
 
 export interface Limits {
@@ -62,7 +70,7 @@ export interface Safety {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.5.0";
+  schemaVersion: "1.6.0";
   taskId: string;
   objective: string;
   startUrl: string;
