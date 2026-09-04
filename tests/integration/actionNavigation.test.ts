@@ -150,7 +150,7 @@ function buildTask(params: {
   allowedActions: TaskRequest["safety"]["allowedActions"];
 }): TaskRequest {
   return {
-    schemaVersion: "1.6.0",
+    schemaVersion: "1.7.0",
     taskId: "action-navigation-reliability",
     objective: "Reach the fixture's target page via the configured action.",
     startUrl: params.startUrl,
@@ -166,7 +166,7 @@ function buildTask(params: {
     captureModules: ["errors"],
     limits: { maxSteps: 4, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: params.allowedActions },
-    outputSchemaVersion: "1.5.0",
+    outputSchemaVersion: "1.6.0",
   };
 }
 

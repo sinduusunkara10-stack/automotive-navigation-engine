@@ -129,12 +129,27 @@ evidence than the reasoning layer's own observation.
 
 One level of generic, same-origin child-frame scanning is now in scope (see "Frame-aware
 observation" below) — a real production run showed a blocker's live control living inside an
-`<iframe>`. Shadow DOM traversal remains out of scope: nothing in this repo's fixtures, examples,
-or reported production behaviour has shown a target site's configurator/lead-form controls living
-inside a shadow root, so adding that traversal now would be speculative complexity with no
-concrete evidence backing it. Nested iframes (a frame within a frame) are likewise still out of
-scope for the same reason. If a future task surfaces concrete evidence either is needed, that is
-the point to revisit this.
+`<iframe>`. Shadow DOM *traversal* remains out of scope: `document.querySelectorAll` cannot see
+into any shadow root, open or closed, and nothing in this repo's fixtures, examples, or
+confirmed production behaviour has yet *proven* a target site's configurator/lead-form controls
+live inside one, so adding that traversal now would still be speculative complexity without
+confirmed evidence backing it. Nested iframes (a frame within a frame) are likewise still out of
+scope for the same reason.
+
+What **is** now in scope, precisely to let a future investigation supply that missing evidence
+rather than guess at it: `Observation.elementDiscoveryDiagnostics` (response `schemaVersion`
+`"1.6.0"`, `src/observation/observationBuilder.ts`) — bounded, generic counts about the
+interactive-element scan itself (raw candidate count before filtering, button-like/link-like/
+other-role counts, per-reason excluded counts, and `shadowHostCount`, the number of elements in
+the document with a non-null *open* shadow root). A production run reporting zero interactive
+elements while a manual inspection of the same URL immediately afterwards showed a visible,
+clickable control is the exact symptom a shadow-DOM-encapsulated control would produce
+(`rawElementCount: 0` alongside `shadowHostCount > 0`) — `tests/unit/
+elementDiscoveryDiagnostics.test.ts` proves this mechanism in a controlled fixture. `shadowHostCount`
+only ever detects an *open* shadow root; a closed one is fundamentally undetectable from outside
+the component that created it, so `shadowHostCount: 0` does not itself rule out closed-shadow-DOM
+containment. If a future run's own `elementDiscoveryDiagnostics` confirms `shadowHostCount > 0`
+against `rawElementCount: 0`, that is the concrete evidence to revisit full shadow-DOM traversal.
 
 Element `id`s are assigned once via a `data-nav-engine-id` DOM attribute the first time an
 element is scanned, and reused on every later scan of the same node -- so an id stays stable

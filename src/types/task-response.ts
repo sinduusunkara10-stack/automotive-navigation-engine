@@ -56,6 +56,48 @@ export interface Observation {
    * frame content, never a reason it couldn't be read beyond the fact that it couldn't.
    */
   inaccessibleFrameOrigins?: string[];
+  /**
+   * Bounded, generic diagnostic evidence about the interactive-element scan itself, always
+   * computed fresh alongside interactiveElements (see src/observation/observationBuilder.ts)
+   * -- lets a caller distinguish "the page genuinely has no interactive controls yet" from
+   * "controls exist but were excluded" (hidden/zero-size) or "controls exist inside a
+   * structure this scan cannot see" (a non-zero shadowHostCount alongside an empty
+   * interactiveElements is the generic, brand-agnostic signature of that specific gap --
+   * see docs/architecture.md "Observation evidence"). Summed across the main document and
+   * every accessible child frame, matching how interactiveElements itself is a flat
+   * cross-frame list.
+   */
+  elementDiscoveryDiagnostics?: ElementDiscoveryDiagnostics;
+}
+
+/**
+ * See Observation.elementDiscoveryDiagnostics above. `rawElementCount` is every node
+ * matched by the same interactive-element selector interactiveElements is built from,
+ * before any visibility filtering -- so rawElementCount > 0 with an empty
+ * interactiveElements array means candidates existed but were all excluded (the
+ * excluded*Count fields say why); rawElementCount === 0 means the selector matched nothing
+ * at all at scan time (a genuinely empty page, or one that hadn't rendered its controls
+ * yet). `buttonLikeCount`/`linkLikeCount`/`otherRoleCount` always sum to rawElementCount,
+ * bucketed by each element's own role/tag (button-like: role or tag "button"; link-like:
+ * role or tag "a"/"link"; everything else the selector matches -- tabs, options, radio/
+ * checkbox-style controls, etc. -- as otherRoleCount). The three excluded*Count fields are
+ * not mutually exclusive (a single excluded element can be zero-size *and* display:none),
+ * so they need not sum to (rawElementCount - visibleElementCount). `shadowHostCount` counts
+ * elements in the document with a non-null, *open* shadow root -- a closed shadow root's
+ * presence is fundamentally undetectable from outside the component that created it (the
+ * DOM API gives no way to ask), so a page using closed shadow DOM can still report
+ * shadowHostCount: 0 despite hosting controls this scan cannot discover.
+ */
+export interface ElementDiscoveryDiagnostics {
+  rawElementCount: number;
+  buttonLikeCount: number;
+  linkLikeCount: number;
+  otherRoleCount: number;
+  visibleElementCount: number;
+  excludedZeroSizeCount: number;
+  excludedDisplayNoneCount: number;
+  excludedVisibilityHiddenCount: number;
+  shadowHostCount: number;
 }
 
 export interface ActionResult {
@@ -492,7 +534,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.5.0";
+  schemaVersion: "1.6.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
