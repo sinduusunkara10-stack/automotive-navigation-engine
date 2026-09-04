@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.6.0",
+  "schemaVersion": "1.7.0",
   "taskId": "example-configurator-journey-0001",
   "objective": "Starting from the homepage, find and enter the vehicle configurator, proceed through the configuration steps, click the final completion control (a Summary, Continue, or equivalent control -- whatever label the site itself uses), and stop once the resulting page confirms the configuration is finished. Capture the journey taken along with GA4 and dataLayer evidence.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -53,7 +53,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.5.0",
+  "outputSchemaVersion": "1.6.0",
   "metadata": {
     "useCase": "configurator-journey",
     "requestedBy": "n8n-workflow-demo"
