@@ -2,12 +2,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from "node:crypto";
 import { validateTaskRequest, validateTaskResponse } from "./validation.js";
 import { executeTaskAsync } from "./runner.js";
-import * as taskStore from "./taskStore.js";
+import { createTaskStore } from "./taskStoreFactory.js";
+import type { TaskStore } from "./taskStore.js";
 import { isAuthorized, readApiAuthConfig, type ApiAuthConfig } from "./auth.js";
 import { API_VERSION } from "./version.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
 import { readDeployedCommitSha } from "../config/deploymentInfo.js";
+import { readTaskStoreTimingConfig } from "../config/taskStoreConfig.js";
+import { readMaxConcurrentTasks } from "../config/concurrencyConfig.js";
+import { createConcurrencyLimiter, type ConcurrencyLimiter } from "./concurrencyLimiter.js";
 
 const MAX_BODY_BYTES = 256 * 1024;
 
@@ -81,11 +85,21 @@ function handleUnauthorized(res: ServerResponse): void {
   });
 }
 
+function handleConcurrencyLimitReached(res: ServerResponse): void {
+  sendJson(res, 503, {
+    error: "concurrency_limit_reached",
+    message: "The maximum number of concurrently running tasks has been reached. Try again shortly.",
+  });
+}
+
 async function handleCreateTask(
   req: IncomingMessage,
   res: ServerResponse,
+  store: TaskStore,
+  limiter: ConcurrencyLimiter,
   initialNavigationTimeoutMs: number,
   actionNavigationTimeoutMs: number,
+  heartbeatIntervalMs: number,
 ): Promise<void> {
   if (!hasJsonContentType(req)) {
     sendJson(res, 415, {
@@ -111,17 +125,29 @@ async function handleCreateTask(
     return;
   }
 
+  // Checked synchronously against readJsonBody/validateTaskRequest already having
+  // resolved above, with no await between the capacity check and the increment -- see
+  // concurrencyLimiter.ts. Each accepted run launches its own full Chromium instance
+  // (src/api/runner.ts), so this is the point that must reject once the configured
+  // ceiling is reached, rather than accepting the request and failing later.
+  if (!limiter.tryAcquire()) {
+    handleConcurrencyLimitReached(res);
+    return;
+  }
+
   const task = validation.value;
   const runId = `run_${randomUUID()}`;
-  taskStore.createRun(runId, task.taskId);
+  await store.createRun(runId, task.taskId);
 
-  void executeTaskAsync(runId, task, initialNavigationTimeoutMs, actionNavigationTimeoutMs);
+  void executeTaskAsync(runId, task, store, initialNavigationTimeoutMs, actionNavigationTimeoutMs, heartbeatIntervalMs).finally(
+    () => limiter.release(),
+  );
 
   sendJson(res, 202, { taskId: task.taskId, runId, status: "accepted" });
 }
 
-function handleGetTask(res: ServerResponse, runId: string): void {
-  const record = taskStore.getRun(runId);
+async function handleGetTask(res: ServerResponse, store: TaskStore, runId: string): Promise<void> {
+  const record = await store.getRun(runId);
   if (!record) {
     sendJson(res, 404, { error: "not_found", message: `No run found for runId "${runId}".` });
     return;
@@ -129,6 +155,20 @@ function handleGetTask(res: ServerResponse, runId: string): void {
 
   if (record.status === "running") {
     sendJson(res, 200, { runId: record.runId, taskId: record.taskId, status: "running" });
+    return;
+  }
+
+  if (record.status === "stale") {
+    // A clear terminal-ish status rather than a 404 or an indefinitely "running" answer:
+    // the run's owning process is gone (or the run itself hung) -- see staleDetection.ts.
+    // Not a schema-governed field (this wrapper status is outside result), so recognizing
+    // it is a caller (e.g. n8n) concern, not a wire-contract version bump.
+    sendJson(res, 200, {
+      runId: record.runId,
+      taskId: record.taskId,
+      status: "stale",
+      staleReason: record.staleReason ?? "run_stale",
+    });
     return;
   }
 
@@ -163,8 +203,11 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   authConfig: ApiAuthConfig,
+  store: TaskStore,
+  limiter: ConcurrencyLimiter,
   initialNavigationTimeoutMs: number,
   actionNavigationTimeoutMs: number,
+  heartbeatIntervalMs: number,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", "http://internal.invalid");
 
@@ -178,7 +221,7 @@ async function handleRequest(
       handleUnauthorized(res);
       return;
     }
-    await handleCreateTask(req, res, initialNavigationTimeoutMs, actionNavigationTimeoutMs);
+    await handleCreateTask(req, res, store, limiter, initialNavigationTimeoutMs, actionNavigationTimeoutMs, heartbeatIntervalMs);
     return;
   }
 
@@ -188,25 +231,40 @@ async function handleRequest(
       handleUnauthorized(res);
       return;
     }
-    handleGetTask(res, decodeURIComponent(runMatch[1] ?? ""));
+    await handleGetTask(res, store, decodeURIComponent(runMatch[1] ?? ""));
     return;
   }
 
   sendJson(res, 404, { error: "not_found", message: "Unknown route." });
 }
 
-export function createApiServer(env: NodeJS.ProcessEnv = process.env): Server {
+export async function createApiServer(env: NodeJS.ProcessEnv = process.env): Promise<Server> {
   // Read (and, outside test mode, enforce) the bearer token once at server creation —
   // a missing token fails startup clearly rather than the process quietly serving an
   // API that can never authenticate anyone.
   const authConfig = readApiAuthConfig(env);
   // Same fail-fast-at-startup posture for INITIAL_NAVIGATION_TIMEOUT_MS /
-  // ACTION_NAVIGATION_TIMEOUT_MS: an invalid value aborts server creation clearly rather
-  // than surfacing as an opaque per-run failure.
+  // ACTION_NAVIGATION_TIMEOUT_MS / task-store timing / concurrency: an invalid value
+  // aborts server creation clearly rather than surfacing as an opaque per-run failure.
   const initialNavigationTimeoutMs = readInitialNavigationTimeoutMs(env);
   const actionNavigationTimeoutMs = readActionNavigationTimeoutMs(env);
+  const timing = readTaskStoreTimingConfig(env);
+  const maxConcurrentTasks = readMaxConcurrentTasks(env);
+  // Fails fast if TASK_STORE=redis but Redis is unreachable -- see taskStoreFactory.ts.
+  const store = await createTaskStore(env);
+  const limiter = createConcurrencyLimiter(maxConcurrentTasks);
+
   return createServer((req, res) => {
-    void handleRequest(req, res, authConfig, initialNavigationTimeoutMs, actionNavigationTimeoutMs).catch(() => {
+    void handleRequest(
+      req,
+      res,
+      authConfig,
+      store,
+      limiter,
+      initialNavigationTimeoutMs,
+      actionNavigationTimeoutMs,
+      timing.heartbeatIntervalMs,
+    ).catch(() => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: "An unexpected error occurred." });
       } else {

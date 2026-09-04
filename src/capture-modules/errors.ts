@@ -1,6 +1,8 @@
 import type { ConsoleMessage, Page, Request, Response } from "playwright";
 import type { ActionType } from "../types/actions.js";
 import type { Captures, ErrorCapture, ErrorCategory, ErrorSeverity } from "../types/task-response.js";
+import { appendBounded } from "../core/boundedArray.js";
+import { MAX_ERROR_ENTRIES } from "../config/captureLimits.js";
 
 // Bumped from 500: the stale-target-recovery diagnostic (core/loop.ts) wraps the click
 // executor's own already-detailed diagnostics string (actions/click.ts's
@@ -51,7 +53,11 @@ export function recordDiagnosticError(
     recoverable: params.recoverable,
     stoppedRun: params.stoppedRun,
   };
-  captures.errors = [...(captures.errors ?? []), entry];
+  // Bounded to the most recent MAX_ERROR_ENTRIES -- attachErrorCapture's listeners run for
+  // the whole lifetime of the run, so an unbounded array here grows without limit on a
+  // page that keeps emitting console/network errors, or a long/high-maxSteps run. See
+  // src/core/boundedArray.ts.
+  captures.errors = appendBounded(captures.errors ?? [], entry, MAX_ERROR_ENTRIES);
 }
 
 /**

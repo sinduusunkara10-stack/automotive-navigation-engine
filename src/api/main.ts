@@ -6,7 +6,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 let server: Server;
 try {
-  server = createApiServer();
+  server = await createApiServer();
 } catch (err) {
   if (err instanceof MissingApiTokenError) {
     console.error(`Failed to start navigation-engine API: ${err.message}`);

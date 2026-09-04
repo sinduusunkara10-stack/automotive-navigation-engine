@@ -584,10 +584,30 @@ as not-yet-built rather than removed from the plan — see §11.
     robustNavigation.ts    # shared domcontentloaded-first goto + timeout-recovery logic,
                             # used by initialNavigation.ts and by src/actions/navigate.ts
                             # and click.ts for in-loop action navigation
+    boundedArray.ts         # generic keep-most-recent-N append-with-cap helper (see §13)
+    memoryDiagnostics.ts    # bounded process.memoryUsage() sampling (see §13)
 
   /config                 # env-based configuration, read once and fail-fast at startup
     initialNavigationConfig.ts # INITIAL_NAVIGATION_TIMEOUT_MS
     actionNavigationConfig.ts  # ACTION_NAVIGATION_TIMEOUT_MS (navigate action / clicks that navigate)
+    taskStoreConfig.ts         # TASK_RECORD_TTL_SECONDS / RUN_STALE_THRESHOLD_MS / HEARTBEAT_INTERVAL_MS
+    concurrencyConfig.ts       # MAX_CONCURRENT_TASKS (see §13)
+    captureLimits.ts           # bounded-growth ceilings for capture collections (see §13)
+
+  /api                    # HTTP API boundary (n8n integration, see §9) and run lifecycle
+    server.ts               # createApiServer(): routing, auth, concurrency check
+    runner.ts                # executeTaskAsync(): browser/page lifecycle, heartbeat, cleanup
+    auth.ts                   # bearer-token auth
+    taskStore.ts               # TaskStore interface + RunRecord/RunStatus/StaleReason types
+    inMemoryTaskStore.ts        # default, non-persistent TaskStore implementation
+    redisTaskStore.ts            # opt-in, persistent TaskStore implementation (see §13)
+    taskStoreFactory.ts           # TASK_STORE/REDIS_URL-based backend selection, fail-fast
+    staleDetection.ts              # shared idle-past-threshold -> "stale" transition (see §13)
+    workerIdentity.ts               # one WORKER_ID per process instance (see §13)
+    concurrencyLimiter.ts            # MAX_CONCURRENT_TASKS in-process counter (see §13)
+    validation.ts                     # request/response JSON Schema validation
+    version.ts                         # API_VERSION
+    main.ts                             # process entry point
 
   /actions                # controlled action vocabulary, one deterministic executor each
     click.ts
@@ -817,3 +837,118 @@ auto-trusted, with the evidence and reason why), `rejectedCandidates` (what was 
 why), `proposedAllowedDomains` (what preflight itself added), and `allowedDomainsUsed` (the
 final enforced set) — see `examples/minimal-preflight-discovery-task.json` for a task that
 supplies only `startUrl`, `objective`, and `journeyType`.
+
+## 13. Memory stability and run persistence
+
+A production incident (a Render instance running the API at its 512MB memory ceiling was
+OOM-killed mid-run, wiping the in-memory task store; the next status poll for a still-valid
+`runId` returned 404 instead of any useful terminal state) drove two related, but
+independent, hardening changes. Neither introduces a Tier 3 worker/API process split —
+both stay within the existing single-process API server.
+
+### Confirmed memory-risk findings
+
+Investigation of the browser/task lifecycle (`src/api/runner.ts`, `src/core/engine.ts`,
+`src/api/taskStore.ts` as they were before this section's changes) found:
+
+- One Chromium browser and one page per run, cleaned up in `finally` blocks — no
+  browser/context/page leak. Playwright listener registrations (`ga4NetworkEvents.ts`,
+  `errors.ts`) are all detached via the same `finally` in `engine.ts`.
+- Screenshots are written to disk as PNG files; only the file path string is held in
+  memory (`captures.screenshots`), never a base64 string or Buffer.
+- The task store never evicted completed/failed records — every run's full
+  `TaskResponse` stayed in the process's memory for its entire lifetime, accumulating
+  across runs. This was the largest confirmed contributor.
+- No concurrency limit existed: every accepted run launched its own full Chromium
+  instance with no ceiling.
+- `captureDataLayer` (`src/capture-modules/dataLayer.ts`) read the *entire* current
+  `window.dataLayer` on every step (not a delta), so on a page whose dataLayer keeps
+  growing, memory used by this one capture grew worse than linearly within a single run.
+- `captures.ga4_network_events` and `captures.errors` accumulated for a run's entire
+  lifetime via persistent listeners, with no cap.
+- `chromium.launch()` was called with no memory-reducing flags.
+
+### Bounded capture collections
+
+`src/config/captureLimits.ts` defines generic, content-agnostic ceilings applied via
+`src/core/boundedArray.ts`'s `appendBounded` (keep-most-recent-N, drop oldest):
+`MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT` (200), `MAX_GA4_NETWORK_EVENTS` (500),
+`MAX_ERROR_ENTRIES` (200). None of these know anything about a specific site, brand, or
+capture semantics beyond "array, entry, cap".
+
+### Memory-safe Chromium launch flags
+
+`src/api/runner.ts` launches Chromium with flags that reduce its own memory footprint
+without touching rendering fidelity or multi-frame behaviour (`--disable-dev-shm-usage`,
+`--disable-gpu`, `--disable-extensions`, `--disable-background-networking`,
+`--disable-default-apps`, `--disable-sync`, `--metrics-recording-only`, `--mute-audio`,
+`--no-first-run`). Deliberately excludes `--single-process`, which would destabilize the
+multi-frame handling `observationBuilder.ts` and frame-aware observation depend on.
+
+### Memory diagnostics
+
+`src/core/memoryDiagnostics.ts` records a bounded (`MAX_MEMORY_SAMPLES = 50`,
+keep-most-recent) series of `process.memoryUsage()` samples at run start, after each
+step, and after browser/context cleanup, surfaced as `TaskResponse.diagnostics.memory`
+(response schema `1.7.0`). Purely diagnostic, generic Node runtime evidence — never
+anything about the page/task being run — so an out-of-memory incident can be correlated
+with a run's own memory trend after the fact.
+
+**Diagnostic logging is never treated as an OOM fix.** An OOM SIGKILL from the OS/container
+is uncatchable by any JS exception handler; this repo deliberately does not add a
+`process.on("uncaughtException")`/`process.on("unhandledRejection")` handler and frame it
+as solving memory exhaustion. `src/api/main.ts`'s existing `SIGINT`/`SIGTERM` graceful
+shutdown is unrelated (a clean shutdown signal, not a crash).
+
+### Run-record persistence (`TaskStore`)
+
+`src/api/taskStore.ts` defines a backend-agnostic `TaskStore` interface
+(`createRun`/`getRun`/`completeRun`/`failRun`/`heartbeat`, all `Promise`-returning) with
+two implementations:
+
+- `src/api/inMemoryTaskStore.ts` — the default (`TASK_STORE` unset or `memory`). Same
+  behaviour as before this change (nothing survives a process restart), used for local
+  development and the test suite.
+- `src/api/redisTaskStore.ts` — opt-in (`TASK_STORE=redis`, requires `REDIS_URL`). One
+  Redis key per run (`nav-engine:run:<runId>`), the whole `RunRecord` as its JSON value,
+  written via `SET key value EX <ttlSeconds>` with the TTL refreshed on every write. A run
+  record now survives an API process restart because it lives in Redis, not in the killed
+  process's own memory — directly addressing the incident above.
+
+`src/api/taskStoreFactory.ts` selects the backend from `TASK_STORE`/`REDIS_URL` and,
+matching this repo's existing fail-fast-at-startup convention (`src/api/auth.ts`,
+`src/config/initialNavigationConfig.ts`), aborts server creation clearly if `TASK_STORE=redis`
+is configured but Redis is unreachable, rather than serving requests that would each fail
+individually once they tried to persist.
+
+### Heartbeat and stale detection
+
+While a run is active, `executeTaskAsync` (`src/api/runner.ts`) refreshes its run record
+every `HEARTBEAT_INTERVAL_MS` (default 15000ms). Each record also carries a `workerId` —
+one random-token-plus-PID identity per process instance (`src/api/workerIdentity.ts`),
+guaranteed to differ after a restart even if the OS reuses the PID.
+
+`src/api/staleDetection.ts`'s `applyStaleDetection`, run lazily whenever a `"running"`
+record is read, checks whether it has gone idle past `RUN_STALE_THRESHOLD_MS` (default
+90000ms). If so, the record's status becomes `"stale"` with a `staleReason`:
+
+- `"worker_lost"` — the record's `workerId` differs from the reading process's own: the
+  run's owning process is gone (e.g. the OOM-restart scenario this section exists to fix).
+- `"run_stale"` — the same process still owns the record but stopped heartbeating anyway
+  (e.g. a hung run).
+
+`GET /v1/tasks/:runId` returns this as a clear terminal-ish status
+(`{status: "stale", staleReason}`) instead of an indefinite `"running"` answer or a
+confusing 404. This wrapper status is outside the schema-governed `result` field (see §9),
+so it required no `schemaVersion`/`outputSchemaVersion` bump; a caller (e.g. n8n) that
+wants to recognize `"stale"` explicitly is a separate, later integration change.
+
+### Concurrency limit
+
+`src/api/concurrencyLimiter.ts` is a simple in-process counter (`tryAcquire`/`release`),
+checked synchronously (no `await` between the capacity check and the increment) in
+`handleCreateTask` before a run is accepted. `MAX_CONCURRENT_TASKS` defaults
+conservatively to 1, since each accepted run launches its own full Chromium instance — a
+meaningful fraction of a small (e.g. 512MB) instance's memory budget. Once at capacity,
+`POST /v1/tasks` returns `503 {error: "concurrency_limit_reached"}` — rejection, not
+queueing (a queue is Tier-3-adjacent infrastructure, deliberately out of scope here).

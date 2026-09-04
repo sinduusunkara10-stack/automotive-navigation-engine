@@ -515,6 +515,21 @@ export interface DomainDiscoveryDiagnostics {
   blockedReason?: string;
 }
 
+/**
+ * One process.memoryUsage() sample, taken at a specific, generic lifecycle point -- never
+ * anything about the page/task being run. See Diagnostics.memory below and
+ * docs/architecture.md "Memory stability" for why this exists and how it's bounded.
+ */
+export interface MemorySample {
+  timestamp: string;
+  label: "run_start" | "step" | "after_cleanup";
+  stepIndex?: number;
+  rssBytes: number;
+  heapUsedBytes: number;
+  heapTotalBytes: number;
+  externalBytes: number;
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
@@ -531,10 +546,21 @@ export interface Diagnostics {
   reasoningProvider?: ReasoningProviderDiagnostics;
   domainDiscovery?: DomainDiscoveryDiagnostics;
   semanticVerifier?: SemanticVerifierDiagnostics;
+  /**
+   * Bounded (most-recent-N, see src/core/boundedArray.ts) process.memoryUsage() samples:
+   * one at run start, one after each step, and one appended by the API layer after browser
+   * cleanup (src/api/runner.ts) once it's available -- entirely generic Node.js runtime
+   * evidence, never anything about the page or brand being navigated. Exists to let an
+   * operator correlate a specific run with memory growth, and to distinguish "one run
+   * spiked" from "memory climbed gradually across the whole run" after an incident like a
+   * container OOM kill. Present whenever at least one sample was taken (effectively every
+   * run).
+   */
+  memory?: MemorySample[];
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.6.0";
+  schemaVersion: "1.7.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

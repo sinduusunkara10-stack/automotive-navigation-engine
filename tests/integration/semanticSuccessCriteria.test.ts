@@ -26,7 +26,7 @@ test("an unrelated/untrusted domain is blocked before any success criterion -- i
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.7.0",
+      schemaVersion: "1.8.0",
       taskId: "semantic-criterion-domain-blocked",
       objective: "Reach the welcome page.",
       startUrl: `${baseUrl}/start.html`,
@@ -42,7 +42,7 @@ test("an unrelated/untrusted domain is blocked before any success criterion -- i
       captureModules: ["page_visits"],
       limits: { maxSteps: 5, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.6.0",
+      outputSchemaVersion: "1.7.0",
     };
 
     const response = await runTask({ page, task });
@@ -71,7 +71,7 @@ test("semantic_page_match drives a full run to stop_success on the trusted start
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.7.0",
+      schemaVersion: "1.8.0",
       taskId: "semantic-criterion-success",
       objective:
         "Reach the final page and stop once the journey is complete and the success state is confirmed.",
@@ -92,7 +92,7 @@ test("semantic_page_match drives a full run to stop_success on the trusted start
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.6.0",
+      outputSchemaVersion: "1.7.0",
     };
 
     const response = await runTask({ page, task });

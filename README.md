@@ -414,6 +414,12 @@ npm run test:api    # runs the API integration tests in isolation
 | `REASONING_PROVIDER` | No | `mock` (default) or `claude`. |
 | `ANTHROPIC_API_KEY` | Only when `REASONING_PROVIDER=claude` | See "Reasoning provider selection" above. |
 | `CLAUDE_MODEL`, `CLAUDE_MAX_OUTPUT_TOKENS`, `CLAUDE_TIMEOUT_MS`, `CLAUDE_MAX_RETRIES`, `CLAUDE_MIN_CONFIDENCE` | No | Existing Claude tuning, unchanged — see `src/reasoning/config.ts`. |
+| `TASK_STORE` | No | `memory` (default) or `redis`. See `docs/architecture.md` §13 "Memory stability and run persistence". |
+| `REDIS_URL` | Only when `TASK_STORE=redis` | Redis connection URL. The server verifies reachability once at startup and fails clearly if unreachable. |
+| `TASK_RECORD_TTL_SECONDS` | No | How long (seconds) a run record is retained before it expires. Default `86400` (24h). |
+| `HEARTBEAT_INTERVAL_MS` | No | How often (ms) an active run refreshes its own run record. Default `15000`. |
+| `RUN_STALE_THRESHOLD_MS` | No | How long (ms) a `"running"` record can go without a heartbeat before it reads back as `"stale"`. Default `90000`. |
+| `MAX_CONCURRENT_TASKS` | No | Ceiling on simultaneously in-flight runs; `POST /v1/tasks` returns `503` once at capacity. Default `1` (conservative for a small instance). |
 
 Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is gitignored).
 **In any deployed environment, all of the above come from the hosting platform's own secret
@@ -508,14 +514,20 @@ below), alongside `result.diagnostics.stepCount`/`totalDurationMs`/etc.; it is n
 
 **Current limitations:**
 
-- Runs are stored in an in-memory `Map` only (`src/api/taskStore.ts`) — **all run state is lost
-  when the process restarts.** The container is meant to run as **one service instance**; a
-  persistent or shared task store is required before scaling to multiple instances (a second
-  instance would never see runs created on the first).
+- Run records are held behind a pluggable `TaskStore` interface (`src/api/taskStore.ts`;
+  see `docs/architecture.md` §13 "Memory stability and run persistence"). By default
+  (`TASK_STORE` unset, or `memory`) that's still an in-memory `Map` only — **all run state
+  is lost when the process restarts.** Set `TASK_STORE=redis` (with `REDIS_URL`) for a run
+  record to survive a process restart (e.g. an out-of-memory kill on a small instance).
+  The container is still meant to run as **one service instance** either way — Tier 3
+  worker/API separation for multiple instances is out of scope for this phase (a second
+  instance would never see runs created on the first even with a shared store, since
+  running multiple API instances isn't supported yet).
 - No queues, database, webhooks, dashboard, cloud-vendor-specific deployment files, or rate
   limiting — deliberately out of scope for this phase.
-- One task runs at a time per browser instance launched; there is no concurrency/queueing
-  layer.
+- Concurrent runs are bounded by `MAX_CONCURRENT_TASKS` (default 1, conservative for a
+  small instance since each run launches its own full Chromium instance) —
+  `POST /v1/tasks` returns `503` once at capacity; there is still no queueing layer.
 - Basic protections that are in place: bearer-token authentication (above), a JSON body size
   limit, `Content-Type: application/json` enforcement, no permissive CORS headers, generic
   (non-leaking) error responses, and graceful shutdown on `SIGINT`/`SIGTERM`.

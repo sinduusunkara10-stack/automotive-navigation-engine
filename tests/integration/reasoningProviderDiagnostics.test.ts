@@ -38,7 +38,7 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
 
 function buildTask(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.7.0",
+    schemaVersion: "1.8.0",
     taskId: "reasoning-diagnostics-claude",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${baseUrl}/start.html`,
@@ -54,7 +54,7 @@ function buildTask(baseUrl: string): TaskRequest {
     captureModules: ["page_visits"],
     limits: { maxSteps: 5, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.6.0",
+    outputSchemaVersion: "1.7.0",
   };
 }
 
@@ -100,7 +100,7 @@ test("a full run through a real ClaudeReasoningProvider (fake model client) surf
     const response = await runTask({ page, task, reasoning });
 
     assert.equal(response.status, "success");
-    assert.equal(response.schemaVersion, "1.6.0");
+    assert.equal(response.schemaVersion, "1.7.0");
 
     const diagnostics = response.diagnostics.reasoningProvider;
     assert.ok(diagnostics, "expected diagnostics.reasoningProvider to be present");

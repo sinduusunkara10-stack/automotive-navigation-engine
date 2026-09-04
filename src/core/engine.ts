@@ -4,6 +4,7 @@ import type {
   Captures,
   DomainDiscoveryDiagnostics,
   EngineAssessment,
+  MemorySample,
   StepLog,
   TaskResponse,
 } from "../types/task-response.js";
@@ -20,6 +21,7 @@ import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfi
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
 import { assessUrlSafety } from "../discovery/hostSafety.js";
 import { runDomainDiscovery, type DomainDiscoveryResult } from "../discovery/domainDiscovery.js";
+import { recordMemorySample } from "./memoryDiagnostics.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -62,6 +64,10 @@ export async function runTask(params: {
   const { page, task, semanticVerifier } = params;
   const state = new RunState();
   const captures: Captures = {};
+  // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
+  // more after browser/context cleanup -- see core/memoryDiagnostics.ts. Generic Node
+  // process.memoryUsage() evidence only, never anything about the page/task being run.
+  let memorySamples: MemorySample[] = recordMemorySample([], "run_start");
   // Resolved once per run (rather than left to loop.ts's per-step default) so the same
   // provider instance -- and therefore its decision log -- is used for every step, which
   // diagnostics.reasoningProvider aggregation below depends on.
@@ -102,6 +108,7 @@ export async function runTask(params: {
       finalUrl: task.startUrl,
       reasoning,
       semanticVerifier,
+      memorySamples,
     });
   }
 
@@ -132,6 +139,7 @@ export async function runTask(params: {
       finalUrl: task.startUrl,
       reasoning,
       semanticVerifier,
+      memorySamples,
     });
   }
 
@@ -183,6 +191,7 @@ export async function runTask(params: {
         finalUrl: navigation.url,
         reasoning,
         semanticVerifier,
+        memorySamples,
       });
     }
 
@@ -221,6 +230,7 @@ export async function runTask(params: {
         reasoning,
         semanticVerifier,
         domainDiscovery: discovery,
+        memorySamples,
       });
     }
 
@@ -242,6 +252,7 @@ export async function runTask(params: {
         semanticVerifier,
       });
       steps.push(outcome.stepLog);
+      memorySamples = recordMemorySample(memorySamples, "step", state.stepCount);
       if (outcome.terminal) {
         terminal = outcome.terminal;
         finishReason = outcome.finishReason ?? terminal;
@@ -261,6 +272,7 @@ export async function runTask(params: {
       reasoning,
       semanticVerifier,
       domainDiscovery: discovery,
+      memorySamples,
     });
   } finally {
     detachGa4Capture?.();
@@ -280,6 +292,7 @@ function buildTerminalResponse(params: {
   reasoning: ReasoningProvider;
   domainDiscovery?: DomainDiscoveryResult;
   semanticVerifier?: SemanticCriterionVerifier;
+  memorySamples: MemorySample[];
 }): TaskResponse {
   const {
     task,
@@ -293,6 +306,7 @@ function buildTerminalResponse(params: {
     reasoning,
     domainDiscovery,
     semanticVerifier,
+    memorySamples,
   } = params;
   const lastStep = steps[steps.length - 1];
   // Independently verified, never derived from status alone: objectiveAchieved must
@@ -320,7 +334,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.6.0",
+    schemaVersion: "1.7.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -339,6 +353,7 @@ function buildTerminalResponse(params: {
       ...(reasoningProviderDiagnostics ? { reasoningProvider: reasoningProviderDiagnostics } : {}),
       ...(domainDiscoveryDiagnostics ? { domainDiscovery: domainDiscoveryDiagnostics } : {}),
       ...(semanticVerifierDiagnostics ? { semanticVerifier: semanticVerifierDiagnostics } : {}),
+      ...(memorySamples.length > 0 ? { memory: memorySamples } : {}),
     },
   };
 }

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.7.0",
+  "schemaVersion": "1.8.0",
   "taskId": "example-competitor-offers-0001",
   "objective": "Navigate to the competitor's current offers/promotions page and capture each visible promotional offer, including the vehicle or model it applies to, the displayed price, and any visible validity information, with evidence screenshots.",
   "startUrl": "https://www.example-competitor-oem.com/offers",
@@ -46,7 +46,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.6.0",
+  "outputSchemaVersion": "1.7.0",
   "metadata": {
     "useCase": "competitor-offers-monitoring",
     "requestedBy": "n8n-workflow-demo"

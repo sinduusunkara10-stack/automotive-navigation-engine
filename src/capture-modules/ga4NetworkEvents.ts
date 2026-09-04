@@ -1,5 +1,7 @@
 import type { Page, Request } from "playwright";
 import type { Captures, Ga4NetworkEventCapture } from "../types/task-response.js";
+import { appendBounded } from "../core/boundedArray.js";
+import { MAX_GA4_NETWORK_EVENTS } from "../config/captureLimits.js";
 
 const GA4_COLLECT_PATH = "/g/collect";
 
@@ -40,7 +42,11 @@ export function attachGa4NetworkCapture(page: Page, captures: Captures, getStepI
       timestamp: new Date().toISOString(),
       ...(Object.keys(params).length > 0 ? { params } : {}),
     };
-    captures.ga4_network_events = [...(captures.ga4_network_events ?? []), entry];
+    // Bounded to the most recent MAX_GA4_NETWORK_EVENTS entries -- this listener runs for
+    // the whole lifetime of the run (see this function's own comment above), so an
+    // unbounded array here grows without limit on a chatty page or a long/high-maxSteps
+    // run. See src/core/boundedArray.ts.
+    captures.ga4_network_events = appendBounded(captures.ga4_network_events ?? [], entry, MAX_GA4_NETWORK_EVENTS);
   };
 
   page.on("request", handler);
