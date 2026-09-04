@@ -226,6 +226,19 @@ the new recovery behaviour's policy latitude explicitly configured should add
 `safety.consentInteractionPolicy` to its request body; a workflow that wants the new cross-host
 cookie/storage diagnostic should add `"host_context_snapshot"` to `captureModules`.
 
+**Example (already applied, again): `"1.5.0"` → `"1.6.0"`.** `successCriterion` gained the
+additive `group` field (§9e) — criteria sharing a group value are alternatives, satisfied as a
+whole once any one member is satisfied. The same change also made `successCriterion.type`'s
+already-existing `"data_layer_event"`/`"network_event"` enum values actually evaluated by the
+engine (§9, §9d1) instead of always failing — a behavioural fix to already-valid values, not a
+new field, but called out here since it changes what a request using those types actually
+does; no caller who wasn't already sending one of those two types (which could previously
+never be satisfied) sees any behaviour change. No response-contract field changed, so
+`outputSchemaVersion` and the response `schemaVersion` are unaffected and stay `"1.5.0"`. An
+n8n workflow must update its request `schemaVersion` to `"1.6.0"` to keep validating; a
+workflow that doesn't use `group`, `data_layer_event`, or `network_event` needs no other
+change.
+
 ## 8. Task store and instance limitations
 
 Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
@@ -248,18 +261,27 @@ handle any other transient infrastructure failure.
 ## 9. Generic success criteria
 
 `successCriteria[].type` (`schemas/task-request.schema.json` `$defs/successCriterion`,
-`src/core/successEvaluator.ts`) currently supports six values. Only three are actually
-evaluated by the engine today — `data_layer_event`, `network_event`, and `custom` are reserved
-enum values with no evaluator case yet (they always evaluate as not-satisfied; a future
-change would need to add a matching `case` in `successEvaluator.ts`, which is additive and
-does not require a schema bump):
+`src/core/successEvaluator.ts`) currently supports six values. Five are actually evaluated by
+the engine today — `element_text_match` and `custom` remain reserved enum values with no
+evaluator case yet (they always evaluate as not-satisfied; a future change would need to add
+a matching `case` in `successEvaluator.ts`, which is additive and does not require a schema
+bump):
 
 | `type` | Evaluated by | Requires knowing the destination in advance? | Tests |
 |---|---|---|---|
-| `url_pattern` | `page.url()` matched against `config.pattern` (a `**`-wildcard glob, not a full regex) | **Yes** — a URL or URL shape on the destination site | `tests/integration/local-poc.test.ts`, `tests/integration/domainDiscovery.test.ts` |
+| `url_pattern` | `page.url()` matched against `config.pattern` (a `**`-wildcard glob, not a full regex — see the caution below) | **Yes** — a URL or URL shape on the destination site | `tests/integration/local-poc.test.ts`, `tests/integration/domainDiscovery.test.ts` |
 | `element_present` | `page.locator(config.selector).count() > 0` | **Yes** — a CSS selector (often a `data-testid`/brand-specific attribute) that only exists on that site's markup | `tests/integration/local-poc.test.ts`, `tests/unit/successEvaluator.test.ts` |
 | `semantic_page_match` | Generic objective-vocabulary overlap against the live page's title/headings/visible interactive-element text (see below) | **No** — needs only the task's own `objective` (plus this criterion's `description`) | `tests/unit/successEvaluator.test.ts`, `tests/integration/semanticSuccessCriteria.test.ts` |
-| `element_text_match`, `data_layer_event`, `network_event`, `custom` | Not evaluated by the core engine (`evaluateSingle`'s `default` case returns `false`) — reserved for a capture module or a future, deliberately-added evaluator case | n/a | n/a |
+| `data_layer_event` | A live `window.dataLayer` read, unioned with this run's accumulated `data_layer_evidence` capture (if requested), matched against `config.match` (see §9d1) | **Yes** — the event shape/field names the destination site's own analytics actually pushes | `tests/unit/successEvaluator.test.ts`, `tests/integration/alternativeSuccessCriteriaGroups.test.ts` |
+| `network_event` | This run's accumulated `ga4_network_events` capture (if requested — there is no live-page equivalent), matched against `config.match` (see §9d1) | **Yes** — the request param names the destination site's own analytics actually sends | `tests/unit/successEvaluator.test.ts`, `tests/integration/alternativeSuccessCriteriaGroups.test.ts` |
+| `element_text_match`, `custom` | Not evaluated by the core engine (`evaluateSingle`'s `default` case returns `false`) — reserved for a capture module or a future, deliberately-added evaluator case | n/a | n/a |
+
+**Caution on `url_pattern` and trailing wildcards.** `matchesUrlPattern` requires a *full*
+string match once `**` is expanded to `.*` — a pattern like `**/basket` (no trailing `*`)
+matches only a URL that ends exactly at `/basket`, and will **not** match
+`https://.../basket?channel=b2c` or `https://.../basket/`. A caller who wants to match "this
+path, regardless of what follows" should write the pattern with an explicit trailing
+wildcard (`**/basket*`), not rely on the bare path.
 
 **Why `url_pattern` and `element_present` alone cannot support a generic task.** Both require
 the caller to already know something specific about the destination site — the exact shape of
@@ -630,6 +652,118 @@ criterion) already *is* the run's final, decisive interaction, with the full
 `captures.cta_clicks[captures.cta_clicks.length - 1]` for this rather than a new top-level field,
 keeping the response shape additive (no field removed or renamed) and avoiding a second place the
 same information could disagree with `captures.cta_clicks[]`.
+
+## 9d1. `data_layer_event` / `network_event`: `config.match`
+
+Both types are evaluated the same generic way: `config.match` is a plain object of string
+key/value pairs, and the criterion is satisfied once **any one** candidate evidence record has
+**every** one of those keys present with an equal (string-compared) value — an AND across the
+keys of `match`, an OR across candidate records. There is no fixed event-name or field-name
+vocabulary anywhere in the engine; `match`'s keys and values are entirely caller-supplied, so
+this works identically for any analytics vendor's event shape.
+
+```json
+{
+  "id": "config-finished-event",
+  "type": "data_layer_event",
+  "description": "The config_finished analytics event fired.",
+  "config": { "match": { "event": "config_finished" } }
+}
+```
+
+```json
+{
+  "id": "config-finished-network-event",
+  "type": "network_event",
+  "description": "A GA4-style config_finished request was observed.",
+  "config": { "match": { "en": "config_finished" } }
+}
+```
+
+- **`data_layer_event`** checks a live read of the current page's `window.dataLayer`
+  (catching an event pushed just before this evaluation, e.g. immediately after the click
+  that triggered it) *unioned with* this run's own accumulated `data_layer_evidence` capture,
+  when that capture module was requested (catching an event from an earlier step whose page
+  has since navigated away and reset `window.dataLayer` — a full-document navigation always
+  starts a fresh array). Requesting `data_layer_evidence` in `captureModules` widens what this
+  criterion type can see; it is not required for the live-page half to work.
+- **`network_event`** has no live-page equivalent to fall back on — a network request is only
+  ever observed via the listener `ga4_network_events` attaches for the run's whole lifetime
+  (see §9d). A task that wants a `network_event` criterion evaluated **must** request
+  `ga4_network_events` in `captureModules`; without it, this criterion type can never be
+  satisfied, the same way `element_present` can never be satisfied without a selector that
+  actually exists on the page. Matched against a flattened merge of the event's own top-level
+  fields (e.g. `requestUrl`) and its request params (e.g. a GA4 collect request's `en`
+  event-name param), so either can be targeted.
+- `config.match` missing, not an object, empty, or containing a non-string value is treated
+  the same as an absent selector for `element_present`: the criterion is never satisfied
+  (fails closed, never throws).
+
+## 9e. Alternative (OR) success criteria groups
+
+**The defect this fixes.** Every `successCriteria` entry with `required !== false` (the
+schema default) is AND-ed together by `getMissingRequiredCriteriaIds` — `stop_success` is
+only honoured once *all* of them are satisfied. There was no way to express "the objective is
+reached when *any one* of several independent signals is observed" — for example, a
+destination page's completion control was clicked, **or** the destination page itself was
+reached, **or** a specific analytics event confirming completion fired. Modelling all three as
+independent `required: true` criteria makes them all mandatory simultaneously (AND, not OR);
+the only alternative under the old schema — marking all three `required: false` — removes
+enforcement entirely (a task with no required criteria accepts `stop_success`
+unconditionally, per §9's `required` section), which is not what "any one of these three"
+means either. `tests/integration/alternativeSuccessCriteriaGroups.test.ts` reproduces exactly
+this failure mode end-to-end (a real run that unambiguously completed the journey — the
+right page was reached and its own analytics event genuinely fired — still ends
+`status: "failure"` / `statusReason: "no_progress_required_criteria_unmet"` under plain AND).
+
+**The fix.** `successCriterion.group` (optional string, request `schemaVersion` `"1.6.0"`).
+Criteria sharing the same non-empty `group` value are alternatives: the group is satisfied as
+a whole once **any one** member criterion is satisfied, and the group is "required" — gating
+`stop_success` — exactly when at least one of its members is (the same
+required-unless-`false` default, applied at group level). A criterion with no `group` is its
+own implicit singleton group, so a task that never sets `group` anywhere behaves exactly as
+before — this is a strict superset of the previous behaviour, not a breaking change.
+
+```json
+"successCriteria": [
+  {
+    "id": "completion-control-clicked",
+    "type": "semantic_page_match",
+    "description": "The final completion control (Continue, Summary, or an equivalent) was clicked.",
+    "group": "objective-reached"
+  },
+  {
+    "id": "destination-page-reached",
+    "type": "url_pattern",
+    "description": "The basket/summary page was reached.",
+    "config": { "pattern": "**/basket*" },
+    "group": "objective-reached"
+  },
+  {
+    "id": "completion-event-observed",
+    "type": "data_layer_event",
+    "description": "The config_finished analytics event fired.",
+    "config": { "match": { "event": "config_finished" } },
+    "group": "objective-reached"
+  }
+]
+```
+
+Any one of these three being satisfied clears the whole `objective-reached` group and lets
+`stop_success` be honoured; `TaskResponse.engineAssessment.satisfiedSuccessCriteriaIds` still
+reports exactly which one(s) actually fired, so a caller loses no diagnostic granularity by
+using a group instead of a single criterion. An ungrouped, separately `required: true`
+criterion alongside a group is combined with the group by AND, exactly like two ungrouped
+required criteria today — a group is just one more (compound) requirement, not a way to
+loosen unrelated criteria.
+
+`diagnostics.missingRequiredCriteriaIds` for an unsatisfied required group lists every member
+of that group (not just one representative id), so a caller can see exactly which
+alternatives remain unmet. `src/reasoning/promptBuilder.ts` also forwards each criterion's
+`group` (when present) into the reasoning layer's prompt with a one-line instruction that
+group members are alternatives — purely to help the model propose `stop_success` sooner; the
+engine's own independent re-check (§9's `required` section) is what actually enforces OR
+semantics regardless of what the model proposes.
 
 ## 10. taskId, and brand/market/language as reporting metadata only
 

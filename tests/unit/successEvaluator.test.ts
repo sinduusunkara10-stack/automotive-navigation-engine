@@ -289,6 +289,145 @@ test("element_present: absent selector is correctly not satisfied", async () => 
 });
 
 // ---------------------------------------------------------------------------------------
+// data_layer_event / network_event: previously always `false` (default case in
+// evaluateSingle -- see docs/n8n-integration.md "Generic success criteria"), regardless of
+// config. Regression coverage for making these two types actually evaluated, generically,
+// against config.match (a plain key/value record, never a fixed event-name vocabulary).
+// ---------------------------------------------------------------------------------------
+
+function pageWithDataLayer(entries: Record<string, unknown>[], title = "Fixture"): string {
+  return page_(`<script>window.dataLayer = ${JSON.stringify(entries)};</script><h1>Page</h1>`, title);
+}
+
+test("data_layer_event: satisfied when a live window.dataLayer entry matches every config.match key/value pair", async () => {
+  const html = pageWithDataLayer([{ event: "page_view" }, { event: "config_finished", step: "basket" }]);
+  const criterion: SuccessCriterion = {
+    id: "config-finished-event",
+    type: "data_layer_event",
+    description: "The config_finished analytics event has fired.",
+    config: { match: { event: "config_finished" } },
+  };
+  assert.equal(await isSatisfied(html, "objective", criterion), true);
+});
+
+test("data_layer_event: every key in config.match must match (AND across keys), not just one", async () => {
+  const html = pageWithDataLayer([{ event: "config_finished", step: "trim" }]);
+  const criterion: SuccessCriterion = {
+    id: "config-finished-at-basket",
+    type: "data_layer_event",
+    description: "config_finished fired specifically at the basket step.",
+    config: { match: { event: "config_finished", step: "basket" } },
+  };
+  assert.equal(await isSatisfied(html, "objective", criterion), false);
+});
+
+test("data_layer_event: no matching entry, no window.dataLayer at all, or no config.match all correctly fail closed", async () => {
+  await withPage(pageWithDataLayer([{ event: "page_view" }]), async (page) => {
+    const noMatch = await evaluateSuccessCriteria(page, [
+      { id: "a", type: "data_layer_event", description: "d", config: { match: { event: "config_finished" } } },
+    ], "objective");
+    assert.deepEqual(noMatch, []);
+  });
+  await withPage(page_("<h1>No dataLayer on this page</h1>"), async (page) => {
+    const noDataLayer = await evaluateSuccessCriteria(page, [
+      { id: "b", type: "data_layer_event", description: "d", config: { match: { event: "config_finished" } } },
+    ], "objective");
+    assert.deepEqual(noDataLayer, []);
+  });
+  await withPage(pageWithDataLayer([{ event: "config_finished" }]), async (page) => {
+    const noConfig = await evaluateSuccessCriteria(page, [
+      { id: "c", type: "data_layer_event", description: "d" },
+    ], "objective");
+    assert.deepEqual(noConfig, []);
+  });
+});
+
+test("data_layer_event: also matches against accumulated criteriaEvidence.dataLayerEntries, not only the live page (survives a dataLayer reset)", async () => {
+  // Simulates the real production scenario this fix targets: the event was pushed to
+  // dataLayer on an earlier page, then a full-document navigation to a new host reset
+  // window.dataLayer to empty (see capture-modules/dataLayerDelta.ts's "replaced" case) --
+  // the criterion must still be satisfiable from the run's own accumulated evidence.
+  await withPage(pageWithDataLayer([{ event: "page_view" }]), async (page) => {
+    const criterion: SuccessCriterion = {
+      id: "config-finished-event",
+      type: "data_layer_event",
+      description: "The config_finished analytics event has fired at some point this run.",
+      config: { match: { event: "config_finished" } },
+    };
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      "objective",
+      undefined,
+      undefined,
+      undefined,
+      { dataLayerEntries: [{ event: "config_finished", step: "basket" }] },
+    );
+    assert.ok(satisfied.includes("config-finished-event"));
+  });
+});
+
+test("network_event: satisfied when a criteriaEvidence.networkEvents entry's params match every config.match key/value pair", async () => {
+  await withPage(page_("<h1>Page</h1>"), async (page) => {
+    const criterion: SuccessCriterion = {
+      id: "ga4-config-finished",
+      type: "network_event",
+      description: "A GA4 config_finished request was observed.",
+      config: { match: { en: "config_finished" } },
+    };
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      "objective",
+      undefined,
+      undefined,
+      undefined,
+      {
+        networkEvents: [
+          { stepIndex: 0, requestUrl: "https://example.com/g/collect", params: { en: "page_view" } },
+          { stepIndex: 1, requestUrl: "https://example.com/g/collect", params: { en: "config_finished", dl: "https://example.com/basket" } },
+        ],
+      },
+    );
+    assert.ok(satisfied.includes("ga4-config-finished"));
+  });
+});
+
+test("network_event: has no live-page fallback -- absent criteriaEvidence.networkEvents (ga4_network_events capture not requested) never satisfies the criterion, even if the event genuinely occurred", async () => {
+  await withPage(page_("<h1>Page</h1>"), async (page) => {
+    const criterion: SuccessCriterion = {
+      id: "ga4-config-finished",
+      type: "network_event",
+      description: "A GA4 config_finished request was observed.",
+      config: { match: { en: "config_finished" } },
+    };
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], "objective");
+    assert.deepEqual(satisfied, []);
+  });
+});
+
+test("network_event: config.match can also target a top-level evidence field (e.g. requestUrl), not only params", async () => {
+  await withPage(page_("<h1>Page</h1>"), async (page) => {
+    const criterion: SuccessCriterion = {
+      id: "collect-request-seen",
+      type: "network_event",
+      description: "A request to the collect endpoint was observed.",
+      config: { match: { requestUrl: "https://example.com/g/collect" } },
+    };
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      "objective",
+      undefined,
+      undefined,
+      undefined,
+      { networkEvents: [{ stepIndex: 0, requestUrl: "https://example.com/g/collect" }] },
+    );
+    assert.ok(satisfied.includes("collect-request-seen"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------
 // getMissingRequiredCriteriaIds: the gate src/core/loop.ts consults before honouring
 // stop_success. Pure logic, no page needed.
 // ---------------------------------------------------------------------------------------
@@ -325,6 +464,73 @@ test("getMissingRequiredCriteriaIds: a task with no required criteria always ret
   ];
   assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set()), []);
   assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["optional-one"])), []);
+});
+
+// ---------------------------------------------------------------------------------------
+// getMissingRequiredCriteriaIds: `group` -- alternative (OR) criteria. Directly targets the
+// reported goal-recognition failure: "the objective is reached when CTA-clicked OR
+// destination-page-reached OR analytics-event-observed" cannot be expressed as three
+// independent `required: true` criteria (that is AND, not OR) -- see
+// docs/n8n-integration.md "Alternative (OR) success criteria groups".
+// ---------------------------------------------------------------------------------------
+
+test("getMissingRequiredCriteriaIds: group -- satisfying ANY one member satisfies the whole group, regardless of the others", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "cta-clicked", type: "semantic_page_match", description: "d", group: "objective-reached" },
+    { id: "basket-page-reached", type: "url_pattern", description: "d", group: "objective-reached" },
+    { id: "config-finished-event", type: "data_layer_event", description: "d", group: "objective-reached" },
+  ];
+  // None satisfied: the whole group is missing (reported as every member, so a caller can
+  // see exactly which alternatives remain unmet).
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set()), [
+    "cta-clicked",
+    "basket-page-reached",
+    "config-finished-event",
+  ]);
+  // Any single member satisfied clears the entire group -- true OR semantics.
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["config-finished-event"])), []);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["basket-page-reached"])), []);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["cta-clicked"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: group is required exactly when at least one member is (required-unless-false, applied at group level)", () => {
+  const allOptional: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d", group: "g", required: false },
+    { id: "b", type: "url_pattern", description: "d", group: "g", required: false },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(allOptional, new Set()), []);
+
+  const oneRequired: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d", group: "g", required: false },
+    { id: "b", type: "url_pattern", description: "d", group: "g", required: true },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(oneRequired, new Set()), ["a", "b"]);
+  assert.deepEqual(getMissingRequiredCriteriaIds(oneRequired, new Set(["a"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: an ungrouped criterion is its own singleton group -- omitting `group` everywhere reproduces the exact previous AND-of-all-required behaviour", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d", required: true },
+    { id: "b", type: "element_present", description: "d", required: true },
+  ];
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a"])), ["b"]);
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["a", "b"])), []);
+});
+
+test("getMissingRequiredCriteriaIds: an ungrouped required criterion alongside an OR-group are combined with AND -- the group is just one more (compound) requirement", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "domain-confirmed", type: "url_pattern", description: "d", required: true },
+    { id: "cta-clicked", type: "semantic_page_match", description: "d", group: "objective-reached" },
+    { id: "basket-page-reached", type: "url_pattern", description: "d", group: "objective-reached" },
+  ];
+  // The OR-group alone being satisfied is not enough; the standalone required criterion
+  // still gates too.
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["cta-clicked"])), ["domain-confirmed"]);
+  assert.deepEqual(
+    getMissingRequiredCriteriaIds(criteria, new Set()),
+    ["domain-confirmed", "cta-clicked", "basket-page-reached"],
+  );
+  assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["domain-confirmed", "cta-clicked"])), []);
 });
 
 // ---------------------------------------------------------------------------------------

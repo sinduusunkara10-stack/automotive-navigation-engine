@@ -68,7 +68,7 @@ const fixturesDir = join(__dirname, "..", "fixtures");
  */
 function buildTask(overrides: Partial<TaskRequest> = {}): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "multilingual-semantic-regression",
     objective:
       "Navigate to the official consumer vehicle configurator and stop when vehicle selection or configuration controls are available.",

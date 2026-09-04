@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-request contract, e.g. \"1.5.0\". Must be validated by the engine before use. Bumped from \"1.4.0\" to \"1.5.0\" because safety.consentInteractionPolicy was added (see $defs/safety) and outputSchemaVersion's required const value moved to \"1.5.0\" to track task-response.schema.json's own schemaVersion bump -- per this repo's versioning convention every request-contract change bumps this const, additive or not. Bumped from \"1.3.0\" to \"1.4.0\" earlier solely because outputSchemaVersion's required const value moved to \"1.4.0\" to track task-response.schema.json's own schemaVersion bump (see outputSchemaVersion's own description). Bumped from \"1.2.0\" to \"1.3.0\" earlier for the same reason. Bumped from \"1.1.0\" to \"1.2.0\" earlier still because successCriterion.type gained the additive \"semantic_page_match\" value (see $defs/successCriterion) -- a generic, brand/language-agnostic success signal based on objective-vocabulary overlap with the live page's title/headings/interactive-element text, letting a caller recognise a destination state without supplying a URL pattern or CSS selector. Bumped from \"1.0.0\" to \"1.1.0\" earlier still because allowedDomains is no longer required (see its own description) and the optional journeyType field was added.",
+      "description": "Version of this task-request contract, e.g. \"1.6.0\". Must be validated by the engine before use. Bumped from \"1.5.0\" to \"1.6.0\" because successCriterion gained the additive \"group\" field (see $defs/successCriterion) -- criteria sharing a group value are alternatives, satisfied as a whole once any one member is satisfied, letting a caller express \"the objective is reached when any one of N independent signals is observed\" (e.g. a specific control was clicked, OR a destination page was reached, OR a specific analytics event fired) without forcing every alternative to be required simultaneously. This same change also made successCriterion.type's existing \"data_layer_event\"/\"network_event\" values actually evaluated by the engine (src/core/successEvaluator.ts) instead of always failing -- a behavioural fix to already-valid enum values, not a new field, but recorded here since it changes what a request using those types actually does. outputSchemaVersion's required const value is unaffected and stays \"1.5.0\": no response-contract field changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because safety.consentInteractionPolicy was added (see $defs/safety) and outputSchemaVersion's required const value moved to \"1.5.0\" to track task-response.schema.json's own schemaVersion bump -- per this repo's versioning convention every request-contract change bumps this const, additive or not. Bumped from \"1.3.0\" to \"1.4.0\" earlier solely because outputSchemaVersion's required const value moved to \"1.4.0\" to track task-response.schema.json's own schemaVersion bump (see outputSchemaVersion's own description). Bumped from \"1.2.0\" to \"1.3.0\" earlier for the same reason. Bumped from \"1.1.0\" to \"1.2.0\" earlier still because successCriterion.type gained the additive \"semantic_page_match\" value (see $defs/successCriterion) -- a generic, brand/language-agnostic success signal based on objective-vocabulary overlap with the live page's title/headings/interactive-element text, letting a caller recognise a destination state without supplying a URL pattern or CSS selector. Bumped from \"1.0.0\" to \"1.1.0\" earlier still because allowedDomains is no longer required (see its own description) and the optional journeyType field was added.",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.5.0"
+      "const": "1.6.0"
     },
     "taskId": {
       "type": "string",
@@ -138,13 +138,18 @@
         },
         "config": {
           "type": "object",
-          "description": "Type-specific parameters (e.g. { \"pattern\": \"**/summary\" } for url_pattern, { \"selector\": \"...\" } for element_present, { \"minScore\": 0.4, \"signals\": [\"title\",\"headings\",\"interactiveElements\"] } for semantic_page_match, both optional -- see docs/n8n-integration.md \"Generic success criteria\"). Left open to keep new criterion types additive.",
+          "description": "Type-specific parameters (e.g. { \"pattern\": \"**/summary\" } for url_pattern, { \"selector\": \"...\" } for element_present, { \"minScore\": 0.4, \"signals\": [\"title\",\"headings\",\"interactiveElements\"] } for semantic_page_match, { \"match\": { \"event\": \"config_finished\" } } for data_layer_event or { \"match\": { \"en\": \"config_finished\" } } for network_event -- see docs/n8n-integration.md \"Generic success criteria\"). For data_layer_event/network_event, \"match\" is a plain object of string key/value pairs every one of which must be present and equal (string-compared) on a candidate dataLayer entry or network-event evidence record for the criterion to be satisfied -- never a fixed vendor/event-name vocabulary, since the keys and values are entirely caller-supplied. Left open to keep new criterion types additive.",
           "additionalProperties": true
         },
         "required": {
           "type": "boolean",
           "description": "Whether this criterion must be satisfied for stop_success, or is informational-only for progress tracking.",
           "default": true
+        },
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional. Criteria sharing the same group value are alternatives: the group counts as satisfied once any one member criterion is satisfied, and is required for stop_success exactly when at least one member is (same required-unless-false default, applied at group level -- see $defs/successCriterion's required field and src/core/successEvaluator.ts's getMissingRequiredCriteriaIds). A criterion with no group is its own implicit singleton group, so omitting this field everywhere reproduces the previous AND-of-all-required-criteria behaviour exactly. See docs/n8n-integration.md \"Alternative (OR) success criteria groups\"."
         }
       }
     },

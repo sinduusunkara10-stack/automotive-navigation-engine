@@ -14,7 +14,7 @@ import type { TaskRequest } from "../../src/types/task-request.js";
  */
 export function buildFullJourneyTask(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.5.0",
+    schemaVersion: "1.6.0",
     taskId: "claude-full-local-journey",
     objective:
       "Reach the fixture's success page by following the visible continue control on each page.",
