@@ -63,7 +63,7 @@ async function main(): Promise<void> {
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.8.0",
+      schemaVersion: "1.9.0",
       taskId: "claude-provider-smoke-test",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -82,7 +82,7 @@ async function main(): Promise<void> {
       // is the minimum number of real model calls needed to prove the integration.
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "wait", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.7.0",
+      outputSchemaVersion: "1.8.0",
     };
 
     const result = await runTask({ page, task, reasoning });

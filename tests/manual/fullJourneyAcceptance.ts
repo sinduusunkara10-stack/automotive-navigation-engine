@@ -58,8 +58,8 @@ function isSchemaValidSelectedAction(action: SelectedAction): boolean {
 export function evaluateFullJourneyAcceptance(input: FullJourneyAcceptanceInput): FullJourneyAcceptanceResult {
   const { result, decisionLog, allowedActions, baseUrl, secretValue } = input;
 
-  if (result.schemaVersion !== "1.7.0") {
-    return fail(`TaskResponse.schemaVersion was "${result.schemaVersion}", expected "1.7.0"`);
+  if (result.schemaVersion !== "1.8.0") {
+    return fail(`TaskResponse.schemaVersion was "${result.schemaVersion}", expected "1.8.0"`);
   }
   if (result.status !== "success") {
     return fail(`final engine status was "${result.status}", expected "success"`);

@@ -530,6 +530,36 @@ export interface MemorySample {
   externalBytes: number;
 }
 
+/**
+ * One resource type's tally under low-memory browser mode (see Diagnostics.resourceRouting
+ * and docs/architecture.md "Low-memory browser mode"). `resourceType` is one of
+ * Playwright's own request.resourceType() values (document, stylesheet, image, media,
+ * font, script, texttrack, xhr, fetch, eventsource, websocket, manifest, other) -- never
+ * anything about a specific site or brand. `allowedBytesMeasured` is summed from actual
+ * Content-Length response headers when present (a real, measured number); requests
+ * without that header contribute 0, so this can under-count but never fabricates a
+ * number. `blockedBytesEstimated` is `blockedCount` times a fixed, documented
+ * per-resource-type average (see src/api/browserResourceRouting.ts) -- an estimate,
+ * never a measurement, since a blocked resource is never actually fetched.
+ */
+export interface ResourceRoutingEntry {
+  resourceType: string;
+  allowedCount: number;
+  allowedBytesMeasured: number;
+  blockedCount: number;
+  blockedBytesEstimated: number;
+}
+
+/**
+ * Present only when LOW_MEMORY_BROWSER_MODE was enabled for this run (src/config/
+ * lowMemoryBrowserConfig.ts). One entry per resource type actually seen -- inherently
+ * bounded by Playwright's own small, fixed resourceType vocabulary, never per-request.
+ */
+export interface ResourceRoutingDiagnostics {
+  mode: "low_memory";
+  byResourceType: ResourceRoutingEntry[];
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
@@ -557,10 +587,17 @@ export interface Diagnostics {
    * run).
    */
   memory?: MemorySample[];
+  /**
+   * Counts and approximate bytes of network requests allowed/blocked by low-memory
+   * browser mode -- see ResourceRoutingDiagnostics above. Absent when that mode wasn't
+   * enabled for this run (the default), matching how domainDiscovery/semanticVerifier are
+   * absent when their own feature wasn't in play for a run.
+   */
+  resourceRouting?: ResourceRoutingDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.7.0";
+  schemaVersion: "1.8.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
