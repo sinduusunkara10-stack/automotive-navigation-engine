@@ -60,6 +60,18 @@ once finished — `result` is the same `task-response` body described below (`st
 the response schema: `success`, `blocked`, `failure`, `max_steps_reached`,
 `max_backtracks_reached`, `max_duration_reached`). An unknown `runId` returns `404`.
 
+A fourth wrapper status, `{ "status": "stale", "staleReason": "worker_lost" | "run_stale" }`,
+can appear instead of an indefinite `"running"` answer: it means the run stopped
+heartbeating past a configured threshold, either because its owning API process is gone
+(`"worker_lost"`, e.g. after a restart) or because the run itself hung
+(`"run_stale"`) — see §8. **n8n does not yet branch on this status** (this is documented
+for awareness, not a required n8n workflow change); until it does, a poll loop that only
+checks for `"completed"`/`"failed"` will keep polling a `"stale"` run indefinitely, the
+same as it would keep polling a `"running"` one. Recognizing `"stale"` explicitly (e.g. to
+stop polling and alert rather than waiting out the full poll timeout) is a natural, but
+separate, follow-up n8n change. This wrapper status lives outside the schema-governed
+`result` field, so it carries no `schemaVersion`/`outputSchemaVersion` implication.
+
 ```
 GET /v1/health
 ```
@@ -239,24 +251,63 @@ n8n workflow must update its request `schemaVersion` to `"1.6.0"` to keep valida
 workflow that doesn't use `group`, `data_layer_event`, or `network_event` needs no other
 change.
 
+**Example (already applied, again): response `"1.5.0"` → `"1.7.0"`, request `"1.6.0"` →
+`"1.8.0"`.** Two additive response-contract changes landed since the previous entry above:
+`observation.elementDiscoveryDiagnostics` (bounded, generic evidence about the
+interactive-element scan itself — raw candidate count, button-like/link-like/other-role
+counts, per-reason excluded counts, and an open-shadow-root host count), and
+`diagnostics.memory` (§8, and `docs/architecture.md` §13) — a bounded series of
+`process.memoryUsage()` samples taken at run start, after each step, and after
+browser/context cleanup, purely diagnostic and never anything about the page/task being
+run. No existing field on either contract was removed, renamed, or had its meaning
+changed. Per this repo's own stated convention, the response contract's `schemaVersion`
+moved `"1.5.0"` → `"1.6.0"` → `"1.7.0"`, and the request contract's `outputSchemaVersion`
+and its own `schemaVersion` tracked the same way, ending at `"1.7.0"` and `"1.8.0"`
+respectively. **An n8n workflow must update both version strings it sends to
+`outputSchemaVersion: "1.7.0"` and `schemaVersion: "1.8.0"`** — see the `examples/*.json`
+fixtures in this repo, all of which were updated the same way. No other n8n-side change is
+required: both new fields are additive/diagnostic-only, so a workflow that only bumps the
+two version strings continues to behave exactly as before.
+
 ## 8. Task store and instance limitations
 
-Runs are held in an in-memory `Map` (`src/api/taskStore.ts`) with **no persistence**:
+Run records are held behind a pluggable `TaskStore` interface (`src/api/taskStore.ts`; see
+`docs/architecture.md` §13 "Memory stability and run persistence" for the full design).
+Which backend is active is an operator/deployment choice (`TASK_STORE` env var), not
+something a caller can see in the wire contract:
 
-- **All run state is lost when the process/container restarts.** A run n8n submitted and hasn't
-  polled to completion yet disappears on restart; n8n sees `404` on the next poll and should
-  treat that as "unknown/lost run", not retry the same `runId`.
-- **Run one engine instance.** Because the store isn't shared, a second instance behind a load
-  balancer would never see runs created on the first — `POST /v1/tasks` and the later
-  `GET /v1/tasks/:runId` poll must land on the same instance.
-- **Before scaling to multiple instances**, add a persistent or shared task store (e.g. a
-  database or shared cache keyed by `runId`) that every instance reads and writes — this is a
-  known, deliberate v1 gap, not an oversight, and out of scope for this phase (see
-  `docs/v1-scope.md`).
+- **`TASK_STORE=memory` (default)** — the original in-memory `Map`, still with **no
+  persistence**: all run state is lost when the process/container restarts. A run n8n
+  submitted and hasn't polled to completion yet disappears on restart; n8n sees `404` on
+  the next poll and should treat that as "unknown/lost run", not retry the same `runId`.
+- **`TASK_STORE=redis` (opt-in, recommended in production)** — run records are persisted
+  to Redis and survive a process restart (e.g. an out-of-memory kill on a small instance,
+  the incident that motivated this). n8n does not need to change anything to benefit from
+  this — the same `GET /v1/tasks/:runId` contract applies — except that a run whose owning
+  process died can now surface as the `"stale"`/`"worker_lost"` status described in §3
+  instead of an eventual `404`.
 
-n8n workflows built against this engine should assume runs are ephemeral: poll promptly after
-submission, and design for an occasional lost run (engine restart, deploy) the same way they'd
-handle any other transient infrastructure failure.
+Independent of which backend is active:
+
+- **Run one engine instance per `TASK_STORE=memory` deployment.** Because that store isn't
+  shared, a second instance behind a load balancer would never see runs created on the
+  first — `POST /v1/tasks` and the later `GET /v1/tasks/:runId` poll must land on the same
+  instance. This limitation goes away under `TASK_STORE=redis`, since every instance reads
+  and writes the same Redis-backed records — but running multiple instances still requires
+  the Tier 3 worker/API separation this repo has not built yet (out of scope for this
+  phase; see `docs/v1-scope.md`), so it remains unsupported regardless of store backend.
+- **A concurrency ceiling now applies.** `MAX_CONCURRENT_TASKS` (default 1, conservative
+  for a small instance) bounds how many runs may be in flight at once — each run launches
+  its own full Chromium instance. `POST /v1/tasks` returns
+  `503 {"error": "concurrency_limit_reached"}` once at capacity; n8n should treat this the
+  same as any other transient-capacity signal (retry after a short delay), not as a
+  request-shape error.
+
+n8n workflows built against this engine should still assume a run *can* be ephemeral (the
+default backend is unpersisted, and even the Redis backend has a retention TTL —
+`TASK_RECORD_TTL_SECONDS`, default 24h): poll promptly after submission, and design for an
+occasional lost or stale run (engine restart, deploy, a genuinely hung run) the same way
+they'd handle any other transient infrastructure failure.
 
 ## 9. Generic success criteria
 

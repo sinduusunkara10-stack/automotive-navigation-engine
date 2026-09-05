@@ -60,7 +60,7 @@ class ClickTwiceThenStopSuccessProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.7.0",
+    schemaVersion: "1.8.0",
     taskId: "alternative-success-criteria-groups",
     objective:
       "Complete the fixture journey: reach the destination page, or click its completion control, or have its " +
@@ -74,7 +74,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.6.0",
+    outputSchemaVersion: "1.7.0",
     ...overrides,
   };
 }

@@ -23,6 +23,24 @@ jobs:
     name: Typecheck, schema validation, automated tests, Docker build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Real Redis for tests/integration/redisRealServer.test.ts, which exercises the
+    # Redis-backed TaskStore (src/api/redisTaskStore.ts) against an actual server rather
+    # than the ioredis-mock used by the rest of the suite -- see that test file's own
+    # comment and docs/architecture.md "Memory stability". Exposed on localhost:6379,
+    # matching that test's default REDIS_URL_FOR_TESTS. Every other test in this repo is
+    # unaffected by whether this service is present; the real-Redis test itself skips
+    # gracefully (not a failure) if it can't reach a Redis server, so removing this
+    # service would only stop exercising the real wire protocol, not break CI.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

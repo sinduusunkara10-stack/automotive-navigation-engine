@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.7.0",
+  "schemaVersion": "1.8.0",
   "taskId": "example-automotive-oem-com-configurator_entry-20260825T120000Z",
   "objective": "Navigate to the official consumer vehicle configurator and stop when vehicle selection or configuration controls are available.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -41,7 +41,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.6.0",
+  "outputSchemaVersion": "1.7.0",
   "metadata": {
     "useCase": "minimal-preflight-domain-discovery",
     "requestedBy": "n8n-workflow-demo"

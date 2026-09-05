@@ -32,8 +32,8 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
   assert.ok(valid, ajv.errorsText(validate.errors));
 }
 
-async function startApiServer() {
-  const server = createApiServer();
+async function startApiServer(env?: NodeJS.ProcessEnv) {
+  const server = await createApiServer(env);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   return {
@@ -44,7 +44,7 @@ async function startApiServer() {
 
 function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules: string[] = ["page_visits"]) {
   return {
-    schemaVersion: "1.7.0",
+    schemaVersion: "1.8.0",
     taskId,
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${fixturesBaseUrl}/start.html`,
@@ -65,7 +65,7 @@ function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules:
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.6.0",
+    outputSchemaVersion: "1.7.0",
   };
 }
 
