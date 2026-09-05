@@ -7,6 +7,8 @@ import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVe
 import type { TaskRequest } from "../types/task-request.js";
 import type { TaskStore } from "./taskStore.js";
 import { recordMemorySample } from "../core/memoryDiagnostics.js";
+import { readLowMemoryBrowserMode } from "../config/lowMemoryBrowserConfig.js";
+import { attachLowMemoryResourceRouting } from "./browserResourceRouting.js";
 
 // Reduces Chromium's own memory footprint without touching anything that affects
 // rendering fidelity or multi-frame behavior (observationBuilder.ts depends on both being
@@ -36,7 +38,7 @@ function createSemanticVerifier(env: NodeJS.ProcessEnv): SemanticCriterionVerifi
  * so tests can exercise executeTaskAsync's cleanup ordering (e.g. a page.close() failure,
  * or a launch failure) without needing a real Chromium process for every scenario. */
 export interface RunnerBrowser {
-  newPage(): Promise<Page>;
+  newPage(options?: { serviceWorkers?: "allow" | "block" }): Promise<Page>;
   close(): Promise<void>;
 }
 
@@ -64,8 +66,13 @@ export async function executeTaskAsync(
   try {
     const reasoning = createReasoningProvider();
     const semanticVerifier = createSemanticVerifier(process.env);
+    // Opt-in, off by default -- see docs/architecture.md "Low-memory browser mode". Blocks
+    // image/media/font requests and disallows service worker registration; never touches
+    // document/script/stylesheet/xhr/fetch, and never disables JavaScript.
+    const lowMemoryMode = readLowMemoryBrowserMode(process.env);
     browser = await launchBrowser();
-    const page = await browser.newPage();
+    const page = await browser.newPage(lowMemoryMode ? { serviceWorkers: "block" } : undefined);
+    const routing = lowMemoryMode ? attachLowMemoryResourceRouting(page) : undefined;
     let result;
     try {
       result = await runTask({
@@ -77,14 +84,18 @@ export async function executeTaskAsync(
         semanticVerifier,
       });
     } finally {
-      // Never let a page.close() failure flip an otherwise-successful run to "failed" --
-      // close is best-effort cleanup, not part of the run's own outcome.
+      // Routing must be detached while the page is still open; page.close() is
+      // best-effort cleanup and must never flip an otherwise-successful run to "failed".
+      await routing?.detach().catch(() => {});
       await page.close().catch(() => {});
     }
     await browser.close().catch(() => {});
     // Cleared so the outer finally's own browser?.close() below doesn't double-close an
     // already-closed browser on this (successful) path.
     browser = undefined;
+    if (routing) {
+      result.diagnostics.resourceRouting = routing.diagnostics();
+    }
     result.diagnostics.memory = recordMemorySample(result.diagnostics.memory ?? [], "after_cleanup");
     await store.completeRun(runId, result);
   } catch {
