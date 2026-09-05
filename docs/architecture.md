@@ -1006,3 +1006,159 @@ conservatively to 1, since each accepted run launches its own full Chromium inst
 meaningful fraction of a small (e.g. 512MB) instance's memory budget. Once at capacity,
 `POST /v1/tasks` returns `503 {error: "concurrency_limit_reached"}` — rejection, not
 queueing (a queue is Tier-3-adjacent infrastructure, deliberately out of scope here).
+
+## 14. Low-memory browser mode
+
+A second production incident occurred even with every §13 mitigation deployed
+(screenshots removed from the calling n8n workflow's own `captureModules` selection,
+`MAX_CONCURRENT_TASKS=1`, bounded stored captures/steps/observations, and the memory-safe
+Chromium launch flags): a run still exceeded a 512MB Render instance's memory ceiling, was
+OOM-killed, and correctly surfaced as `{status: "stale", staleReason: "worker_lost"}` per
+§13's own heartbeat/stale-detection design. Every §13 mitigation targets memory held by
+the **Node.js orchestration process** (stored captures, run records, diagnostics samples);
+none of them touch memory used by the **Chromium browser process itself**, which every
+run launches one of. This section addresses that remaining, larger contributor without
+requiring a Render plan upgrade or the Tier 3 worker/API process split.
+
+### Investigation findings
+
+- **Resource types loaded, before this change**: all of them, unfiltered — `runner.ts` had
+  no `page.route()` or resource-blocking context option prior to this change, confirmed by
+  inspection.
+- **Can Playwright request routing safely block image/media/font?** Yes.
+  `page.route("**/*", handler)` intercepts every request before it resolves;
+  `request.resourceType()` classifies it as one of Playwright's fixed vocabulary
+  (`document, stylesheet, image, media, font, script, texttrack, xhr, fetch, eventsource,
+  websocket, manifest, other`), so a handler can single out `image`/`media`/`font` without
+  any URL-pattern or brand-specific matching.
+- **Does document/script/stylesheet/xhr/fetch/beacon-GA4 traffic remain available?** Yes —
+  only `image`/`media`/`font` are touched; every other resource type is passed through via
+  `route.continue()` unmodified.
+- **Could blocking image/media/font prevent a configurator from rendering controls or
+  firing analytics?** Low residual risk: DOM structure, CSS layout, and JavaScript
+  execution (including `fetch`/`xhr` calls and `dataLayer` pushes) are unaffected by
+  blocked image/media/font bytes. The one edge case is a control whose own visibility is
+  conditioned on that specific image's `load` event firing (rare in practice, and not
+  present in this repo's own capture-module assumptions). Confirmed empirically (not just
+  argued) in `tests/integration/lowMemoryBrowserMode.test.ts`: a fixture's trim-selection
+  buttons remain visible interactive elements, and its own `dataLayer` push, `fetch` call,
+  and GA4 `<img>`-beacon parameters are all still captured, with every image/font/media
+  request blocked before reaching the origin server.
+- **GA4/analytics capture safety, specifically**: `src/capture-modules/ga4NetworkEvents.ts`
+  listens on `page.on("request", ...)`, which Playwright fires the moment a request is
+  *issued* — independent of how routing later resolves it (`continue`/`abort`/`fulfill`).
+  A GA4 beacon fired via `new Image().src = ...` (resourceType `"image"`) is therefore
+  still observed and parsed for its query parameters even though its actual network
+  delivery is blocked. This is the property that makes blocking `image` safe for the
+  analytics use case without a beacon-URL exception.
+- **Service workers, cache, video, WebGL, preloaded resources**: service worker
+  registration is disabled for the run's page (`newPage({serviceWorkers: "block"})`) since
+  a single-shot run torn down immediately after gets no benefit from it. Browser cache is
+  already a non-issue — each run gets a fresh, non-persistent context. Preloaded resources
+  are covered automatically (a preloaded font still surfaces with resourceType `"font"`).
+  WebGL/3D-viewer rendering and video decoding are plausible additional contributors for a
+  3D configurator viewer specifically, but are **not addressed by this change** — blocking
+  them is more invasive and not required by the stated use case; noted here as a candidate
+  for a future, separately-justified change if a 3D-viewer-heavy run still exceeds budget.
+- **Can browser-process memory be measured separately from Node's own memory?** No, not
+  via the API this engine uses: `chromium.launch()` returns a `Browser` object with no
+  `.process()` accessor (confirmed against Playwright's own type definitions — only
+  `BrowserServer`, returned by the unused `chromium.launchServer()`, and
+  `ElectronApplication` expose one). `src/core/memoryDiagnostics.ts`'s
+  `process.memoryUsage()` samples have therefore only ever measured the Node.js
+  orchestration process, never the separate Chromium OS process that is the likely
+  dominant contributor to an OOM. Not fixed in this change (would require
+  `chromium.launchServer()` or `/proc` parsing, judged out of scope for the smallest
+  generic fix); recorded here as a known gap.
+- **Unnecessary Chromium subprocesses launched by the engine?** No — one `chromium.launch()`
+  call per run. Chromium's own internal multi-process architecture (GPU/renderer/zygote
+  processes) is standard and already partially reduced by §13's `--disable-gpu` flag.
+- **One context/page per run, always closed?** Yes, confirmed unchanged from §13's own
+  finding: `browser.newPage()` once per run, closed in the existing `finally` chain in
+  `runner.ts`.
+
+### Design: opt-in resource-type blocking
+
+`LOW_MEMORY_BROWSER_MODE=true` (read by `src/config/lowMemoryBrowserConfig.ts`'s
+`readLowMemoryBrowserMode`; only the literal string `"true"`, case-insensitive, enables it
+— any other value, including unset, leaves it off) makes `src/api/runner.ts`:
+
+- Open the run's page with `serviceWorkers: "block"`.
+- Attach `src/api/browserResourceRouting.ts`'s `attachLowMemoryResourceRouting(page)`,
+  which routes `**/*` and, for `image`/`media`/`font` requests only, calls
+  `route.fulfill({status: 200, ...})` with a minimal stand-in body (a 1x1 transparent GIF
+  for `image`, an empty body for `media`/`font`) instead of `route.abort()`. Every other
+  resource type is passed through via `route.continue()` unmodified. `fulfill` (not
+  `abort`) is deliberate: `src/capture-modules/errors.ts` records `requestfailed` events
+  and `>=400` responses as capture-visible errors, and an intentionally-blocked resource
+  should never crowd out a genuine error within the bounded `MAX_ERROR_ENTRIES` cap that
+  §13 already established — `fulfill` with `status: 200` triggers neither listener.
+- Record, per resource type, `allowedCount`/`blockedCount`, `allowedBytesMeasured` (summed
+  from real `Content-Length` response headers, 0 when absent — never fabricated), and
+  `blockedBytesEstimated` (`blockedCount × a fixed per-type average` — 150,000 bytes for
+  image, 2,000,000 for media, 50,000 for font — explicitly an estimate, since a blocked
+  resource is never actually fetched and so has no real size to measure). Surfaced as
+  `TaskResponse.diagnostics.resourceRouting` (response schema `1.8.0`), following the same
+  bounded-fixed-shape-aggregate pattern as `diagnostics.memory`/`diagnostics.reasoningProvider`
+  — a small array keyed by Playwright's own fixed resource-type vocabulary, never an
+  unbounded per-request list.
+- Detach routing (and the response listener) before the page closes, matching the existing
+  `finally`-chain cleanup order in `runner.ts`.
+
+When the mode is off (the default), `runner.ts`'s behavior — and `TaskResponse` shape — is
+byte-for-byte unchanged: no routing is attached, and `diagnostics.resourceRouting` is
+simply absent from the response, matching the existing precedent for other opt-in
+diagnostics fields.
+
+Deliberately out of scope for this change, per the incident report's own instruction: any
+Tier 3 worker/API process separation, and direct Chromium-process memory measurement.
+
+### Tests
+
+- `tests/unit/lowMemoryBrowserConfig.test.ts` — the env-var reader defaults off, is on only
+  for the literal `"true"` (case-insensitively), and stays off for near-misses (`"1"`,
+  `"yes"`, `"on"`, `""`).
+- `tests/unit/browserResourceRouting.test.ts` — using fake `Page`/`Route`/`Response`
+  objects (no real browser): `image`/`media`/`font` are always fulfilled with `status:
+  200`, never `continue()`d; `document`/`script`/`stylesheet`/`xhr`/`fetch`/`other` are
+  always `continue()`d, never fulfilled; `diagnostics()` correctly separates measured
+  allowed bytes (from a real `content-length` header, 0 when absent) from estimated
+  blocked bytes (always non-zero, from the fixed per-type constants); `detach()` removes
+  the response listener and unroutes the page.
+- `tests/integration/lowMemoryBrowserMode.test.ts` — a real Chromium instance against a
+  local HTTP fixture (a generic stand-in for an OEM configurator page: an image, a
+  preloaded font, a video element, a `fetch` call, and a `dataLayer` push plus a GA4
+  `<img>`-beacon, deliberately not naming or shaped after any specific brand, per
+  CLAUDE.md's non-negotiable design rule) proves, end to end: without the mode, image/font
+  requests reach the origin server normally; with the mode enabled, the run still succeeds,
+  the fixture's interactive trim-selection and continue controls are still exposed in the
+  observation, image/font/media requests never reach the origin server (hit count `0`), the
+  `fetch` call still reaches it normally, the GA4 beacon's parameters are still captured in
+  `captures.ga4_network_events` despite its own network delivery being blocked,
+  `page_visits`/`cta_clicks`/`journey_path`/`data_layer_evidence` are all still populated,
+  no `network_request_failed` errors are introduced, and `diagnostics.resourceRouting`
+  reports the expected blocked/allowed counts and byte figures.
+
+### Expected memory reduction (estimate, not measured on Render)
+
+Not measured against the actual Render deployment that experienced the OOM, so this is
+an estimate based on the resource types removed from Chromium's own decode/render/GPU
+pipeline, not a guaranteed figure: image decoding, video buffering, and font-file loading
+are memory-**and-CPU**-non-trivial for a headless Chromium process, particularly for a
+configurator page carrying multiple high-resolution product images and/or video. This
+change should meaningfully reduce Chromium's own RSS for such a page; it cannot be
+quantified precisely here because (per the investigation findings above) this engine has
+no way to measure the Chromium process's own memory separately from Node's.
+`diagnostics.resourceRouting`'s blocked-count/estimated-bytes figures are surfaced
+specifically so an operator can correlate a real run's blocking activity with Render's own
+instance-level memory graph after deployment.
+
+### Deployment and rollback
+
+Deploy with `LOW_MEMORY_BROWSER_MODE` **unset** first — zero behavior change, safe to
+verify the deploy itself succeeded before opting in. Then set
+`LOW_MEMORY_BROWSER_MODE=true` as a Render environment variable to enable the mode; no
+code change, redeploy, n8n change, or Redis/persistence change is required to toggle it
+either way. Roll back by unsetting the variable (or setting it to any value other than
+`"true"`) and redeploying — matching the same unset-to-disable rollback pattern already
+established for `TASK_STORE` in §13.

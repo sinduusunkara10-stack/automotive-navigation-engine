@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.7.0\". Bumped from \"1.6.0\" to \"1.7.0\" because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.8.0\". Bumped from \"1.7.0\" to \"1.8.0\" because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.7.0"
+      "const": "1.8.0"
     },
     "taskId": {
       "type": "string",
@@ -984,6 +984,65 @@
           "items": {
             "$ref": "#/$defs/memorySample"
           }
+        },
+        "resourceRouting": {
+          "$ref": "#/$defs/resourceRoutingDiagnostics"
+        }
+      }
+    },
+    "resourceRoutingDiagnostics": {
+      "type": "object",
+      "description": "Counts and approximate bytes of network requests allowed/blocked by low-memory browser mode (LOW_MEMORY_BROWSER_MODE) -- see docs/architecture.md 'Low-memory browser mode'. Present only when that mode was enabled for this run.",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "byResourceType"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "const": "low_memory"
+        },
+        "byResourceType": {
+          "type": "array",
+          "description": "One entry per Playwright request.resourceType() value actually seen during the run -- inherently bounded by Playwright's own small, fixed resource-type vocabulary, never per-request.",
+          "items": {
+            "$ref": "#/$defs/resourceRoutingEntry"
+          }
+        }
+      }
+    },
+    "resourceRoutingEntry": {
+      "type": "object",
+      "description": "One resource type's tally under low-memory browser mode. allowedBytesMeasured is summed from real Content-Length response headers (a measurement; requests without that header contribute 0, so this can under-count but never fabricates a number). blockedBytesEstimated is blockedCount times a fixed, documented per-resource-type average -- an estimate, never a measurement, since a blocked resource is never actually fetched.",
+      "additionalProperties": false,
+      "required": [
+        "resourceType",
+        "allowedCount",
+        "allowedBytesMeasured",
+        "blockedCount",
+        "blockedBytesEstimated"
+      ],
+      "properties": {
+        "resourceType": {
+          "type": "string",
+          "description": "One of Playwright's own request.resourceType() values, e.g. \"image\", \"script\", \"xhr\" -- never anything about a specific site or brand."
+        },
+        "allowedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allowedBytesMeasured": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blockedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blockedBytesEstimated": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },
