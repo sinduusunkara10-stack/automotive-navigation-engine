@@ -420,6 +420,9 @@ npm run test:api    # runs the API integration tests in isolation
 | `HEARTBEAT_INTERVAL_MS` | No | How often (ms) an active run refreshes its own run record. Default `15000`. |
 | `RUN_STALE_THRESHOLD_MS` | No | How long (ms) a `"running"` record can go without a heartbeat before it reads back as `"stale"`. Default `90000`. |
 | `MAX_CONCURRENT_TASKS` | No | Ceiling on simultaneously in-flight runs; `POST /v1/tasks` returns `503` once at capacity. Default `1` (conservative for a small instance). |
+| `MAX_SCREENSHOTS_PER_RUN` | No | Whole-run cap on `captures.screenshots`, preserving the first 2 and the most recent. Default `20`. |
+| `MAX_STORED_STEPS` | No | Whole-run cap on `result.steps`, preserving the first 5 and the most recent. Default `50`. |
+| `MAX_STORED_INTERACTIVE_ELEMENTS_PER_OBSERVATION` | No | Per-step cap on `observation.interactiveElements` in the *stored* response only (never the live decision-making loop). Default `100`. |
 
 Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is gitignored).
 **In any deployed environment, all of the above come from the hosting platform's own secret

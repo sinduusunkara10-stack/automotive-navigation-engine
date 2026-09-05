@@ -855,7 +855,14 @@ Investigation of the browser/task lifecycle (`src/api/runner.ts`, `src/core/engi
   browser/context/page leak. Playwright listener registrations (`ga4NetworkEvents.ts`,
   `errors.ts`) are all detached via the same `finally` in `engine.ts`.
 - Screenshots are written to disk as PNG files; only the file path string is held in
-  memory (`captures.screenshots`), never a base64 string or Buffer.
+  memory (`captures.screenshots`), never a base64 string or Buffer — but the *array* of
+  those path strings, and separately `TaskResponse.steps` (each carrying a full
+  `Observation`, including `interactiveElements`), were both confirmed unbounded across a
+  run's lifetime (see "Evidence-retention limits" below).
+- No duplication of the completed `TaskResponse` object itself was found: it is built once
+  in `engine.ts`, held by a single reference as it passes through `runner.ts` into the
+  `TaskStore` record, and the only other copy that ever exists is the transient JSON string
+  produced once per HTTP response write (`JSON.stringify`) -- not a persistent second copy.
 - The task store never evicted completed/failed records — every run's full
   `TaskResponse` stayed in the process's memory for its entire lifetime, accumulating
   across runs. This was the largest confirmed contributor.
@@ -874,7 +881,39 @@ Investigation of the browser/task lifecycle (`src/api/runner.ts`, `src/core/engi
 `src/core/boundedArray.ts`'s `appendBounded` (keep-most-recent-N, drop oldest):
 `MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT` (200), `MAX_GA4_NETWORK_EVENTS` (500),
 `MAX_ERROR_ENTRIES` (200). None of these know anything about a specific site, brand, or
-capture semantics beyond "array, entry, cap".
+capture semantics beyond "array, entry, cap". These three are fixed, not
+env-configurable — they bound noisy, purely-diagnostic streams where only recency matters.
+
+### Evidence-retention limits (screenshots, steps, interactive elements)
+
+A keep-most-recent-only cap is the wrong shape for evidence that represents a *journey*:
+`captures.screenshots`, `TaskResponse.steps`, and each stored step's
+`observation.interactiveElements` were all confirmed unbounded, and naively dropping the
+oldest would silently lose "where the run started" while keeping only its tail. Bounded
+instead via `src/core/boundedArray.ts`'s `capPreservingEnds` / `appendBoundedPreservingEnds`
+-- keep the first `keepFirst` entries permanently, then a keep-most-recent-N window over
+the rest, so a run's beginning *and* its end both survive. `keepFirst` is always clamped to
+at most half of the configured max, so a large `keepFirst` (or a small configured max) can
+never fully suppress the tail -- the most recent entry always survives.
+
+Unlike the fixed diagnostic caps above, how much journey evidence to retain is a
+legitimate per-deployment tuning choice, so these three ceilings ARE env-configurable
+(`src/config/captureLimits.ts`'s `readMaxScreenshotsPerRun` / `readMaxStoredSteps` /
+`readMaxStoredInteractiveElementsPerObservation`, each fail-fast on an invalid value):
+
+- `MAX_SCREENSHOTS_PER_RUN` (default 20, keeps the first 2) — applied in
+  `src/actions/capture.ts`.
+- `MAX_STORED_STEPS` (default 50, keeps the first 5) — applied incrementally in
+  `src/core/engine.ts`'s main loop, so the array never grows past the limit at any point
+  during a run, rather than growing unbounded and only being trimmed at the end.
+- `MAX_STORED_INTERACTIVE_ELEMENTS_PER_OBSERVATION` (default 100, split evenly between
+  earliest and latest) — applied per step, via `engine.ts`'s `boundStepLogForStorage`,
+  **only to what gets stored** in the response. The live `Observation` object the
+  reasoning/validation loop itself uses to decide and validate actions (e.g. confirming a
+  clicked element was actually present) is never touched — confirmed by a regression test
+  (`tests/integration/evidenceRetentionLimits.test.ts`) that runs a real journey against a
+  fixture with 40+ interactive elements, a storage cap far below that count, and asserts
+  the run still succeeds.
 
 ### Memory-safe Chromium launch flags
 
@@ -920,6 +959,21 @@ matching this repo's existing fail-fast-at-startup convention (`src/api/auth.ts`
 `src/config/initialNavigationConfig.ts`), aborts server creation clearly if `TASK_STORE=redis`
 is configured but Redis is unreachable, rather than serving requests that would each fail
 individually once they tried to persist.
+
+**Test coverage against a real Redis server, not only a mock.** `tests/unit/
+redisTaskStore.test.ts` and `tests/unit/taskStoreFactory.test.ts` use `ioredis-mock` (an
+in-process substitute) for fast, dependency-free coverage of the store's own logic.
+`tests/integration/redisRealServer.test.ts` additionally runs the same create/get/complete
+round-trip, plus a cross-connection persistence check (a fresh `TaskStore`/client pair
+reading a record an earlier one wrote — the real-server equivalent of "survives an API
+process restart"), against an **actual Redis server**, exercising the real wire protocol
+end to end. CI provides this via a GitHub Actions service container (`.github/workflows/
+ci.yml`'s `redis` service, `redis:7-alpine`, exposed at `localhost:6379`), so every PR
+run covers the real path. Locally, `npm test` runs this file too, but it skips gracefully
+(not a failure) if it can't reach a Redis server within 1.5s — running a local Redis
+first (e.g. `redis-server` or `docker run -p 6379:6379 redis:7-alpine`) makes it exercise
+the real path locally as well; `REDIS_URL_FOR_TESTS` overrides the default
+`redis://127.0.0.1:6379` if needed.
 
 ### Heartbeat and stale detection
 

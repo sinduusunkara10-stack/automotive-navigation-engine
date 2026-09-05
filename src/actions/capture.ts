@@ -5,6 +5,8 @@ import { capturePageVisit } from "../capture-modules/pageVisits.js";
 import { capturePageMetadata } from "../capture-modules/pageMetadata.js";
 import { captureScreenshot } from "../capture-modules/screenshots.js";
 import { captureFinishPageCtas } from "../capture-modules/finishPageCtas.js";
+import { appendBoundedPreservingEnds } from "../core/boundedArray.js";
+import { MAX_SCREENSHOTS_KEEP_FIRST, readMaxScreenshotsPerRun } from "../config/captureLimits.js";
 
 export async function executeCapture(
   page: Page,
@@ -24,7 +26,15 @@ export async function executeCapture(
 
   if (captureModules.includes("screenshots")) {
     const screenshot = await captureScreenshot(page, stepIndex, "capture_action");
-    captures.screenshots = [...(captures.screenshots ?? []), screenshot];
+    // Bounded to MAX_SCREENSHOTS_PER_RUN, preserving the first MAX_SCREENSHOTS_KEEP_FIRST
+    // (how the run started) alongside the most recent ones (how it ended) -- see
+    // src/core/boundedArray.ts and src/config/captureLimits.ts.
+    captures.screenshots = appendBoundedPreservingEnds(
+      captures.screenshots ?? [],
+      screenshot,
+      readMaxScreenshotsPerRun(),
+      MAX_SCREENSHOTS_KEEP_FIRST,
+    );
   }
 
   if (captureModules.includes("finish_page_ctas")) {

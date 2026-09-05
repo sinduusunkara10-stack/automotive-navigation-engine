@@ -22,8 +22,40 @@ import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.
 import { assessUrlSafety } from "../discovery/hostSafety.js";
 import { runDomainDiscovery, type DomainDiscoveryResult } from "../discovery/domainDiscovery.js";
 import { recordMemorySample } from "./memoryDiagnostics.js";
+import { appendBoundedPreservingEnds, capPreservingEnds } from "./boundedArray.js";
+import {
+  MAX_STORED_INTERACTIVE_ELEMENTS_KEEP_FIRST,
+  MAX_STORED_STEPS_KEEP_FIRST,
+  readMaxStoredInteractiveElementsPerObservation,
+  readMaxStoredSteps,
+} from "../config/captureLimits.js";
 
 const ENGINE_VERSION = "0.1.0-poc";
+
+/**
+ * Trims a stored StepLog's observation.interactiveElements to maxElements, keeping both
+ * the earliest (head-of-DOM) and latest (tail-of-DOM, where terminal-route controls
+ * frequently land -- see promptBuilder.ts's own TAIL_ANCHOR_COUNT) elements rather than
+ * naively dropping the tail. Called only once a step's own decision has already been made
+ * and validated, and after journey_path capture has already read the step's full,
+ * untouched observation (see the call site in runTask) -- this only ever changes what
+ * ends up *stored* in the response, never what the run itself observed or acted on.
+ * Returns the same stepLog unchanged when already within the limit, to avoid an
+ * unnecessary allocation on the common case.
+ */
+function boundStepLogForStorage(stepLog: StepLog, maxElements: number): StepLog {
+  const elements = stepLog.observation.interactiveElements;
+  if (elements.length <= maxElements) {
+    return stepLog;
+  }
+  return {
+    ...stepLog,
+    observation: {
+      ...stepLog.observation,
+      interactiveElements: capPreservingEnds(elements, maxElements, MAX_STORED_INTERACTIVE_ELEMENTS_KEEP_FIRST),
+    },
+  };
+}
 
 function toDomainDiscoveryDiagnostics(
   discovery: DomainDiscoveryResult,
@@ -52,6 +84,14 @@ export async function runTask(params: {
   initialNavigationTimeoutMs?: number;
   actionNavigationTimeoutMs?: number;
   /**
+   * Overridable for tests; defaults to MAX_STORED_STEPS / MAX_STORED_INTERACTIVE_ELEMENTS_
+   * PER_OBSERVATION (src/config/captureLimits.ts). Bound what's *stored* in the response's
+   * steps[]/observation.interactiveElements -- never the live observation the reasoning/
+   * validation loop itself uses to decide and validate actions.
+   */
+  maxStoredSteps?: number;
+  maxStoredInteractiveElementsPerObservation?: number;
+  /**
    * Optional, opt-in bounded model call used only as a fallback for a semantic_page_match
    * criterion the deterministic lexical evaluator could not already satisfy (most notably
    * across objective-language/page-language pairs) -- see
@@ -77,6 +117,9 @@ export async function runTask(params: {
   // so a misconfigured value fails clearly at boot rather than per-run.
   const initialNavigationTimeoutMs = params.initialNavigationTimeoutMs ?? readInitialNavigationTimeoutMs();
   const actionNavigationTimeoutMs = params.actionNavigationTimeoutMs ?? readActionNavigationTimeoutMs();
+  const maxStoredSteps = params.maxStoredSteps ?? readMaxStoredSteps();
+  const maxStoredInteractiveElementsPerObservation =
+    params.maxStoredInteractiveElementsPerObservation ?? readMaxStoredInteractiveElementsPerObservation();
 
   // startUrl is always required to be http/https and parseable, defense-in-depth alongside
   // the request schema's own "format": "uri" check (this engine can be called directly, as
@@ -237,7 +280,7 @@ export async function runTask(params: {
     const allowedDomainsUsed = discovery.trustedDomains.map((entry) => entry.hostname);
     const effectiveTask: ResolvedTaskRequest = { ...task, allowedDomains: allowedDomainsUsed };
 
-    const steps: StepLog[] = [];
+    let steps: StepLog[] = [];
     let terminal: TerminalStatus | undefined;
     let finishReason = "loop_exhausted";
 
@@ -251,7 +294,15 @@ export async function runTask(params: {
         actionNavigationTimeoutMs,
         semanticVerifier,
       });
-      steps.push(outcome.stepLog);
+      // Bounded for storage only, after everything that needs the step's *live*,
+      // unbounded observation (decision validation, journey_path capture) has already run
+      // against outcome.stepLog itself -- see boundStepLogForStorage's own comment.
+      steps = appendBoundedPreservingEnds(
+        steps,
+        boundStepLogForStorage(outcome.stepLog, maxStoredInteractiveElementsPerObservation),
+        maxStoredSteps,
+        MAX_STORED_STEPS_KEEP_FIRST,
+      );
       memorySamples = recordMemorySample(memorySamples, "step", state.stepCount);
       if (outcome.terminal) {
         terminal = outcome.terminal;
