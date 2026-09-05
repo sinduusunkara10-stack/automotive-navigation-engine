@@ -26,6 +26,19 @@ const MEMORY_SAFE_LAUNCH_ARGS = [
   "--no-first-run",
 ];
 
+// --disable-gpu (above) only turns off hardware acceleration -- WebGL content still gets
+// software-rasterized (e.g. via SwiftShader) and its context/texture/framebuffer memory is
+// still allocated. These two flags make canvas.getContext("webgl"/"webgl2") return null
+// instead, so that allocation never happens at all. Applied only under
+// LOW_MEMORY_BROWSER_MODE (see readLowMemoryBrowserMode) since it can visibly break a
+// WebGL-rendered page (e.g. a 3D viewer) -- see docs/architecture.md "Low-memory browser
+// mode".
+const WEBGL_DISABLE_LAUNCH_ARGS = ["--disable-webgl", "--disable-webgl2"];
+
+export function buildLaunchArgs(lowMemoryMode: boolean): string[] {
+  return lowMemoryMode ? [...MEMORY_SAFE_LAUNCH_ARGS, ...WEBGL_DISABLE_LAUNCH_ARGS] : MEMORY_SAFE_LAUNCH_ARGS;
+}
+
 function createSemanticVerifier(env: NodeJS.ProcessEnv): SemanticCriterionVerifier | undefined {
   if (env.REASONING_PROVIDER?.trim() !== "claude") {
     return undefined;
@@ -43,7 +56,7 @@ export interface RunnerBrowser {
 }
 
 function defaultLaunchBrowser(): Promise<RunnerBrowser> {
-  return chromium.launch({ args: MEMORY_SAFE_LAUNCH_ARGS });
+  return chromium.launch({ args: buildLaunchArgs(readLowMemoryBrowserMode(process.env)) });
 }
 
 export async function executeTaskAsync(
