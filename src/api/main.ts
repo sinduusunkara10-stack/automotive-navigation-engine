@@ -1,8 +1,14 @@
 import type { Server } from "node:http";
 import { createApiServer } from "./server.js";
 import { MissingApiTokenError } from "./auth.js";
+import { checkCgroupMemoryAvailability, formatCgroupMemoryAvailabilityLogLine } from "../config/cgroupMemoryDiagnostic.js";
 
 const port = Number(process.env.PORT ?? 3000);
+
+// Read-only, one-time investigation of whether this container exposes cgroup memory
+// accounting -- see docs/architecture.md "Container memory diagnostic (startup only)".
+// Never throws, never affects startup; does not add any memory circuit breaker.
+console.log(formatCgroupMemoryAvailabilityLogLine(checkCgroupMemoryAvailability()));
 
 let server: Server;
 try {
