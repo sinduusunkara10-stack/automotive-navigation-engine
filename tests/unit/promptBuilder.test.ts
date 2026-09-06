@@ -456,8 +456,15 @@ test("REGRESSION: the default policy (reject_optional) instructs the model to pr
   const context = buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" });
   const prompt = buildReasoningPrompt(context);
   assert.match(prompt.system, /"reject_optional"/);
-  assert.match(prompt.system, /decline or continue without granting/i);
+  assert.match(prompt.system, /decline, reject optional consent, or.{0,10}continue without accepting/i);
   assert.match(prompt.system, /never click a control whose purpose is to grant broad or optional consent/i);
+});
+
+test("REGRESSION: reject_optional explicitly prefers a decline-and-continue control over a manage/settings control, even when both are present", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" });
+  const prompt = buildReasoningPrompt(context);
+  assert.match(prompt.system, /choose that control over one whose purpose is to manage\/customize consent settings/i);
+  assert.match(prompt.system, /not a substitute for a direct decline-and-continue control/i);
 });
 
 test("REGRESSION: do_not_interact forbids clicking any consent/tracking-preference control at all, even to clear a blocker", () => {

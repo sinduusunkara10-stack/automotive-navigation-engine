@@ -290,6 +290,56 @@ configurator on separate subdomains) inherently starts each with fresh, empty st
 cookies set on a shared parent domain may still be present -- this snapshot lets a caller confirm
 that empirically for a real run instead of the engine having to guess at or assert it.
 
+### Blocker-signature persistence tracking
+
+A follow-up production incident showed a gap in the recovery above: a consent overlay was
+"dismissed" via a control that succeeded mechanically but never actually cleared the overlay,
+after which four different candidate targets were each intercepted by the same still-present
+obstruction, spending a reasoning-provider call on each before `stale_target_recovery_exhausted`
+was finally reached. Two related problems, both purely generic, no consent-specific detection:
+
+- A click's *mechanical* success (no Playwright error) was the only signal ever used to decide
+  whether a blocking overlay had been cleared -- never re-verified against the control it was
+  actually blocking.
+- Each newly-proposed candidate target spent a fresh reasoning call, even when the *page state*
+  causing the failure (the intercepting element itself) had not changed at all since the last
+  attempt.
+
+`RunState.lastBlockerTargetId`/`lastBlockerSignature`/`blockerSignatureRepeatCount`
+(`src/core/state.ts`) track whichever element most recently failed as covered/intercepted, and a
+compact, generic fingerprint of whatever is intercepting it --
+`ElementState.coveredBySignature` (`src/observation/observationBuilder.ts`), built purely from
+the intercepting element's own tag/role/trimmed text via the same `elementFromPoint` hit-test
+`covered` already uses, never a brand/vendor-specific selector.
+
+`src/core/loop.ts` consults this at two points, both re-verifying the tracked target's *live*
+`covered` state directly rather than trusting any click's mechanical success:
+
+- **Proactively**, at the top of a step, if nothing is yet tracked: whichever covered element (if
+  any) the fresh observation already shows becomes the tracked blocker, so a subsequent
+  dismiss-type click's actual effect gets verified next step regardless of whether that click
+  itself ever fails.
+- **Before spending a reasoning call** (both the very first decision of a step, and the
+  pre-dispatch revalidation loop's own retries): if the tracked target is still covered by the
+  *exact same* signature as last time, one repeat is still allowed (a provider always gets at
+  least one chance to react); a second consecutive occurrence of the identical signature skips
+  the reasoning call entirely and is recorded as a deterministic stale-target occurrence instead,
+  feeding the *same* `consecutiveStaleTargetFailures` ceiling the existing bounded recovery above
+  already uses -- a permanently stuck overlay still reaches `stale_target_recovery_exhausted`
+  exactly as before, just without spending every remaining reasoning call finding that out.
+
+Tracking clears the moment the target is confirmed no longer covered, or covered by a visibly
+different element (a different signature) -- never assumed cleared just because some click
+happened to succeed. This applies identically to a consent overlay, a loading/busy panel, or any
+other obstruction: the mechanism never inspects control text or purpose, only the intercepting
+element's own generic identity.
+
+Separately, `safety.consentInteractionPolicy`'s `"reject_optional"` system-prompt clause
+(`src/reasoning/promptBuilder.ts`) was strengthened to explicitly state that a decline-and-continue
+control is preferred over a manage/settings control even when both are visible -- still a
+plain-language instruction to the model, not a keyword-matched or enforced choice, consistent with
+this mechanism's existing design.
+
 ## 6. Reasoning layer
 
 `src/reasoning` is a pluggable client boundary behind one interface, `ReasoningProvider`

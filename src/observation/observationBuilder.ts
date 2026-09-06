@@ -278,6 +278,17 @@ export interface ElementState {
   visible: boolean;
   disabled: boolean;
   covered: boolean;
+  /**
+   * A compact, generic fingerprint of whatever element is currently intercepting this
+   * one's hit-test point -- present only when covered is true. Built purely from the
+   * intercepting element's own tag/role/trimmed text (the same generic ingredients
+   * accessibleName below already uses), never from any site-specific selector or
+   * vendor/CMP attribute. Lets a caller compare two covered readings of the *same* target
+   * taken at different times and recognise whether the same obstruction is still present
+   * versus a different one now sitting there -- see core/loop.ts's blocker-persistence
+   * tracking (RunState.lastBlockerSignature).
+   */
+  coveredBySignature?: string;
   /** True only when the element's own frame could not be resolved/evaluated at all. */
   frameUnavailable: boolean;
   actionable: boolean;
@@ -299,6 +310,7 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
     const disabled = el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true";
 
     let covered = false;
+    let coveredBySignature: string | undefined;
     if (visible) {
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
@@ -308,6 +320,11 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
       if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
         const topEl = document.elementFromPoint(cx, cy);
         covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
+        if (covered && topEl) {
+          const topElRole = topEl.getAttribute("role") ?? topEl.tagName.toLowerCase();
+          const topElText = (topEl.getAttribute("aria-label")?.trim() || topEl.textContent?.trim() || "").slice(0, 60);
+          coveredBySignature = `${topEl.tagName.toLowerCase()}|${topElRole}|${topElText}`;
+        }
       }
     }
 
@@ -319,6 +336,7 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
       visible,
       disabled,
       covered,
+      ...(coveredBySignature ? { coveredBySignature } : {}),
       role,
       accessibleName,
       ...(destinationUrl ? { destinationUrl } : {}),

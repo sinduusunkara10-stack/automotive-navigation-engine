@@ -157,6 +157,93 @@ export async function runStep(params: {
     };
   }
 
+  // Generic obstruction-persistence check (see RunState.lastBlocker* fields): if the
+  // target that most recently failed as covered/intercepted is, per a fresh, direct
+  // re-check, still covered by the exact same intercepting element, nothing about the
+  // page has changed since that failure -- a fresh reasoning call is likely to just
+  // encounter the same obstruction again under a different target, exactly as the
+  // reported production incident did across four different targets. One repeat is always
+  // allowed (a provider gets one chance to react); a second consecutive occurrence of the
+  // identical signature skips the reasoning call entirely and is recorded as a
+  // deterministic stale-target outcome instead -- feeding the same
+  // consecutiveStaleTargetFailures ceiling maxSteps/maxBacktracks-style hard limits
+  // already use, so a permanently stuck overlay still exhausts and stops the run (item 6),
+  // just without spending further reasoning-provider calls to discover that. Keyed only on
+  // the intercepting element's own generic signature, never on what kind of overlay it is
+  // -- applies identically to consent and non-consent obstructions (item 8).
+  if (state.lastBlockerTargetId && state.lastBlockerSignature) {
+    const recheck = await readElementState(page, state.lastBlockerTargetId);
+    const sameBlockerStillPresent = recheck.covered && recheck.coveredBySignature === state.lastBlockerSignature;
+    if (sameBlockerStillPresent && state.blockerSignatureRepeatCount >= 1) {
+      const blockedTargetId = state.lastBlockerTargetId;
+      state.consecutiveStaleTargetFailures += 1;
+      const staleTargetExhausted = state.consecutiveStaleTargetFailures > MAX_STALE_TARGET_RECOVERY_ATTEMPTS;
+      const forcedAction: SelectedAction = { type: "click", target: blockedTargetId };
+      state.recordAction(forcedAction);
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "stale_target_recovery",
+          severity: staleTargetExhausted ? "critical" : "warning",
+          pageUrl: observation.url,
+          actionType: "click",
+          targetElementId: blockedTargetId,
+          message: staleTargetExhausted
+            ? `The same obstruction (intercepting-element signature unchanged) persisted across ` +
+              `${state.consecutiveStaleTargetFailures} consecutive occurrences, limit ` +
+              `${MAX_STALE_TARGET_RECOVERY_ATTEMPTS}; giving up without spending another reasoning call.`
+            : `The same obstruction (intercepting-element signature unchanged) is still present; ` +
+              `skipping a reasoning call against an unchanged blocked page state.`,
+          recoverable: !staleTargetExhausted,
+          stoppedRun: staleTargetExhausted,
+        });
+      }
+      const stepLog = buildStepLog({
+        stepIndex,
+        observation,
+        decision:
+          "Skipped a reasoning call: the element that intercepted the previous attempt still blocks the same target.",
+        selectedAction: forcedAction,
+        actionResult: { success: false, staleTarget: true, error: "persistent_blocker_signature_unchanged" },
+        satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+        safetyFlags: ["persistent_blocker_detected"],
+        reObservationAttempted: false,
+        recoveryAttempts: 0,
+      });
+      recordJourneyPathEntry(captures, task.captureModules, stepLog);
+      return {
+        stepLog,
+        ...(staleTargetExhausted
+          ? { terminal: "failure" as TerminalStatus, finishReason: "stale_target_recovery_exhausted" }
+          : {}),
+      };
+    }
+    if (sameBlockerStillPresent) {
+      state.blockerSignatureRepeatCount += 1;
+    } else {
+      state.lastBlockerTargetId = undefined;
+      state.lastBlockerSignature = undefined;
+      state.blockerSignatureRepeatCount = 0;
+    }
+  } else {
+    // Nothing tracked yet: proactively pick up a covered element already visible in this
+    // fresh observation, if any, so the *actual* effect of whatever the model does next
+    // (including a click that dismisses/resolves it and mechanically "succeeds", per item
+    // 2) can be verified next step -- never trusting mechanical click success alone as
+    // proof the obstruction is gone. Deliberately the first covered element found, not a
+    // relevance-scored pick: keeping this generic and simple over clever, consistent with
+    // "smallest fix". No consent-specific detection anywhere in this branch (item 8).
+    const coveredElement = observation.interactiveElements.find((el) => el.covered);
+    if (coveredElement) {
+      const liveState = await readElementState(page, coveredElement.id);
+      if (liveState.covered && liveState.coveredBySignature) {
+        state.lastBlockerTargetId = coveredElement.id;
+        state.lastBlockerSignature = liveState.coveredBySignature;
+        state.blockerSignatureRepeatCount = 0;
+      }
+    }
+  }
+
   let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
 
   // Before dispatching a click, revalidate the target against the *live* page rather than
@@ -189,12 +276,25 @@ export async function runStep(params: {
 
   let reObservationAttempted = false;
   let recoveryAttempts = 0;
-  while (
-    effectiveAction.type === "click" &&
-    effectiveAction.target &&
-    recoveryAttempts < MAX_STALE_TARGET_RECOVERY_ATTEMPTS &&
-    !(await readElementState(page, effectiveAction.target)).actionable
-  ) {
+  // Local to this one step's retry budget (distinct from RunState.lastBlockerSignature's
+  // cross-step tracking above): if the exact same intercepting element blocks two
+  // consecutive candidate targets *within this same while loop*, a further reasoning call
+  // is unlikely to help -- stop retrying here rather than spending the full
+  // MAX_STALE_TARGET_RECOVERY_ATTEMPTS reasoning calls probing different targets all
+  // blocked by an unchanged page state. The loop still falls through to dispatch the last
+  // decision, exactly as before -- only the number of reasoning calls spent getting there
+  // changes.
+  let withinStepBlockerSignature: string | undefined;
+  while (effectiveAction.type === "click" && effectiveAction.target && recoveryAttempts < MAX_STALE_TARGET_RECOVERY_ATTEMPTS) {
+    const liveState = await readElementState(page, effectiveAction.target);
+    if (liveState.actionable) {
+      break;
+    }
+    if (liveState.covered && liveState.coveredBySignature && liveState.coveredBySignature === withinStepBlockerSignature) {
+      break;
+    }
+    withinStepBlockerSignature = liveState.coveredBySignature;
+
     reObservationAttempted = true;
     recoveryAttempts += 1;
     const freshObservation = await buildObservation(page);
@@ -268,6 +368,26 @@ export async function runStep(params: {
   if (!actionResult.success && actionResult.staleTarget) {
     state.consecutiveStaleTargetFailures += 1;
     staleTargetExhausted = state.consecutiveStaleTargetFailures > MAX_STALE_TARGET_RECOVERY_ATTEMPTS;
+
+    // Independently re-checks whether this specific failure was actually an obstruction
+    // (covered/intercepted) rather than trusting actions/click.ts's own internal category
+    // classification -- reuses the exact same generic readElementState/covered mechanism
+    // already used elsewhere in this file, so no new field is needed anywhere in the
+    // response contract. Only a covered failure has a signature to track; a detached/
+    // hidden/timeout/frame-unavailable stale failure clears any prior tracking instead,
+    // since there is nothing to compare against for those categories (item 3, item 7).
+    if (effectiveAction.type === "click" && effectiveAction.target) {
+      const postFailureCheck = await readElementState(page, effectiveAction.target);
+      if (postFailureCheck.covered && postFailureCheck.coveredBySignature) {
+        state.lastBlockerTargetId = effectiveAction.target;
+        state.lastBlockerSignature = postFailureCheck.coveredBySignature;
+      } else {
+        state.lastBlockerTargetId = undefined;
+        state.lastBlockerSignature = undefined;
+        state.blockerSignatureRepeatCount = 0;
+      }
+    }
+
     if (task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         stepIndex,
