@@ -424,6 +424,10 @@ npm run test:api    # runs the API integration tests in isolation
 | `MAX_STORED_STEPS` | No | Whole-run cap on `result.steps`, preserving the first 5 and the most recent. Default `50`. |
 | `MAX_STORED_INTERACTIVE_ELEMENTS_PER_OBSERVATION` | No | Per-step cap on `observation.interactiveElements` in the *stored* response only (never the live decision-making loop). Default `100`. |
 | `LOW_MEMORY_BROWSER_MODE` | No | Opt-in; only the literal string `"true"` (case-insensitive) enables it. Blocks `image`/`media`/`font` network requests and disables service worker registration for the run's page, to reduce Chromium's own memory footprint. Never affects document/script/xhr/fetch navigation or GA4/dataLayer capture. Default off. See `docs/architecture.md` §14 "Low-memory browser mode". |
+| `MEMORY_CIRCUIT_BREAKER_ENABLED` | No | Opt-in; only the literal string `"true"` (case-insensitive) enables it. Samples this container's own cgroup memory and stops a run safely (preserving captured evidence) before the container's OS-level OOM kill. Default off. See `docs/architecture.md` §15 "Container memory circuit breaker". |
+| `MEMORY_CIRCUIT_BREAKER_THRESHOLD_FRACTION` | No | Fraction of the container's memory limit at which the breaker above stops a run. Default `0.75`. |
+| `MEMORY_CIRCUIT_BREAKER_SAMPLE_INTERVAL_MS` | No | How often (ms) the breaker above samples container memory. Default `3000`. |
+| `MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES` | No | Overrides the container memory limit the breaker above compares usage against. Default: the container's own cgroup-reported limit. |
 
 Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is gitignored).
 **In any deployed environment, all of the above come from the hosting platform's own secret

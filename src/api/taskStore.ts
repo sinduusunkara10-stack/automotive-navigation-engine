@@ -1,4 +1,4 @@
-import type { TaskResponse } from "../types/task-response.js";
+import type { ContainerMemoryDiagnostics, TaskResponse } from "../types/task-response.js";
 
 export type RunStatus = "running" | "completed" | "failed" | "stale";
 
@@ -22,6 +22,13 @@ export interface RunRecord {
   staleReason?: StaleReason;
   /** The workerIdentity.ts WORKER_ID of the process that last created/heartbeated this run. */
   workerId: string;
+  /**
+   * The opt-in container-memory circuit breaker's latest sample for this still-running (or
+   * just-stopped) run -- see src/safety/containerMemoryGuard.ts. Refreshed on each
+   * heartbeat while MEMORY_CIRCUIT_BREAKER_ENABLED is set; absent otherwise. This is a
+   * single latest snapshot, not a growing history.
+   */
+  latestContainerMemorySample?: ContainerMemoryDiagnostics;
 }
 
 /**
@@ -38,6 +45,11 @@ export interface TaskStore {
   getRun(runId: string): Promise<RunRecord | undefined>;
   completeRun(runId: string, result: TaskResponse): Promise<void>;
   failRun(runId: string, error: string): Promise<void>;
-  /** Refreshes updatedAt (and this process's ownership) for an actively-running run. */
-  heartbeat(runId: string): Promise<void>;
+  /**
+   * Refreshes updatedAt (and this process's ownership) for an actively-running run.
+   * Optionally also persists the container-memory circuit breaker's latest sample
+   * (containerMemorySample) -- passed only when MEMORY_CIRCUIT_BREAKER_ENABLED is set;
+   * omitted otherwise, leaving any previously-stored sample untouched.
+   */
+  heartbeat(runId: string, containerMemorySample?: ContainerMemoryDiagnostics): Promise<void>;
 }

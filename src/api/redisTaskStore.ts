@@ -86,11 +86,14 @@ export function createRedisTaskStore(client: RedisLike, timing: TaskStoreTimingC
       await write(record);
     },
 
-    async heartbeat(runId) {
+    async heartbeat(runId, containerMemorySample) {
       const record = await read(runId);
       if (!record || record.status !== "running") return;
       record.updatedAt = new Date().toISOString();
       record.workerId = WORKER_ID;
+      if (containerMemorySample) {
+        record.latestContainerMemorySample = containerMemorySample;
+      }
       await write(record);
     },
   };

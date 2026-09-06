@@ -1162,3 +1162,152 @@ code change, redeploy, n8n change, or Redis/persistence change is required to to
 either way. Roll back by unsetting the variable (or setting it to any value other than
 `"true"`) and redeploying — matching the same unset-to-disable rollback pattern already
 established for `TASK_STORE` in §13.
+
+## 15. Container memory circuit breaker
+
+Even with §14's WebGL disabling deployed, a run can still exceed a container's memory
+ceiling: neither §13 nor §14 can measure or bound the Chromium *process's* own memory
+directly (Playwright exposes no such API — see §14's own investigation findings), so any
+mitigation targeting a *specific* resource type or rendering capability is inherently a
+best guess at what a given page happens to be heavy on. This section adds a last-resort,
+generic backstop: rather than trying to reduce memory further, it detects the *container's*
+total memory approaching its own ceiling and stops the run safely, before the OS's own OOM
+killer does.
+
+### Feasibility: confirmed via a prerequisite, separate, no-op diagnostic first
+
+Before implementing this breaker, a read-only startup diagnostic (`src/config/
+cgroupMemoryDiagnostic.ts`, logged once by `src/api/main.ts`) confirmed whether the
+deployed container actually exposes readable Linux cgroup memory accounting — the exact
+mechanism a Render (or any containerized) instance's own memory ceiling is enforced
+through. Confirmed on Render:
+
+```
+[startup] cgroup memory diagnostic: available (v2) -- current=/sys/fs/cgroup/memory.current
+(120397824 bytes), limit=/sys/fs/cgroup/memory.max (536870912 bytes)
+```
+
+This breaker (`src/safety/containerMemoryGuard.ts`) reuses that exact same read (cgroup v2
+`memory.current`/`memory.max`, falling back to cgroup v1
+`memory.usage_in_bytes`/`memory.limit_in_bytes`) rather than duplicating the logic.
+
+### Design
+
+Opt-in via `MEMORY_CIRCUIT_BREAKER_ENABLED=true` (`src/config/
+containerMemoryCircuitBreakerConfig.ts`). Off by default — zero behavior change unless
+explicitly enabled.
+
+- **Sampling** happens in `src/api/runner.ts`, on its own independent timer
+  (`MEMORY_CIRCUIT_BREAKER_SAMPLE_INTERVAL_MS`, default 3000ms) — decoupled from the
+  loop's own step cadence, since a step can take much longer or shorter than the sampling
+  interval. An immediate sample is also taken at run start, so even a very fast run gets
+  at least one reading.
+- **Breach detection** (`readContainerMemory`, `src/safety/containerMemoryGuard.ts`):
+  current usage ≥ `MEMORY_CIRCUIT_BREAKER_THRESHOLD_FRACTION` (default 0.75) ×
+  the container's limit (cgroup-reported `memory.max`/`memory.limit_in_bytes`, or
+  `MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES` if set as an override). Pure and synchronous —
+  never throws.
+- **Enforcement** is checked once per step, at the exact same checkpoint
+  `checkLimitsBreach` (maxSteps/maxBacktracks/maxDuration) already uses in
+  `src/core/loop.ts` — a cooperative check (`isMemoryThresholdBreached`), not a preemptive
+  interrupt of an in-flight action. This means detection is prompt (every sample interval)
+  but enforcement can be delayed by however long the current step's own action takes to
+  resolve — see "Known limitations" below.
+- **Stopping safely**: reusing the *exact same* mechanism as `max_steps_reached`/
+  `max_backtracks_reached`/`max_duration_reached` — a forced `stop_failure` action,
+  producing a normal (bounded) `StepLog`, a `captures.errors` entry (category
+  `limit_stop`), and a new terminal status, `container_memory_threshold_reached`
+  (`TaskResponse.status`), with `statusReason`/`diagnostics.finishReason` set to the
+  distinct string `"container_memory_threshold"`. Because this is the same path every
+  other hard limit already uses, page/browser closing and evidence preservation are
+  inherited for free from the existing `runner.ts` cleanup chain and the loop's own
+  bounded `steps[]`/`captures` accumulation — no new closing or evidence-preservation
+  logic was needed.
+- **Redis persistence**: the run's `TaskStore` record (`src/api/taskStore.ts`) gains an
+  optional `latestContainerMemorySample` field, refreshed via an extended
+  `TaskStore.heartbeat(runId, containerMemorySample?)` on every sample tick — a single
+  latest snapshot, not a growing history. The completed `TaskResponse` itself also carries
+  the same latest sample as `diagnostics.containerMemory` (response schema `1.9.0`),
+  attached in `runner.ts` after `runTask()` returns, following the exact precedent
+  `diagnostics.resourceRouting` (§14) already established for post-hoc diagnostics
+  attachment.
+- **Safe failure modes** (explicit requirements, all satisfied):
+  - No readable cgroup files → `available: false`, `breached` always `false` — the
+    breaker is inert, never affects the task.
+  - A sampling exception (e.g. a file disappearing mid-run) is caught per-tick; only that
+    tick's effect is lost, never the run or the service.
+  - A `TaskStore.heartbeat` write failure during sampling is fire-and-forget
+    (`.catch(() => {})`), matching the existing heartbeat's own discipline — a Redis
+    hiccup never blocks or crashes a run.
+
+### Files changed
+
+`src/config/containerMemoryCircuitBreakerConfig.ts` (new), `src/safety/
+containerMemoryGuard.ts` (new), `src/api/runner.ts`, `src/api/taskStore.ts`,
+`src/api/inMemoryTaskStore.ts`, `src/api/redisTaskStore.ts`, `src/core/loop.ts`,
+`src/core/engine.ts`, `src/types/task-request.ts`, `src/types/task-response.ts`,
+`schemas/task-request.schema.json`, `schemas/task-response.schema.json`.
+
+### Tests
+
+- `tests/unit/containerMemoryCircuitBreakerConfig.test.ts` — env-var defaults, bounds,
+  and fail-fast validation.
+- `tests/unit/containerMemoryGuard.test.ts` — pure breach-detection logic against
+  injected readings: unavailable never breaches, threshold math, override precedence,
+  a missing/non-positive limit never breaches.
+- `tests/integration/containerMemoryCircuitBreaker.test.ts` — the loop-level mechanism
+  directly (`runTask({..., isMemoryThresholdBreached})`) against a real fixture: a
+  breach stops the run on the very next step with the new status/statusReason, preserves
+  `journey_path`/`errors` evidence already captured, and an always-false signal never
+  affects a run (no false positives).
+- `tests/integration/containerMemoryCircuitBreakerRunner.test.ts` — the full
+  `runner.ts` wiring against **real** cgroup files (a deliberately tiny
+  `MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES` override guarantees an immediate, deterministic
+  breach against this process's actual current usage — no fake filesystem needed):
+  `diagnostics.containerMemory` is attached to the completed result, and the sample is
+  persisted to the `TaskStore` record via `heartbeat`. Skips gracefully (not a failure) if
+  the running environment doesn't expose readable cgroup memory files at all, matching
+  `tests/integration/redisRealServer.test.ts`'s convention for an unavailable real
+  dependency. A second test confirms `diagnostics.containerMemory` stays entirely absent
+  when the breaker is disabled (the default).
+
+### Schema impact
+
+Additive only. Response `schemaVersion` `1.8.0` → `1.9.0`: `status` gained the enum value
+`"container_memory_threshold_reached"`, and `diagnostics.containerMemory` (new
+`$defs/containerMemoryDiagnostics`) was added, present only when the breaker was enabled
+for that run. Cascaded per this repo's convention: request `outputSchemaVersion` `1.8.0` →
+`1.9.0`, request `schemaVersion` `1.9.0` → `1.10.0`. No existing field was removed,
+renamed, or had its meaning changed; when the breaker is disabled (the default), a
+`TaskResponse` is byte-for-byte unchanged.
+
+### Known limitations
+
+- **Enforcement granularity**: sampling is prompt (every `MEMORY_CIRCUIT_BREAKER_SAMPLE_
+  INTERVAL_MS`), but the actual stop only happens at the next per-step checkpoint — a
+  single step whose own action takes long enough (e.g. a slow navigation) can still let
+  memory climb past the threshold, or in the worst case past the container's real ceiling,
+  before the loop gets a chance to react. This reduces, but does not eliminate, the risk of
+  an uncontrolled OOM kill.
+- **No attribution**: a total-container-memory reading cannot say *what* is consuming
+  memory (Chromium vs. Node, or which subsystem within Chromium) — it is a prevention
+  mechanism, not a diagnostic one. See §14's own investigation findings on why Chromium's
+  process memory has never been directly measurable via Playwright.
+- **Deployment-environment assumption**: relies on the container actually exposing
+  readable cgroup files at the expected paths — confirmed on Render (see the diagnostic
+  log above), but not guaranteed on every possible deployment target. Fails safe (inert,
+  never breaches) rather than failing loudly when absent.
+- **Not implemented, per explicit scope**: no additional browser-level memory
+  optimizations, no Tier 3 worker/API process separation, no n8n changes.
+
+### Deployment and rollback
+
+Deploy with `MEMORY_CIRCUIT_BREAKER_ENABLED` **unset** first — zero behavior change.
+Enable via `MEMORY_CIRCUIT_BREAKER_ENABLED=true` as a Render environment variable; tune
+`MEMORY_CIRCUIT_BREAKER_THRESHOLD_FRACTION` / `MEMORY_CIRCUIT_BREAKER_SAMPLE_INTERVAL_MS`
+/ `MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES` only if the defaults (0.75, 3000ms, cgroup-reported
+limit) don't fit a specific deployment. No code change, redeploy of other services, n8n
+change, or Redis-persistence-shape change is required to toggle it either way. Roll back
+by unsetting `MEMORY_CIRCUIT_BREAKER_ENABLED` (or setting it to anything other than
+`"true"`) and redeploying — the same unset-to-disable pattern already established for
+`TASK_STORE` (§13) and `LOW_MEMORY_BROWSER_MODE` (§14).
