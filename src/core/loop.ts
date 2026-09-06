@@ -6,7 +6,7 @@ import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation, readElementState } from "../observation/observationBuilder.js";
 import type { Decision, ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
-import { checkLimitsBreach, validateDecision, type SafetyCheckResult } from "../safety/index.js";
+import { checkLimitsBreach, validateDecision, type LimitBreach, type SafetyCheckResult } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { diffDataLayer, readDataLayerSnapshot, type DataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
@@ -25,7 +25,8 @@ export type TerminalStatus =
   | "failure"
   | "max_steps_reached"
   | "max_backtracks_reached"
-  | "max_duration_reached";
+  | "max_duration_reached"
+  | "container_memory_threshold_reached";
 
 // Bounds both stages of blocker/stale-target recovery (item 4 of the fix): how many extra
 // decision/revalidation cycles a step's pre-dispatch check may spend before dispatching
@@ -49,8 +50,11 @@ export async function runStep(params: {
   reasoning: ReasoningProvider;
   actionNavigationTimeoutMs: number;
   semanticVerifier?: SemanticCriterionVerifier;
+  /** See runTask's own param of the same name (src/core/engine.ts). */
+  isMemoryThresholdBreached?: () => boolean;
 }): Promise<LoopStepOutcome> {
-  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs, semanticVerifier } = params;
+  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs, semanticVerifier, isMemoryThresholdBreached } =
+    params;
   const stepIndex = state.stepCount;
 
   let observation = await buildObservation(page);
@@ -102,7 +106,15 @@ export async function runStep(params: {
     task.limits,
   );
 
-  if (limitsBreach) {
+  // Checked only when no hard limit has already fired -- a run that has simultaneously
+  // exhausted, say, maxSteps and the memory threshold reports the pre-existing limit
+  // breach, since that check already ran above and takes precedence by evaluation order.
+  const memoryThresholdBreached = !limitsBreach && (isMemoryThresholdBreached?.() ?? false);
+
+  if (limitsBreach || memoryThresholdBreached) {
+    // Non-null: this branch only runs when limitsBreach || memoryThresholdBreached, so
+    // when memoryThresholdBreached is false, limitsBreach must be truthy here.
+    const breachReason: string = memoryThresholdBreached ? "container_memory_threshold" : (limitsBreach as LimitBreach);
     const forcedAction: SelectedAction = { type: limitsBreach === "max_backtracks" ? "stop_blocked" : "stop_failure" };
     state.recordAction(forcedAction);
     if (task.captureModules.includes("errors")) {
@@ -111,7 +123,9 @@ export async function runStep(params: {
         category: "limit_stop",
         severity: "critical",
         pageUrl: observation.url,
-        message: `Hard limit reached: ${limitsBreach}.`,
+        message: memoryThresholdBreached
+          ? "Container memory circuit breaker threshold reached; stopping the run before the container's own memory limit is hit."
+          : `Hard limit reached: ${limitsBreach}.`,
         recoverable: false,
         stoppedRun: true,
       });
@@ -119,24 +133,27 @@ export async function runStep(params: {
     const stepLog = buildStepLog({
       stepIndex,
       observation,
-      decision: "Hard limit reached before another action could be taken.",
+      decision: memoryThresholdBreached
+        ? "Container memory circuit breaker threshold reached before another action could be taken."
+        : "Hard limit reached before another action could be taken.",
       selectedAction: forcedAction,
       actionResult: { success: true },
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
-      safetyFlags: [limitsBreach],
+      safetyFlags: [breachReason],
       reObservationAttempted: false,
       recoveryAttempts: 0,
     });
     recordJourneyPathEntry(captures, task.captureModules, stepLog);
     return {
       stepLog,
-      terminal:
-        limitsBreach === "max_steps"
+      terminal: memoryThresholdBreached
+        ? "container_memory_threshold_reached"
+        : limitsBreach === "max_steps"
           ? "max_steps_reached"
           : limitsBreach === "max_backtracks"
             ? "max_backtracks_reached"
             : "max_duration_reached",
-      finishReason: limitsBreach,
+      finishReason: breachReason,
     };
   }
 

@@ -14,7 +14,7 @@ const fixturesDir = join(__dirname, "..", "fixtures");
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.9.0",
+    schemaVersion: "1.10.0",
     taskId: "evidence-retention-task",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl,
@@ -38,7 +38,7 @@ function buildTask(startUrl: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.8.0",
+    outputSchemaVersion: "1.9.0",
   };
 }
 
@@ -121,7 +121,7 @@ test("observation.interactiveElements stored per step is bounded without affecti
   try {
     const page = await browser.newPage();
     const task: TaskRequest = {
-      schemaVersion: "1.9.0",
+      schemaVersion: "1.10.0",
       taskId: "evidence-retention-elements-task",
       objective: "Reach the success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -142,7 +142,7 @@ test("observation.interactiveElements stored per step is bounded without affecti
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.8.0",
+      outputSchemaVersion: "1.9.0",
     };
 
     const result = await runTask({ page, task, maxStoredInteractiveElementsPerObservation: 5 });

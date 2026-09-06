@@ -9,6 +9,14 @@ import type { TaskStore } from "./taskStore.js";
 import { recordMemorySample } from "../core/memoryDiagnostics.js";
 import { readLowMemoryBrowserMode } from "../config/lowMemoryBrowserConfig.js";
 import { attachLowMemoryResourceRouting } from "./browserResourceRouting.js";
+import {
+  readMemoryCircuitBreakerEnabled,
+  readMemoryCircuitBreakerLimitBytesOverride,
+  readMemoryCircuitBreakerSampleIntervalMs,
+  readMemoryCircuitBreakerThresholdFraction,
+} from "../config/containerMemoryCircuitBreakerConfig.js";
+import { readContainerMemory, type ContainerMemoryReading } from "../safety/containerMemoryGuard.js";
+import type { ContainerMemoryDiagnostics } from "../types/task-response.js";
 
 // Reduces Chromium's own memory footprint without touching anything that affects
 // rendering fidelity or multi-frame behavior (observationBuilder.ts depends on both being
@@ -37,6 +45,18 @@ const WEBGL_DISABLE_LAUNCH_ARGS = ["--disable-webgl", "--disable-webgl2"];
 
 export function buildLaunchArgs(lowMemoryMode: boolean): string[] {
   return lowMemoryMode ? [...MEMORY_SAFE_LAUNCH_ARGS, ...WEBGL_DISABLE_LAUNCH_ARGS] : MEMORY_SAFE_LAUNCH_ARGS;
+}
+
+export function toContainerMemoryDiagnostics(reading: ContainerMemoryReading): ContainerMemoryDiagnostics {
+  return {
+    enabled: true,
+    available: reading.available,
+    ...(reading.version ? { version: reading.version } : {}),
+    thresholdFraction: reading.thresholdFraction,
+    ...(reading.limitBytes !== undefined ? { limitBytes: reading.limitBytes } : {}),
+    ...(reading.currentBytes !== undefined ? { latestSampleBytes: reading.currentBytes } : {}),
+    breached: reading.breached,
+  };
 }
 
 function createSemanticVerifier(env: NodeJS.ProcessEnv): SemanticCriterionVerifier | undefined {
@@ -76,6 +96,41 @@ export async function executeTaskAsync(
   const heartbeat = setInterval(() => {
     void store.heartbeat(runId);
   }, heartbeatIntervalMs ?? 15000);
+  // Opt-in (MEMORY_CIRCUIT_BREAKER_ENABLED); a generic, brand-agnostic last resort that
+  // stops a run before the container's own OS-level OOM kill does -- see
+  // docs/architecture.md "Container memory circuit breaker". Off by default: zero
+  // behavior change, and a container that doesn't expose cgroup memory files (or any
+  // sampling/persistence failure) disables it safely rather than affecting the task.
+  const memoryBreakerEnabled = readMemoryCircuitBreakerEnabled(process.env);
+  let containerMemoryBreached = false;
+  let latestContainerMemoryDiagnostics: ContainerMemoryDiagnostics | undefined;
+  let memorySamplerInterval: ReturnType<typeof setInterval> | undefined;
+
+  if (memoryBreakerEnabled) {
+    const thresholdFraction = readMemoryCircuitBreakerThresholdFraction(process.env);
+    const limitBytesOverride = readMemoryCircuitBreakerLimitBytesOverride(process.env);
+    const sampleIntervalMs = readMemoryCircuitBreakerSampleIntervalMs(process.env);
+
+    const sampleOnce = (): void => {
+      try {
+        const reading = readContainerMemory({ thresholdFraction, limitBytesOverride });
+        latestContainerMemoryDiagnostics = toContainerMemoryDiagnostics(reading);
+        if (reading.breached) {
+          containerMemoryBreached = true;
+        }
+        // Fire-and-forget, same discipline as the heartbeat below: a Redis hiccup here
+        // must never block or crash the run.
+        void store.heartbeat(runId, latestContainerMemoryDiagnostics).catch(() => {});
+      } catch {
+        // A sampling failure (e.g. a cgroup file disappearing mid-run) disables the
+        // breaker's effect for this tick, never the task or the service.
+      }
+    };
+
+    sampleOnce();
+    memorySamplerInterval = setInterval(sampleOnce, sampleIntervalMs);
+  }
+
   try {
     const reasoning = createReasoningProvider();
     const semanticVerifier = createSemanticVerifier(process.env);
@@ -95,10 +150,14 @@ export async function executeTaskAsync(
         initialNavigationTimeoutMs,
         actionNavigationTimeoutMs,
         semanticVerifier,
+        isMemoryThresholdBreached: memoryBreakerEnabled ? () => containerMemoryBreached : undefined,
       });
     } finally {
       // Routing must be detached while the page is still open; page.close() is
       // best-effort cleanup and must never flip an otherwise-successful run to "failed".
+      // The memory sampler is stopped here too -- once runTask has returned, further
+      // sampling can no longer affect this run's own outcome.
+      clearInterval(memorySamplerInterval);
       await routing?.detach().catch(() => {});
       await page.close().catch(() => {});
     }
@@ -109,12 +168,16 @@ export async function executeTaskAsync(
     if (routing) {
       result.diagnostics.resourceRouting = routing.diagnostics();
     }
+    if (latestContainerMemoryDiagnostics) {
+      result.diagnostics.containerMemory = latestContainerMemoryDiagnostics;
+    }
     result.diagnostics.memory = recordMemorySample(result.diagnostics.memory ?? [], "after_cleanup");
     await store.completeRun(runId, result);
   } catch {
     await store.failRun(runId, "Task execution failed before a result could be produced.");
   } finally {
     clearInterval(heartbeat);
+    clearInterval(memorySamplerInterval);
     await browser?.close().catch(() => {});
   }
 }

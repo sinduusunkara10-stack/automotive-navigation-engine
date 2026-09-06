@@ -100,8 +100,16 @@ export async function runTask(params: {
    * evaluation as before this parameter existed.
    */
   semanticVerifier?: SemanticCriterionVerifier;
+  /**
+   * Opt-in (MEMORY_CIRCUIT_BREAKER_ENABLED), checked once per step alongside
+   * checkLimitsBreach -- see src/safety/containerMemoryGuard.ts. Sampling itself happens
+   * independently, on its own timer, in src/api/runner.ts (which owns Redis persistence);
+   * this is only a synchronous "has it already breached?" query, kept intentionally as
+   * narrow a surface as maxSteps/maxBacktracks already are.
+   */
+  isMemoryThresholdBreached?: () => boolean;
 }): Promise<TaskResponse> {
-  const { page, task, semanticVerifier } = params;
+  const { page, task, semanticVerifier, isMemoryThresholdBreached } = params;
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -293,6 +301,7 @@ export async function runTask(params: {
         reasoning,
         actionNavigationTimeoutMs,
         semanticVerifier,
+        isMemoryThresholdBreached,
       });
       // Bounded for storage only, after everything that needs the step's *live*,
       // unbounded observation (decision validation, journey_path capture) has already run
@@ -385,7 +394,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.8.0",
+    schemaVersion: "1.9.0",
     taskId: task.taskId,
     status,
     statusReason,

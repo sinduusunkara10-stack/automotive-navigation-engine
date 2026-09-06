@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "1.9.0",
+  "schemaVersion": "1.10.0",
   "taskId": "example-configurator-alternative-criteria-0001",
   "objective": "Enter the vehicle configurator, proceed through the configuration steps using default choices, and continue online: click the final completion control (e.g. a 'Continue Online' control, or an equivalent control in the page's own language). Confirm completion however the site itself signals it -- reaching the basket/checkout-entry page, or the completion control being clicked, or the site's own configuration-finished analytics event firing are all equally valid confirmation. Return the final URL reached.",
   "startUrl": "https://www.example-automotive-oem.com/",
@@ -71,7 +71,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.8.0",
+  "outputSchemaVersion": "1.9.0",
   "metadata": {
     "useCase": "configurator-journey-alternative-criteria",
     "requestedBy": "n8n-workflow-demo"

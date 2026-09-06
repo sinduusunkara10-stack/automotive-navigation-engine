@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.8.0\". Bumped from \"1.7.0\" to \"1.8.0\" because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.9.0\". Bumped from \"1.8.0\" to \"1.9.0\" because status gained the additive \"container_memory_threshold_reached\" enum value and diagnostics.containerMemory (see $defs/containerMemoryDiagnostics) was added: the opt-in container-memory circuit breaker (MEMORY_CIRCUIT_BREAKER_ENABLED) reports its latest generic Linux cgroup memory sample and whether it stopped the run before the container's own OS-level OOM kill. Present only when that breaker was enabled for a run. Purely diagnostic, generic container-memory evidence -- never anything about the page/task/brand being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.7.0\" to \"1.8.0\" earlier because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.8.0"
+      "const": "1.9.0"
     },
     "taskId": {
       "type": "string",
@@ -37,7 +37,8 @@
         "failure",
         "max_steps_reached",
         "max_backtracks_reached",
-        "max_duration_reached"
+        "max_duration_reached",
+        "container_memory_threshold_reached"
       ]
     },
     "statusReason": {
@@ -987,6 +988,53 @@
         },
         "resourceRouting": {
           "$ref": "#/$defs/resourceRoutingDiagnostics"
+        },
+        "containerMemory": {
+          "$ref": "#/$defs/containerMemoryDiagnostics"
+        }
+      }
+    },
+    "containerMemoryDiagnostics": {
+      "type": "object",
+      "description": "The opt-in container-memory circuit breaker's (MEMORY_CIRCUIT_BREAKER_ENABLED) latest sample and outcome, from generic Linux cgroup memory accounting (cgroup v2, falling back to v1) -- see docs/architecture.md 'Container memory circuit breaker'. Present only when that breaker was enabled for this run. A single latest snapshot, not a growing history. available: false means this container did not expose readable cgroup memory files, so the breaker was inert for the whole run (never breaches) rather than failing the task.",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "available",
+        "thresholdFraction",
+        "breached"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "const": true
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string",
+          "enum": ["v2", "v1"],
+          "description": "Which cgroup version's memory files were read."
+        },
+        "thresholdFraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "limitBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The container memory limit used (cgroup-reported, or MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES if set)."
+        },
+        "latestSampleBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The most recent cgroup current-usage reading, in bytes."
+        },
+        "breached": {
+          "type": "boolean",
+          "description": "Whether the latest sample was at or above thresholdFraction of limitBytes, causing the run to stop early via the container_memory_threshold_reached status."
         }
       }
     },

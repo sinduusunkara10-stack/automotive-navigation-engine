@@ -16,7 +16,7 @@ const TIMING = { ttlSeconds: 86400, staleThresholdMs: 90_000, heartbeatIntervalM
 
 function buildTask(startUrl: string, allowedDomains: string[]): TaskRequest {
   return {
-    schemaVersion: "1.9.0",
+    schemaVersion: "1.10.0",
     taskId: "runner-cleanup-task",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl,
@@ -40,7 +40,7 @@ function buildTask(startUrl: string, allowedDomains: string[]): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.8.0",
+    outputSchemaVersion: "1.9.0",
   };
 }
 

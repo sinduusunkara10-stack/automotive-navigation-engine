@@ -64,11 +64,14 @@ export function createInMemoryTaskStore(timing: TaskStoreTimingConfig): TaskStor
       record.updatedAt = new Date().toISOString();
     },
 
-    async heartbeat(runId) {
+    async heartbeat(runId, containerMemorySample) {
       const record = runs.get(runId);
       if (!record || record.status !== "running") return;
       record.updatedAt = new Date().toISOString();
       record.workerId = WORKER_ID;
+      if (containerMemorySample) {
+        record.latestContainerMemorySample = containerMemorySample;
+      }
     },
   };
 }

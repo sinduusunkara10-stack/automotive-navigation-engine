@@ -6,7 +6,8 @@ export type RunStatus =
   | "failure"
   | "max_steps_reached"
   | "max_backtracks_reached"
-  | "max_duration_reached";
+  | "max_duration_reached"
+  | "container_memory_threshold_reached";
 
 export interface InteractiveElement {
   id: string;
@@ -560,6 +561,25 @@ export interface ResourceRoutingDiagnostics {
   byResourceType: ResourceRoutingEntry[];
 }
 
+/**
+ * Present only when MEMORY_CIRCUIT_BREAKER_ENABLED was enabled for this run (src/config/
+ * containerMemoryCircuitBreakerConfig.ts, src/safety/containerMemoryGuard.ts). Reports the
+ * single latest sample taken before the run ended -- not a growing history -- from generic
+ * Linux cgroup memory accounting (cgroup v2, falling back to v1), never anything about the
+ * page/task/brand being run. `available: false` means this container did not expose
+ * readable cgroup memory files; the breaker is then always inert (never breaches) rather
+ * than failing the task.
+ */
+export interface ContainerMemoryDiagnostics {
+  enabled: true;
+  available: boolean;
+  version?: "v2" | "v1";
+  thresholdFraction: number;
+  limitBytes?: number;
+  latestSampleBytes?: number;
+  breached: boolean;
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
@@ -594,10 +614,16 @@ export interface Diagnostics {
    * absent when their own feature wasn't in play for a run.
    */
   resourceRouting?: ResourceRoutingDiagnostics;
+  /**
+   * The opt-in container-memory circuit breaker's latest sample and outcome -- see
+   * ContainerMemoryDiagnostics above. Absent when MEMORY_CIRCUIT_BREAKER_ENABLED wasn't
+   * set for this run (the default).
+   */
+  containerMemory?: ContainerMemoryDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.8.0";
+  schemaVersion: "1.9.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
