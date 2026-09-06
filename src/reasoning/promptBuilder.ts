@@ -40,9 +40,12 @@ function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): strin
     default:
       return (
         "This run's consent-interaction policy is \"reject_optional\": when clearing a blocking overlay is " +
-        "necessary, prefer a control whose semantic purpose is to decline or continue without granting " +
-        "optional/non-essential data collection; never click a control whose purpose is to grant broad or " +
-        "optional consent."
+        "necessary, prefer a control whose semantic purpose is to decline, reject optional consent, or " +
+        "continue without accepting. Choose that control over one whose purpose is to manage/customize " +
+        "consent settings and over one that grants consent, even when a settings control is also visible and " +
+        "looks like another path to the same outcome -- a settings/management control is not a substitute for " +
+        "a direct decline-and-continue control when both are present. Never click a control whose purpose is " +
+        "to grant broad or optional consent."
       );
   }
 }

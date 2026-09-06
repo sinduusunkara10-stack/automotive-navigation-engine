@@ -136,6 +136,7 @@ class BlockerAwareModelClient implements ReasoningProvider {
  * itself, as distinct from proving the ceiling is never *needed* in the first place.
  */
 class AlwaysSameTargetProvider implements ReasoningProvider {
+  readonly decisions: Decision[] = [];
   private fixedTargetId: string | undefined;
   private captured = false;
   constructor(private readonly pattern: RegExp) {}
@@ -145,12 +146,44 @@ class AlwaysSameTargetProvider implements ReasoningProvider {
       this.captured = true;
       this.fixedTargetId = context.observation.interactiveElements.find((el) => this.pattern.test(el.accessibleName))?.id;
     }
-    if (this.fixedTargetId && context.allowedActions.includes("click")) {
-      return { action: { type: "click", target: this.fixedTargetId }, rationale: "Deliberately re-proposing the same target regardless of live state." };
-    }
-    return context.allowedActions.includes("stop_failure")
-      ? { action: { type: "stop_failure" }, rationale: "No target captured." }
-      : { action: { type: "stop_blocked" }, rationale: "No permitted action available." };
+    const decision: Decision =
+      this.fixedTargetId && context.allowedActions.includes("click")
+        ? { action: { type: "click", target: this.fixedTargetId }, rationale: "Deliberately re-proposing the same target regardless of live state." }
+        : context.allowedActions.includes("stop_failure")
+          ? { action: { type: "stop_failure" }, rationale: "No target captured." }
+          : { action: { type: "stop_blocked" }, rationale: "No permitted action available." };
+    this.decisions.push(decision);
+    return decision;
+  }
+}
+
+/**
+ * A deliberately unsophisticated stand-in (same spirit as AlwaysSameTargetProvider above):
+ * advances through an ordered list of accessible-name patterns one per call, ignoring live
+ * reachability entirely -- mirrors the reported production incident's own sequence of
+ * distinct candidate targets ("Choisir el-14" -> "el-23" -> ...), each intercepted by the
+ * same underlying obstruction. Stops (stop_failure) once every pattern has been tried.
+ */
+class RotatingCoveredTargetProvider implements ReasoningProvider {
+  readonly decisions: Decision[] = [];
+  private index = 0;
+  constructor(private readonly targetPatterns: RegExp[]) {}
+
+  async decide(context: ReasoningContext): Promise<Decision> {
+    const pattern = this.targetPatterns[this.index];
+    this.index += 1;
+    const target = pattern ? context.observation.interactiveElements.find((el) => pattern.test(el.accessibleName)) : undefined;
+    const decision: Decision =
+      target && context.allowedActions.includes("click")
+        ? {
+            action: { type: "click", target: target.id },
+            rationale: `Deliberately trying "${target.accessibleName}" regardless of coverage.`,
+          }
+        : context.allowedActions.includes("stop_failure")
+          ? { action: { type: "stop_failure" }, rationale: "No more candidate targets to try." }
+          : { action: { type: "stop_blocked" }, rationale: "No permitted action available." };
+    this.decisions.push(decision);
+    return decision;
   }
 }
 
@@ -357,6 +390,73 @@ async function startBlockerFixtureServer(): Promise<{ baseUrl: string; close: ()
           '<button id="dismiss">Dismiss blocker</button>' +
           "</div>" +
           OBJECTIVE_BUTTON,
+      );
+    }
+
+    if (path === "/persistent-overlay-multi-target-consent.html") {
+      // Mirrors the reported production incident's shape: several distinct
+      // objective-like controls, all permanently covered by the *same* persistent
+      // overlay (which is never dismissed -- there is deliberately no working dismiss
+      // control here). Deliberately consent-flavoured generic wording ("Manage
+      // preferences"), never any brand/vendor text. See
+      // persistent-overlay-multi-target-loading.html below for the non-consent variant
+      // proving the exact same mechanism applies identically either way.
+      return void page(
+        '<div id="overlay" style="position:fixed;inset:0;z-index:9999;" role="dialog">Manage preferences</div>' +
+          '<button id="objective1">Objective control 1</button>' +
+          '<button id="objective2">Objective control 2</button>' +
+          '<button id="objective3">Objective control 3</button>' +
+          '<button id="objective4">Objective control 4</button>',
+      );
+    }
+
+    if (path === "/persistent-overlay-multi-target-loading.html") {
+      // Identical shape to the consent-flavoured fixture above, but with a loading/busy
+      // overlay instead -- proves core/loop.ts's blocker-signature tracking is keyed
+      // only on the intercepting element's own generic identity, never on any
+      // consent-specific wording or detection.
+      return void page(
+        '<div id="overlay" style="position:fixed;inset:0;z-index:9999;" role="status">Please wait, loading...</div>' +
+          '<button id="continue1">Continue step 1</button>' +
+          '<button id="continue2">Continue step 2</button>' +
+          '<button id="continue3">Continue step 3</button>' +
+          '<button id="continue4">Continue step 4</button>',
+      );
+    }
+
+    if (path === "/dismiss-succeeds-obstruction-persists.html") {
+      // #objective sits under a small overlay positioned exactly over it (not a
+      // full-viewport one), while #dismiss1/#dismiss2 sit elsewhere on the page,
+      // fully clickable and mechanically successful -- but neither's click handler
+      // does anything to the overlay. Reproduces the reported incident's exact shape:
+      // two different dismiss-type clicks that both succeed mechanically, while the
+      // real obstruction never actually clears.
+      return void page(
+        '<button id="objective" style="position:absolute;top:100px;left:100px;width:150px;height:30px;">Objective control</button>' +
+          '<div id="overlay" style="position:absolute;top:100px;left:100px;width:150px;height:30px;z-index:9999;" role="dialog"></div>' +
+          '<button id="dismiss1" style="position:absolute;top:300px;left:100px;">Dismiss attempt one</button>' +
+          '<button id="dismiss2" style="position:absolute;top:350px;left:100px;">Dismiss attempt two</button>',
+      );
+    }
+
+    if (path === "/blocker-signature-changes.html") {
+      // document.elementFromPoint is monkey-patched to return a freshly-created,
+      // uniquely-labelled element on *every single call* -- guaranteeing the
+      // intercepting element's signature can never coincidentally match between two
+      // reads. Proves core/loop.ts never treats a genuinely different obstruction as
+      // "the same one", and therefore never skips a reasoning call for it.
+      return void page(
+        '<button id="objective">Objective control</button>' +
+          "<script>" +
+          "var n = 0;" +
+          "document.elementFromPoint = function (x, y) {" +
+          "  var el = document.createElement('div');" +
+          "  el.setAttribute('role', 'status');" +
+          "  el.textContent = 'Dynamic overlay ' + (n++);" +
+          "  document.body.appendChild(el);" +
+          "  return el;" +
+          "};" +
+          "</script>",
       );
     }
 
@@ -738,5 +838,138 @@ test("REGRESSION (end-to-end): landing-host blocker handled, cross-host navigati
     await browser.close();
     await landingReal.close();
     await destination.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// Blocker-signature persistence tracking (RunState.lastBlocker*, core/loop.ts): the same
+// obstruction across different candidate targets and/or mechanically-successful dismiss
+// clicks skips wasted reasoning-provider calls once confirmed unchanged, while bounded
+// stale-target exhaustion is still reached exactly as before. Generic throughout -- keyed
+// only on the intercepting element's own tag/role/text, never on consent-specific wording.
+// ---------------------------------------------------------------------------------------
+
+test("REGRESSION: the same persistent obstruction across four different candidate targets skips reasoning calls once confirmed unchanged, and still reaches bounded exhaustion (consent-flavoured overlay)", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/persistent-overlay-multi-target-consent.html", {
+      limits: { maxSteps: 20, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new RotatingCoveredTargetProvider([
+      /objective control 1/i,
+      /objective control 2/i,
+      /objective control 3/i,
+      /objective control 4/i,
+    ]);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+    // The core claim: without this fix, each of the 4 steps needed to reach exhaustion
+    // would spend up to 4 reasoning calls (1 initial + 3 within-step retries, since a
+    // persistently covered target always fails the pre-dispatch check) -- up to 16 calls
+    // total, exactly as tests/unit/../signature-changes below still does when the
+    // obstruction genuinely differs each time. Here, all 4 candidate patterns are
+    // consumed within the first 2 steps (the within-step retry loop's own signature check
+    // already stops retrying a 3rd/4th candidate against the same unchanged signature
+    // within one step), and the last 2 occurrences needed to reach the same bounded
+    // exhaustion are fully deterministic -- 4 real calls total, not 16.
+    assert.equal(reasoning.decisions.length, 4, `expected exactly 4 real reasoning calls, got ${reasoning.decisions.length}`);
+    assert.equal(response.steps.length, 4);
+
+    const persistentBlockerSteps = response.steps.filter((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.equal(persistentBlockerSteps.length, 2, "expected exactly 2 deterministic persistent-blocker steps");
+    await validateAgainstResponseSchema(response);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("REGRESSION: the same mechanism applies identically to a non-consent persistent overlay (a loading/busy panel)", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/persistent-overlay-multi-target-loading.html", {
+      limits: { maxSteps: 20, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new RotatingCoveredTargetProvider([
+      /continue step 1/i,
+      /continue step 2/i,
+      /continue step 3/i,
+      /continue step 4/i,
+    ]);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+    assert.equal(reasoning.decisions.length, 4, `expected exactly 4 real reasoning calls, got ${reasoning.decisions.length}`);
+    assert.equal(response.steps.length, 4);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("REGRESSION: two mechanically-successful dismiss-type clicks are never trusted as proof the obstruction cleared -- only the covered-recheck is", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/dismiss-succeeds-obstruction-persists.html", {
+      limits: { maxSteps: 20, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new RotatingCoveredTargetProvider([/dismiss attempt one/i, /dismiss attempt two/i]);
+    const response = await runTask({ page, task, reasoning });
+
+    // Both dismiss clicks are real, ordinary buttons -- neither ever fails mechanically.
+    const dismissSteps = response.steps.filter((s) => /dismiss attempt/i.test(s.decision) || s.selectedAction.type === "click");
+    assert.ok(dismissSteps.slice(0, 2).every((s) => s.actionResult.success === true), "both dismiss clicks must succeed mechanically");
+
+    // Yet the run still correctly determines the obstruction never actually cleared.
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+    assert.equal(reasoning.decisions.length, 2, "expected only the two real dismiss-attempt calls, nothing more");
+    await validateAgainstResponseSchema(response);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("REGRESSION: a genuinely different obstruction (changed signature) between checks is never treated as the same blocker, so no reasoning call is skipped", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/blocker-signature-changes.html", {
+      limits: { maxSteps: 8, maxBacktracks: 0, maxRepeatedActions: 8 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+    // Every single elementFromPoint call returns a freshly-created, uniquely-labelled
+    // element by construction, so no two consecutive covered-checks (whether within one
+    // step's own retry loop or across steps) can ever coincide -- the persistence check
+    // must never fire, so every within-step retry still spends a real reasoning call
+    // rather than being short-circuited (more calls than steps, not fewer or equal).
+    assert.ok(
+      reasoning.decisions.length > response.steps.length,
+      `expected more reasoning calls (${reasoning.decisions.length}) than steps (${response.steps.length}) -- no call should ever be skipped`,
+    );
+    const skippedSteps = response.steps.filter((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.equal(skippedSteps.length, 0, "the never-matching signature must never trigger the deterministic skip path");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
   }
 });
