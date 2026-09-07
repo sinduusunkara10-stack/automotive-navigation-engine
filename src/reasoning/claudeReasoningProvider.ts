@@ -2,7 +2,13 @@ import type { Decision, ReasoningContext, ReasoningProvider } from "./reasoningP
 import { REASONING_PROVIDER_DIAGNOSTICS_VERSION } from "./reasoningProvider.js";
 import { ReasoningModelError, type ReasoningModelClient } from "./reasoningModelClient.js";
 import { buildClaudeDecisionSchema, type ClaudeDecisionPayload } from "./claudeDecisionSchema.js";
-import { buildReasoningPrompt, type PromptElementSelectionDiagnostic } from "./promptBuilder.js";
+import {
+  buildReasoningPrompt,
+  computeInstructionProgress,
+  type InstructionPosition,
+  type InstructionProgress,
+  type PromptElementSelectionDiagnostic,
+} from "./promptBuilder.js";
 import { validateClaudeDecision } from "./validateClaudeDecision.js";
 import { readClaudeReasoningConfig, type ClaudeReasoningConfig } from "./config.js";
 import {
@@ -41,15 +47,21 @@ export interface ClaudeDecisionLogEntry {
   correctiveRetry?: boolean;
 }
 
-// The two sanitised categories that indicate the model's response itself was unusable
-// (not valid JSON, or JSON that failed the decision schema) rather than a transport/HTTP
-// failure -- see anthropicReasoningModelClient.ts's sanitizeError. Only these two ever
-// trigger the bounded corrective retry below; every other error category (auth, rate
-// limit, timeout, connection, bad request, etc.) is left to whatever the existing
-// maxRetries policy already does, unchanged.
-const CORRECTIVE_RETRY_CATEGORIES: ReadonlySet<string> = new Set([
+// The rejection reasons that get exactly one bounded, targeted corrective retry: the two
+// sanitised categories indicating the model's response itself was unusable (not valid
+// JSON, or JSON that failed the decision schema -- see anthropicReasoningModelClient.ts's
+// sanitizeError), plus "low_confidence" -- a structurally valid decision (allowed action,
+// resolvable target, allowed navigate host; see validateClaudeDecision.ts, which checks
+// confidence last for exactly this reason) that was only rejected because its stated
+// confidence fell short of this run's minimum. All three share one retry budget (item 11
+// of the fix): at most one corrective attempt total per decide() call, whichever of the
+// three reasons triggers it first. Every other rejection/error reason (auth, rate limit,
+// timeout, connection, bad request, unknown target, disallowed action, etc.) is left to
+// whatever the existing, generic maxRetries policy already does, unchanged.
+const CORRECTIVE_RETRY_REASONS: ReadonlySet<string> = new Set([
   RESPONSE_PARSE_FAILED_CATEGORY,
   RESPONSE_SCHEMA_INVALID_CATEGORY,
+  "low_confidence",
 ]);
 
 type AttemptOutcome =
@@ -74,6 +86,37 @@ function buildCorrectiveSystemPrompt(baseSystem: string, allowedActions: readonl
     "one JSON object that strictly conforms to that schema, choosing \"action\" only from this exact " +
     `allowed vocabulary: ${JSON.stringify(allowedActions)}. Include nothing outside the JSON object, and ` +
     "never invent a field or action that isn't part of the schema you were given."
+  );
+}
+
+function describeInstructionPositionForCorrection(position?: InstructionPosition): string {
+  return position ? position.descriptions.join(" OR ") : "none";
+}
+
+/**
+ * Builds the one-shot low-confidence corrective retry's system prompt: the original
+ * system prompt plus a short, fully generic addendum stating only that the previous
+ * decision was rejected for confidence alone, and restating the same completed/earliest-
+ * unfinished/pending/terminal instruction partition already computed for the main prompt
+ * (see promptBuilder.ts's computeInstructionProgress -- never recomputed differently, so
+ * this always agrees with what the model was already told). Never includes the previous
+ * raw response or its numeric confidence value -- only the fixed template text below and
+ * caller-supplied successCriteria description text, which was already fully visible in
+ * the original prompt.
+ */
+function buildLowConfidenceCorrectionSystemPrompt(baseSystem: string, progress: InstructionProgress): string {
+  return (
+    baseSystem +
+    " Your previous decision was rejected only because its stated confidence was below the minimum " +
+    "required for this run -- everything else about it (the action, its target, any navigation host) " +
+    "was structurally fine. This is a one-time corrective retry: re-examine the exact same page evidence " +
+    "you were already given and respond with the single clearest action that satisfies the earliest " +
+    "unfinished required instruction. Completed instructions so far: " +
+    `${progress.completed.length > 0 ? progress.completed.map(describeInstructionPositionForCorrection).join("; ") : "none yet"}. ` +
+    `The earliest unfinished instruction to act on now: ${describeInstructionPositionForCorrection(progress.earliestUnfinished)}. ` +
+    `Later instructions that must remain pending until then: ${progress.pending.length > 0 ? progress.pending.map(describeInstructionPositionForCorrection).join("; ") : "none"}. ` +
+    `The terminal instruction (stop immediately, with the resulting URL, once it is satisfied): ${describeInstructionPositionForCorrection(progress.terminal)}. ` +
+    "Give an honest confidence for this corrected choice -- do not inflate it merely to pass the threshold."
   );
 }
 
@@ -160,26 +203,39 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
       }
       lastReason = outcome.reason;
 
-      // REGRESSION (run_57ca85c3-df96-4dcc-be6f-c3be55a202f1): PR #36 correctly classified
-      // a response_schema_invalid/response_parse_failed failure but never changed anything
-      // before the (already-existing, generic) retry, which simply resent the identical
-      // prompt and predictably failed the same way again -- the run fell straight to
-      // stop_blocked without ever giving the model a corrective signal. On the first
-      // occurrence of either category, one bounded corrective retry is issued instead: the
-      // exact same observation-derived prompt.user (never rescanned, never re-selected --
-      // items 3/4) plus a short system-prompt addendum stating the previous response was
-      // invalid and restating only the allowed-action vocabulary (never the raw invalid
-      // response, never any provider payload -- items 2/5/6). Whatever this one corrective
-      // attempt produces (success or failure) is final for this failure category this
-      // step -- the loop never falls through to a second, blind generic retry on top of it.
-      if (!correctiveRetryUsed && CORRECTIVE_RETRY_CATEGORIES.has(outcome.reason)) {
+      // REGRESSION (run_57ca85c3-df96-4dcc-be6f-c3be55a202f1, run_e78d8d76-b487-4ece-8e0b-a0e2fbd48b1b):
+      // a response_schema_invalid/response_parse_failed failure, or a structurally valid
+      // decision rejected only for confidence, used to fall straight to the generic
+      // maxRetries policy (which just resends the identical prompt) or straight to
+      // stop_blocked -- neither ever gave the model a corrective signal. On the first
+      // occurrence of any of the three CORRECTIVE_RETRY_REASONS, one bounded corrective
+      // retry is issued instead: the exact same observation-derived prompt.user (never
+      // rescanned, never re-selected) plus a system-prompt addendum specific to *why* this
+      // attempt failed (schema/parse -- restates the allowed-action vocabulary; low
+      // confidence -- restates the completed/earliest-unfinished/pending/terminal
+      // instruction partition) -- never the raw invalid response, never any provider
+      // payload. Whatever this one corrective attempt produces (success or failure) is
+      // final for this step -- the loop never falls through to a second, blind generic
+      // retry on top of it, and all three trigger reasons share this same single budget.
+      if (!correctiveRetryUsed && CORRECTIVE_RETRY_REASONS.has(outcome.reason)) {
         correctiveRetryUsed = true;
+        const correctiveSystemPrompt =
+          outcome.reason === "low_confidence"
+            ? buildLowConfidenceCorrectionSystemPrompt(
+                prompt.system,
+                computeInstructionProgress(
+                  context.successCriteria,
+                  context.satisfiedCriteriaIds,
+                  context.internalInstructionProgress,
+                ),
+              )
+            : buildCorrectiveSystemPrompt(prompt.system, context.allowedActions);
         const correctiveOutcome = await this.attemptOnce({
           context,
           schema,
           stepIndex,
           attempt: attempt + 1,
-          systemPrompt: buildCorrectiveSystemPrompt(prompt.system, context.allowedActions),
+          systemPrompt: correctiveSystemPrompt,
           userPrompt: prompt.user,
           elementSelection: prompt.elementSelection,
           correctiveRetry: true,

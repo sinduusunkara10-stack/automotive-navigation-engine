@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildReasoningPrompt } from "../../src/reasoning/promptBuilder.js";
+import { buildReasoningPrompt, computeInstructionProgress } from "../../src/reasoning/promptBuilder.js";
 import { buildTestReasoningContext } from "./helpers/reasoningContext.js";
 
 test("buildReasoningPrompt sends only the compact structured fields, never raw HTML or sensitive data", () => {
@@ -657,4 +657,157 @@ test("REGRESSION: the system prompt never mentions accepting/granting consent as
   // acceptance -- the one behaviour this whole mechanism must never default to.
   const defaultPrompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" }));
   assert.doesNotMatch(defaultPrompt.system, /prefer.{0,40}accept/i);
+});
+
+// ---------------------------------------------------------------------------------------
+// FIX (run_e78d8d76-b487-4ece-8e0b-a0e2fbd48b1b): with a later required instruction's
+// control also visible on the page, the model had no signal that an earlier instruction
+// was explicitly ordered first, produced a low-confidence guess, and the run stopped.
+// computeInstructionProgress (and the ordered-instruction system-prompt clause/payload
+// block it feeds) is entirely driven by the caller's own successCriteria array order +
+// group + satisfiedCriteriaIds -- no new schema field, no configurator-specific state
+// machine, no fixed assumption about any control's label. Generic/synthetic fixtures only.
+// ---------------------------------------------------------------------------------------
+
+function orderedTestCriteria() {
+  return [
+    { id: "select-item", type: "element_present" as const, description: "Select the specified item.", config: {}, required: true },
+    { id: "primary-progression", type: "element_present" as const, description: "Activate the primary progression action.", config: {}, required: true },
+    {
+      id: "terminal-a",
+      type: "url_pattern" as const,
+      description: "Select the specified terminal action (option A).",
+      config: {},
+      required: true,
+      group: "terminal",
+    },
+    {
+      id: "terminal-b",
+      type: "url_pattern" as const,
+      description: "Select the specified terminal action (option B).",
+      config: {},
+      required: true,
+      group: "terminal",
+    },
+    { id: "optional-note", type: "element_present" as const, description: "Purely informational, never gating.", config: {}, required: false },
+  ];
+}
+
+test("computeInstructionProgress: with nothing satisfied yet, the earliest unfinished position is the very first ordered instruction", () => {
+  const progress = computeInstructionProgress(orderedTestCriteria(), []);
+  assert.deepEqual(progress.completed, []);
+  assert.deepEqual(progress.earliestUnfinished?.ids, ["select-item"]);
+  assert.deepEqual(
+    progress.pending.map((p) => p.ids),
+    [["primary-progression"], ["terminal-a", "terminal-b"]],
+  );
+  assert.deepEqual(progress.terminal?.ids, ["terminal-a", "terminal-b"]);
+});
+
+test("computeInstructionProgress: satisfying the earliest instruction advances it to completed and promotes the next one", () => {
+  const progress = computeInstructionProgress(orderedTestCriteria(), ["select-item"]);
+  assert.deepEqual(
+    progress.completed.map((p) => p.ids),
+    [["select-item"]],
+  );
+  assert.deepEqual(progress.earliestUnfinished?.ids, ["primary-progression"]);
+  assert.deepEqual(
+    progress.pending.map((p) => p.ids),
+    [["terminal-a", "terminal-b"]],
+  );
+});
+
+test("computeInstructionProgress: a later-ordered instruction being satisfied out of order does not retroactively skip the earliest unfinished one", () => {
+  // Simulates the exact reported failure shape: the terminal control was reachable, but
+  // the earliest unfinished instruction (primary-progression) genuinely was not satisfied
+  // yet -- the progress computation must never treat the later satisfaction as completing
+  // an earlier position it doesn't belong to.
+  const progress = computeInstructionProgress(orderedTestCriteria(), ["select-item", "terminal-a"]);
+  assert.deepEqual(
+    progress.completed.map((p) => p.ids),
+    [["select-item"], ["terminal-a", "terminal-b"]],
+  );
+  assert.deepEqual(progress.earliestUnfinished?.ids, ["primary-progression"]);
+});
+
+test("computeInstructionProgress: a group is completed once ANY one member is satisfied", () => {
+  const progress = computeInstructionProgress(orderedTestCriteria(), ["select-item", "primary-progression", "terminal-b"]);
+  assert.equal(progress.earliestUnfinished, undefined);
+  assert.deepEqual(progress.pending, []);
+  assert.deepEqual(
+    progress.completed.map((p) => p.ids),
+    [["select-item"], ["primary-progression"], ["terminal-a", "terminal-b"]],
+  );
+});
+
+test("computeInstructionProgress: a required:false criterion is never part of the ordered instruction sequence", () => {
+  const progress = computeInstructionProgress(orderedTestCriteria(), []);
+  const allIds = [...progress.completed, ...(progress.earliestUnfinished ? [progress.earliestUnfinished] : []), ...progress.pending].flatMap(
+    (p) => p.ids,
+  );
+  assert.ok(!allIds.includes("optional-note"), "an optional/informational criterion must never appear in the instruction sequence");
+});
+
+test("computeInstructionProgress: with no required criteria at all, there is no earliest-unfinished or terminal position", () => {
+  const progress = computeInstructionProgress([{ id: "info", type: "element_present", description: "Informational only.", config: {}, required: false }], []);
+  assert.equal(progress.earliestUnfinished, undefined);
+  assert.equal(progress.terminal, undefined);
+  assert.deepEqual(progress.completed, []);
+  assert.deepEqual(progress.pending, []);
+});
+
+test("FIX: the system prompt tells the model successCriteria order is instruction order, and that an earlier unsatisfied instruction must never be skipped for a later-matching control", () => {
+  const context = buildTestReasoningContext({ successCriteria: orderedTestCriteria(), satisfiedCriteriaIds: ["select-item"] });
+  const prompt = buildReasoningPrompt(context);
+
+  assert.match(prompt.system, /exact order their underlying\s+instructions must be completed/i);
+  assert.match(prompt.system, /primarily satisfy the\s+earliest required position/i);
+  assert.match(prompt.system, /never choose a later-matching control ahead of an earlier, still-unsatisfied one/i);
+  assert.match(prompt.system, /completing one position is never itself the\s+objective/i);
+});
+
+test("FIX: the prompt payload carries a structured progress block mirroring computeInstructionProgress exactly", () => {
+  const context = buildTestReasoningContext({ successCriteria: orderedTestCriteria(), satisfiedCriteriaIds: ["select-item"] });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    progress?: {
+      completedInstructionIds: string[];
+      earliestUnfinishedInstructionIds?: string[];
+      pendingInstructionIds: string[];
+      terminalInstructionIds?: string[];
+    };
+  };
+
+  assert.ok(payload.progress, "expected a progress block in the prompt payload");
+  assert.deepEqual(payload.progress?.completedInstructionIds, ["select-item"]);
+  assert.deepEqual(payload.progress?.earliestUnfinishedInstructionIds, ["primary-progression"]);
+  assert.deepEqual(payload.progress?.pendingInstructionIds, ["terminal-a", "terminal-b"]);
+  assert.deepEqual(payload.progress?.terminalInstructionIds, ["terminal-a", "terminal-b"]);
+});
+
+test("FIX: after all required instructions are satisfied, the payload progress block reflects an empty earliest-unfinished/pending state (never silently omitted)", () => {
+  const context = buildTestReasoningContext({
+    successCriteria: orderedTestCriteria(),
+    satisfiedCriteriaIds: ["select-item", "primary-progression", "terminal-a"],
+  });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    progress?: { completedInstructionIds: string[]; earliestUnfinishedInstructionIds?: string[]; pendingInstructionIds: string[] };
+  };
+
+  assert.ok(payload.progress);
+  assert.equal(payload.progress?.earliestUnfinishedInstructionIds, undefined);
+  assert.deepEqual(payload.progress?.pendingInstructionIds, []);
+});
+
+test("FIX: with no required success criteria, neither the ordered-instruction system-prompt clause nor the payload progress block is present", () => {
+  const context = buildTestReasoningContext({
+    successCriteria: [{ id: "info", type: "element_present", description: "Informational only.", config: {}, required: false }],
+    satisfiedCriteriaIds: [],
+  });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { progress?: unknown };
+
+  assert.doesNotMatch(prompt.system, /earliest required position/i);
+  assert.equal(payload.progress, undefined);
 });

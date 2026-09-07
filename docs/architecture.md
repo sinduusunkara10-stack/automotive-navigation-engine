@@ -636,6 +636,10 @@ as not-yet-built rather than removed from the plan — see §11.
                             # and click.ts for in-loop action navigation
     boundedArray.ts         # generic keep-most-recent-N append-with-cap helper (see §13)
     memoryDiagnostics.ts    # bounded process.memoryUsage() sampling (see §13)
+    instructionProgress.ts  # evidence-based ratchet for a successCriteria description that
+                             # generically parses into multiple ordered instruction lines
+                             # (see §9f in docs/n8n-integration.md); guidance for action
+                             # selection only, never a stop_success gate on its own
 
   /config                 # env-based configuration, read once and fail-fast at startup
     initialNavigationConfig.ts # INITIAL_NAVIGATION_TIMEOUT_MS
@@ -694,6 +698,12 @@ as not-yet-built rather than removed from the plan — see §11.
     anthropicReasoningModelClient.ts # the only file importing @anthropic-ai/sdk
     config.ts                        # env config for ClaudeReasoningProvider
     providerFactory.ts               # REASONING_PROVIDER-based provider selection
+    instructionParser.ts             # generic line/marker parsing of an objective or
+                                      # successCriteria description into ordered instruction
+                                      # segments (numbered/bulleted/plain lines) -- see §9f
+    semanticCriterionVerifier.ts     # bounded, structured-output fallback adjudicator for a
+                                      # semantic_page_match criterion the deterministic
+                                      # lexical evaluator could not resolve (see §9a)
 
   /capture-modules         # pluggable, task-specific evidence extraction
     pageVisits.ts           # implemented

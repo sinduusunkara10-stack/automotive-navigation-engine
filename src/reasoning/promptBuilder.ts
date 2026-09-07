@@ -1,7 +1,8 @@
 import type { ReasoningContext } from "./reasoningProvider.js";
-import type { ConsentInteractionPolicy } from "../types/task-request.js";
+import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
 import type { InteractiveElement, PromptElementSelectionDiagnostic } from "../types/task-response.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
+import { parseOrderedInstructions } from "./instructionParser.js";
 
 /**
  * Plain-language instruction for this run's consentInteractionPolicy (see
@@ -48,6 +49,149 @@ function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): strin
         "to grant broad or optional consent."
       );
   }
+}
+
+/**
+ * REGRESSION (real production run, run_e78d8d76-b487-4ece-8e0b-a0e2fbd48b1b): with three
+ * remaining ordered instructions ("click Continue", "then click the action matching Book/
+ * Reserve a test drive", "stop and return the resulting URL"), the model was shown both a
+ * continue-shaped control and a book/reserve-shaped control on the same page at once and
+ * had no signal that one was explicitly ordered before the other -- it produced a
+ * low-confidence guess and the run stopped instead of progressing.
+ *
+ * This groups successCriteria (the existing, caller-supplied, ordered contract -- no new
+ * schema field) into ordered "instruction positions" -- entries sharing the same `group`
+ * are one position (an OR-alternative way to satisfy it), everything else is its own
+ * position, in the exact order the caller supplied them. Only `required !== false` entries
+ * participate: an optional/informational criterion is evidence, never a gating instruction.
+ * A position counts as completed the moment any one of its member ids appears in
+ * satisfiedCriteriaIds (which core/loop.ts already accumulates across the whole run and
+ * never resets, so this naturally survives every page transition/DOM update/modal/new tab
+ * without any extra state). This is deliberately the *only* mechanism: no configurator-
+ * specific state machine, no fixed assumption about what any particular instruction's
+ * label or control looks like -- the caller's own successCriteria order and description
+ * text is 100% of what drives it.
+ */
+export interface InstructionPosition {
+  ids: string[];
+  descriptions: string[];
+}
+
+export interface InstructionProgress {
+  completed: InstructionPosition[];
+  earliestUnfinished?: InstructionPosition;
+  /** Ordered required positions still unsatisfied, excluding earliestUnfinished. */
+  pending: InstructionPosition[];
+  /** The last ordered required position, i.e. the terminal instruction/stop condition. */
+  terminal?: InstructionPosition;
+}
+
+/**
+ * `internalInstructionProgress` (see src/core/instructionProgress.ts) covers the real n8n
+ * request shape: a single semantic_page_match successCriterion whose own description is the
+ * caller's complete multiline ordered objective, rather than one criterion per instruction.
+ * When an ungrouped, required criterion's description generically parses (see
+ * src/reasoning/instructionParser.ts) into two or more explicit instruction lines, that one
+ * criterion's single position is expanded here into one synthetic position per parsed line
+ * (id `${criterion.id}#${index}`) -- completed exactly up to whatever
+ * internalInstructionProgress reports for that criterion, except the criterion's *final*
+ * parsed line, which is only ever marked completed once the criterion's own id is already in
+ * satisfiedCriteriaIds (the real, caller-supplied evaluation remains the sole stop_success
+ * gate; this is guidance for action selection only). A criterion whose description does not
+ * parse into multiple lines (e.g. a short single-sentence description, as every existing
+ * multi-criterion caller already uses) is completely unaffected -- this reproduces the
+ * previous behaviour exactly for that case.
+ */
+export function computeInstructionProgress(
+  successCriteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIds: readonly string[],
+  internalInstructionProgress?: Readonly<Record<string, number>>,
+): InstructionProgress {
+  const satisfied = new Set(satisfiedCriteriaIds);
+  const positions: InstructionPosition[] = [];
+  const groupIndex = new Map<string, number>();
+  const syntheticCompleted = new Set<string>();
+
+  for (const criterion of successCriteria) {
+    if (criterion.required === false) {
+      continue;
+    }
+    if (criterion.group) {
+      const existingIndex = groupIndex.get(criterion.group);
+      if (existingIndex !== undefined) {
+        positions[existingIndex]?.ids.push(criterion.id);
+        positions[existingIndex]?.descriptions.push(criterion.description);
+        continue;
+      }
+      groupIndex.set(criterion.group, positions.length);
+      positions.push({ ids: [criterion.id], descriptions: [criterion.description] });
+      continue;
+    }
+
+    const segments = parseOrderedInstructions(criterion.description);
+    if (segments.length < 2) {
+      positions.push({ ids: [criterion.id], descriptions: [criterion.description] });
+      continue;
+    }
+
+    const completedCount = satisfied.has(criterion.id)
+      ? segments.length
+      : Math.min(internalInstructionProgress?.[criterion.id] ?? 0, segments.length - 1);
+    segments.forEach((description, index) => {
+      const id = `${criterion.id}#${index}`;
+      if (index < completedCount) {
+        syntheticCompleted.add(id);
+      }
+      positions.push({ ids: [id], descriptions: [description] });
+    });
+  }
+
+  const completed: InstructionPosition[] = [];
+  const unfinished: InstructionPosition[] = [];
+  for (const position of positions) {
+    (position.ids.some((id) => satisfied.has(id) || syntheticCompleted.has(id)) ? completed : unfinished).push(
+      position,
+    );
+  }
+
+  return {
+    completed,
+    earliestUnfinished: unfinished[0],
+    pending: unfinished.slice(1),
+    terminal: positions[positions.length - 1],
+  };
+}
+
+/**
+ * Plain-language framing of computeInstructionProgress's result for the main decision
+ * prompt -- tells the model that successCriteria order is instruction order, that a later
+ * position must never be chosen ahead of an earlier unsatisfied one, and that finishing an
+ * intermediate position never means the whole objective is done. Omitted entirely when
+ * there are no required instructions to sequence (nothing generic to say).
+ */
+function orderedInstructionClause(progress: InstructionProgress): string {
+  if (progress.completed.length === 0 && !progress.earliestUnfinished) {
+    return "";
+  }
+  return (
+    " This run's \"successCriteria\" are given in the exact order their underlying " +
+    "instructions must be completed -- entries sharing the same \"group\" value count as " +
+    "one instruction position (alternative ways to satisfy it). A single criterion's own " +
+    "\"description\" may itself list several explicit ordered instructions (e.g. numbered or " +
+    "bulleted lines) -- when it does, treat each line with exactly the same earliest-" +
+    "unfinished-first priority as if it were its own successCriteria entry; the \"progress\" " +
+    "field below already reflects this. \"satisfiedCriteriaIds\" " +
+    "lists which positions are already done. Your next action must primarily satisfy the " +
+    "earliest required position not yet reflected in \"satisfiedCriteriaIds\", even when a " +
+    "control matching a LATER required position is also currently visible on the page -- " +
+    "never choose a later-matching control ahead of an earlier, still-unsatisfied one. If " +
+    "the earliest unfinished position has no currently reachable match on this page, use " +
+    "ordinary recovery (scroll, wait, or another allowed action toward finding it) rather " +
+    "than skipping ahead to a later position. Completing one position is never itself the " +
+    "objective -- only propose stop_success once every required position, including the " +
+    "final one, is reflected in satisfiedCriteriaIds; do not treat a URL or control naming " +
+    "pattern as proof of success on its own."
+  );
 }
 
 export type { PromptElementSelectionDiagnostic } from "../types/task-response.js";
@@ -361,7 +505,10 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     recentActions,
     satisfiedCriteriaIds,
     consentInteractionPolicy,
+    internalInstructionProgress,
   } = context;
+
+  const instructionProgress = computeInstructionProgress(successCriteria, satisfiedCriteriaIds, internalInstructionProgress);
 
   const system =
     "You are the decision component of an automated browser-navigation engine. " +
@@ -371,7 +518,9 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "shell commands, or a URL whose host is not listed in \"allowedDomains\". You only see a " +
     "compact structured summary of the page, never raw HTML. Base your decision only on the " +
     "information given here, be concise in your reason, and give an honest confidence for " +
-    "how sure you are that this action moves toward the objective. Before choosing \"scroll\", " +
+    "how sure you are that this action moves toward the objective." +
+    orderedInstructionClause(instructionProgress) +
+    " Before choosing \"scroll\", " +
     "check whether a currently visible and enabled control in \"interactiveElements\" already " +
     "has a semantic purpose (judged from its accessibleName/type/ariaState, not from a fixed " +
     "wordlist, and regardless of what language its label is written in) that matches what " +
@@ -413,6 +562,22 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
       ...(c.group ? { group: c.group } : {}),
     })),
     satisfiedCriteriaIds,
+    // Structured mirror of the ordered-instruction guidance in `system` above -- lets the
+    // model (and a test) read the exact same completed/earliest-unfinished/pending/
+    // terminal partition without having to recompute it from successCriteria order itself.
+    // Present only when there's at least one required instruction to sequence.
+    ...(instructionProgress.completed.length > 0 || instructionProgress.earliestUnfinished
+      ? {
+          progress: {
+            completedInstructionIds: instructionProgress.completed.flatMap((p) => p.ids),
+            ...(instructionProgress.earliestUnfinished
+              ? { earliestUnfinishedInstructionIds: instructionProgress.earliestUnfinished.ids }
+              : {}),
+            pendingInstructionIds: instructionProgress.pending.flatMap((p) => p.ids),
+            ...(instructionProgress.terminal ? { terminalInstructionIds: instructionProgress.terminal.ids } : {}),
+          },
+        }
+      : {}),
     allowedActions,
     allowedDomains,
     limits: {

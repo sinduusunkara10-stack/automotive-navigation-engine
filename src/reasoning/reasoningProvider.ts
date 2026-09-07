@@ -33,6 +33,15 @@ export interface ReasoningContext {
   satisfiedCriteriaIds: string[];
   /** See ConsentInteractionPolicy (types/task-request.ts). Always present -- core/loop.ts resolves the task's omitted-field default ("reject_optional") before building this context, so a provider never has to know the default itself. */
   consentInteractionPolicy: ConsentInteractionPolicy;
+  /**
+   * Optional, engine-internal evidence-based progress for any successCriteria description
+   * that generically parses into multiple explicit ordered instruction lines (the real n8n
+   * request shape -- see src/reasoning/instructionParser.ts and
+   * src/core/instructionProgress.ts), keyed by criterion id. Never part of the wire request/
+   * response contract; absent/empty behaves exactly as if this field didn't exist (see
+   * computeInstructionProgress, src/reasoning/promptBuilder.ts).
+   */
+  internalInstructionProgress?: Readonly<Record<string, number>>;
 }
 
 export interface ReasoningProvider {

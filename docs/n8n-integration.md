@@ -816,6 +816,103 @@ group members are alternatives — purely to help the model propose `stop_succes
 engine's own independent re-check (§9's `required` section) is what actually enforces OR
 semantics regardless of what the model proposes.
 
+## 9f. Ordered instructions inside a single `successCriteria` description
+
+**The real request shape.** In production, n8n does not send one `successCriteria` entry per
+instruction (the shape §9e's examples and `tests/integration/orderedInstructionExecution.test.ts`
+use). It sends exactly **one** `semantic_page_match` criterion whose `description` is the
+caller's complete, multiline ordered objective, e.g.:
+
+```json
+"successCriteria": [
+  {
+    "id": "objective-destination-reached",
+    "type": "semantic_page_match",
+    "description": "1. Select the specified item.\n2. Activate the progression action.\n3. Select the specified terminal action.\n4. Stop and return the resulting URL.",
+    "config": { "minScore": 0.4 },
+    "required": true
+  }
+]
+```
+
+`satisfiedCriteriaIds` can only ever gate this *whole* criterion at once — far too coarse to
+tell the reasoning layer which of the caller's several instructions is still outstanding, so a
+later-ordered control (e.g. a terminal action) sitting on the same page as an earlier
+unfinished one's control could otherwise be picked out of order. **No n8n change and no
+request/response schema change were made or are required for this.**
+
+**The fix.** `src/reasoning/instructionParser.ts` generically parses any `successCriteria`
+description into ordered instruction segments: numbered lines (`"1."`, `"1)"`, `"(1)"`),
+bulleted lines (`"-"`, `"*"`, `"•"`), or plain line-separated text, over both LF and CRLF line
+endings, with blank lines dropped. A description that is one prose paragraph with no explicit
+line structure (fewer than two resulting segments) is left completely alone — the previous
+single-objective behaviour is unchanged for every existing caller. This is engine-internal
+only: parsed segments are never written back into the request or response, and never invented
+from prose that has no explicit structure of its own.
+
+When a description does parse into multiple segments, `computeInstructionProgress`
+(`src/reasoning/promptBuilder.ts`) expands that one criterion into one synthetic instruction
+position per segment (id `${criterionId}#${index}`) and reports the same
+completed/earliest-unfinished/pending/terminal partition to the reasoning layer that a
+multi-criterion `successCriteria` list already got under §9e. `src/core/instructionProgress.ts`
+is the generic, evidence-based ratchet that decides when an intermediate segment is done: only
+a **successful** `click`/`navigate` whose target accessible name, resulting URL, or
+post-action title/notable text shares real vocabulary with that specific segment's own text
+advances it — one segment, for one action, at a time. A mechanically successful action with no
+matching evidence, a failed action, or ambiguous evidence (something changed, but not
+recognisably related to that instruction) never advances anything.
+
+The criterion's **final** parsed segment (the "stop" instruction) is never completed by this
+heuristic at all — it is only ever completed by the real, caller-supplied `semantic_page_match`
+evaluation against `satisfiedCriteriaIds`, exactly as before. Internal instruction progress is
+guidance for *which action to select next*; it is never a second, private success criterion,
+and it never gates `stop_success` on its own.
+
+## 9g. Corrective-retry budget (precise wording)
+
+Earlier drafts of this document and of the PR that introduced the low-confidence corrective
+retry described the retry budget loosely. The precise numbers, unchanged from the
+implementation in `src/reasoning/claudeReasoningProvider.ts`:
+
+- **Normal corrective path: at most 2 provider calls per reasoning step.** One initial attempt,
+  plus — only if that attempt fails for a reason in `CORRECTIVE_RETRY_REASONS`
+  (`response_schema_invalid`, `response_parse_failed`, or `low_confidence`) — exactly one
+  corrective retry with a targeted system-prompt addendum.
+- **True absolute worst case: at most 3 provider calls per reasoning step.** This only happens
+  when the initial attempt fails for a reason the corrective retry does *not* cover (e.g. a
+  transport/HTTP failure), the pre-existing generic `maxRetries` policy (hard-capped at 1)
+  issues one more plain retry, and *that* second attempt is the first one to fail for a
+  corrective-eligible reason — triggering the one shared corrective retry on top. All three
+  reasons share a single `correctiveRetryUsed` flag; at most one corrective attempt is ever
+  issued per `decide()` call, however many of the three reasons occur.
+  `tests/unit/claudeReasoningProvider.test.ts` ("the maximum possible provider calls per
+  reasoning step is bounded at (1 + maxRetries) + 1 shared corrective retry, never more")
+  proves this ceiling directly.
+
+## 9h. Terminal popup analytics (known limitation)
+
+A terminal action that opens a new tab/window never switches the engine's own tracked `page`
+to it (see `src/actions/click.ts`) — only that tab's safely-validated (already checked against
+`allowedDomains`), then-closed destination URL is captured, as `ActionResult.resultingUrl`,
+`cta_clicks[].resultingUrl`, and `finalUrl`. For a `semantic_page_match` criterion, that
+resulting URL and the specific control that was clicked are now also forwarded as
+`lastActionEvidence` to an optional `semanticVerifier` (see §9a), so a caller running with a
+verifier configured can get a real semantic verdict for a popup-only terminal action without
+requiring the *original* tracked page's own URL/DOM to change. Without a `semanticVerifier`
+configured, the purely deterministic lexical evaluator (`src/core/semanticPageMatch.ts`) still
+only ever scores the original, unswitched page's own title/headings/interactive text — it has
+no way to see the popup's content, only its URL, and only when a verifier is present to weigh
+that URL as evidence.
+
+**This never bypasses domain safety**: `resultingUrl` is only ever populated once
+`checkNavigationAllowed` has already passed for that exact URL. It is also never a claim that
+GA4/data-layer capture is attached to the popup itself — it is not, and remains explicitly out
+of scope; a task whose real success signal is analytics fired *inside* a new tab cannot be
+verified by this engine today. A caller needing that should design the objective/criteria so
+the deciding evidence is observable on the original tracked page (e.g. a same-page marker the
+click handler itself sets, as `tests/integration/orderedInstructionExecution.test.ts`'s
+new-tab-terminal fixture does) rather than relying on popup-internal analytics.
+
 ## 10. taskId, and brand/market/language as reporting metadata only
 
 **taskId.** With only `startUrl`, `journeyType`, and `objective` coming out of the Form

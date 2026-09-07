@@ -44,6 +44,18 @@ export interface LastActionEvidence {
   ctaText?: string;
   accessibleName?: string;
   elementType?: string;
+  /**
+   * The most recent action's own safely-validated resulting URL (see actions/click.ts,
+   * which never reports a resultingUrl that hasn't already passed allowedDomains) -- either
+   * a same-tab navigation's destination, or a same-click-triggered popup/new tab's
+   * destination captured and closed without ever switching the engine's own tracked page
+   * (see src/core/loop.ts). Lets a terminal action that only opens a new tab still be
+   * verified by meaning against where it safely led, without requiring the original tracked
+   * page's own URL (pageEvidence above) to change. Never a claim that popup-level GA4/
+   * data-layer capture is attached to that tab -- it is not; see
+   * docs/n8n-integration.md "Terminal popup analytics" for that known limitation.
+   */
+  resultingUrl?: string;
 }
 
 export interface SemanticVerificationInput {
@@ -101,7 +113,13 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "activated (e.g. a final completion control, by whatever label the page itself uses), " +
     "you must find evidence of that specific control in the given page/click evidence -- an " +
     "unrelated control being clicked, or the right-looking page being reached by some other " +
-    "route, is not sufficient. Never output an action, URL, selector, or code. Give an honest " +
+    "route, is not sufficient. When lastActionEvidence.resultingUrl is present, it is a " +
+    "safely-validated destination the engine already confirmed for that specific click -- " +
+    "possibly a new tab/popup the engine never switched its own tracked page to, so " +
+    "pageEvidence itself can legitimately stay unchanged even though that click genuinely " +
+    "succeeded; weigh resultingUrl as real evidence of that action's outcome in that case, " +
+    "never as proof of anything not otherwise supported. Never output an action, URL, " +
+    "selector, or code. Give an honest " +
     "confidence for how sure you are, and always cite the specific page evidence (a short " +
     "quote) that supports your verdict, even when the verdict is that the page does not match.";
 

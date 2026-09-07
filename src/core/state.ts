@@ -1,4 +1,5 @@
 import type { SelectedAction } from "../types/actions.js";
+import type { LastDispatchedActionEvidence } from "./instructionProgress.js";
 
 export class RunState {
   stepCount = 0;
@@ -47,6 +48,27 @@ export class RunState {
 
   /** Hostname of the previous step's observation, or undefined before the first step -- lets core/loop.ts detect a cross-host transition to trigger the (opt-in) host_context_snapshot capture. */
   lastObservedHostname: string | undefined;
+
+  /**
+   * Evidence-based, monotonic progress ratchet for successCriteria whose own description
+   * generically parses into multiple explicit ordered instruction lines (see
+   * src/reasoning/instructionParser.ts) -- keyed by criterion id, value = how many of that
+   * criterion's parsed instruction segments are conservatively confirmed complete so far.
+   * Never decreases, so it naturally survives every page transition/DOM update/modal/new tab
+   * exactly like satisfiedCriteriaIds. Engine-internal only: never part of the request/
+   * response contract, and never itself a stop_success gate -- see
+   * src/core/instructionProgress.ts.
+   */
+  readonly internalInstructionProgress = new Map<string, number>();
+
+  /**
+   * Generic evidence about the most recently *dispatched* action (see
+   * src/core/instructionProgress.ts's LastDispatchedActionEvidence), stored purely so the
+   * *next* runStep call can evaluate it against that step's already-fresh, genuinely
+   * post-action Observation -- never triggers an extra page query of its own. Undefined
+   * before the first dispatched action.
+   */
+  lastActionEvidence: LastDispatchedActionEvidence | undefined;
 
   recordVisit(url: string): void {
     this.visitedUrls.push(url);

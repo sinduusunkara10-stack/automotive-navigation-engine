@@ -18,6 +18,7 @@ import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds, type SuccessCriteriaEvidence } from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
+import { advanceInternalInstructionProgress } from "./instructionProgress.js";
 
 export type TerminalStatus =
   | "success"
@@ -59,6 +60,21 @@ export async function runStep(params: {
 
   let observation = await buildObservation(page);
   state.recordVisit(observation.url);
+
+  // Evidence-based, one-step-deferred internal instruction ratchet (see
+  // src/core/instructionProgress.ts): evaluates the *previous* step's already-dispatched
+  // action against this step's freshly rebuilt observation -- always run before this
+  // step's own decision so a caller's single, multiline successCriterion description
+  // (the real n8n request shape) tells the reasoning layer which explicit instruction
+  // line is still outstanding, exactly like a multi-criterion successCriteria list
+  // already does via satisfiedCriteriaIds.
+  advanceInternalInstructionProgress({
+    successCriteria: task.successCriteria,
+    satisfiedCriteriaIds: state.satisfiedCriteriaIds,
+    internalInstructionProgress: state.internalInstructionProgress,
+    lastAction: state.lastActionEvidence,
+    postActionObservation: observation,
+  });
 
   // Bounded, names-only cookie/storage footprint (never a value -- see
   // capture-modules/hostContext.ts), captured only on the step this run's hostname
@@ -326,10 +342,13 @@ export async function runStep(params: {
   const wantsDataLayerDelta = wantsCtaClickCapture && task.captureModules.includes("data_layer_evidence");
   const wantsGa4Window = wantsCtaClickCapture && task.captureModules.includes("ga4_network_events");
   const isClick = effectiveAction.type === "click";
+  // Read unconditionally for any click (never gated on wantsCtaClickCapture): this is also
+  // the evidence a semantic_page_match criterion's lastActionEvidence needs (see the
+  // evaluateSuccessCriteria call below and src/reasoning/semanticCriterionVerifier.ts) --
+  // that must work whether or not the caller separately requested the cta_clicks capture in
+  // the response.
   const clickedElementDetails =
-    wantsCtaClickCapture && isClick && effectiveAction.target
-      ? await readClickedElementDetails(page, effectiveAction.target)
-      : undefined;
+    isClick && effectiveAction.target ? await readClickedElementDetails(page, effectiveAction.target) : undefined;
 
   // Generic, action-attributed analytics capture (see docs/n8n-integration.md "Generic
   // action-attributed analytics capture"): before-state evidence for the dataLayer delta
@@ -453,6 +472,34 @@ export async function runStep(params: {
 
   state.recordAction(effectiveAction);
 
+  // Deferred, one-step evidence for the *next* runStep call's internal instruction ratchet
+  // (see src/core/instructionProgress.ts) -- never re-derives anything already computed
+  // above, just remembers it. Only click/navigate targets carry a meaningful accessible
+  // name; every other action type stores that field absent, which the ratchet already
+  // treats as "no target-level evidence".
+  state.lastActionEvidence = {
+    type: effectiveAction.type,
+    success: actionResult.success,
+    ...(isClick ? { targetAccessibleName: clickedElementDetails?.accessibleName ?? clickedElementDetails?.ctaText } : {}),
+    ...(actionResult.resultingUrl ? { resultingUrl: actionResult.resultingUrl } : {}),
+  };
+
+  // Generic evidence about this specific click, forwarded only to a semantic_page_match
+  // criterion that still needs to consult semanticVerifier (see
+  // src/reasoning/semanticCriterionVerifier.ts). Includes this action's own safely-validated
+  // resultingUrl (a same-tab navigation's destination, or a same-click-triggered popup's
+  // destination -- see actions/click.ts, which never reports a resultingUrl that hasn't
+  // already passed allowedDomains) alongside the clicked element's own attributes, so a
+  // terminal action that only opens a new tab (the engine's tracked page is never switched
+  // to it) can still be verified by meaning against what was actually clicked and where it
+  // safely led -- never requiring the original tracked page's own URL to change. This never
+  // claims or fabricates popup-level GA4/data-layer capture: those remain unsupported (see
+  // docs/n8n-integration.md "Terminal popup analytics" and this PR's known limitations).
+  const lastActionEvidenceForVerification =
+    isClick && clickedElementDetails
+      ? { ...clickedElementDetails, ...(actionResult.resultingUrl ? { resultingUrl: actionResult.resultingUrl } : {}) }
+      : undefined;
+
   const satisfiedCountBeforeThisAction = state.satisfiedCriteriaIds.size;
   const verifierDecisionCountBefore = semanticVerifier?.getUsageDiagnostics?.()?.decisions?.length ?? 0;
   const newlySatisfied = await evaluateSuccessCriteria(
@@ -461,7 +508,7 @@ export async function runStep(params: {
     task.objective,
     semanticVerifier,
     state.satisfiedCriteriaIds,
-    wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
+    lastActionEvidenceForVerification,
     buildCriteriaEvidence(captures),
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
@@ -697,6 +744,7 @@ async function obtainDecision(params: {
     recentActions: state.actionHistory,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     consentInteractionPolicy: task.safety.consentInteractionPolicy ?? "reject_optional",
+    internalInstructionProgress: Object.fromEntries(state.internalInstructionProgress),
   });
 
   const safetyResult = validateDecision({

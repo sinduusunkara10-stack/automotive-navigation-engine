@@ -105,3 +105,51 @@ test("accepts stop_success with no target required", () => {
     assert.deepEqual(result.action, { type: "stop_success" });
   }
 });
+
+// ---------------------------------------------------------------------------------------
+// FIX (ordered-instruction execution / low-confidence corrective retry, PART 2): confidence
+// is now checked *last*, after action/target/navigate validity -- so "low_confidence" as a
+// rejection reason means the decision was genuinely structurally valid and only its stated
+// confidence fell short, which claudeReasoningProvider.ts's bounded corrective retry relies
+// on before re-asking for a corrected choice.
+// ---------------------------------------------------------------------------------------
+
+test("FIX: an unknown target element id is reported over low confidence when both problems are present -- low_confidence must never mask a genuine structural problem", () => {
+  const context = buildTestReasoningContext();
+  const result = validateClaudeDecision(basePayload({ targetElementId: "el-does-not-exist", confidence: 0.05 }), context, MIN_CONFIDENCE);
+  assert.equal(result.valid, false);
+  if (!result.valid) {
+    assert.equal(result.reason, "unknown_target_element_id");
+  }
+});
+
+test("FIX: a disallowed action is reported over low confidence when both problems are present", () => {
+  const context = buildTestReasoningContext({ allowedActions: ["stop_failure"] });
+  const result = validateClaudeDecision(basePayload({ action: "click", confidence: 0.05 }), context, MIN_CONFIDENCE);
+  assert.equal(result.valid, false);
+  if (!result.valid) {
+    assert.equal(result.reason, "action_not_allowed");
+  }
+});
+
+test("FIX: a disallowed navigate host is reported over low confidence when both problems are present", () => {
+  const context = buildTestReasoningContext({ allowedActions: ["navigate", "stop_failure"] });
+  const result = validateClaudeDecision(
+    basePayload({ action: "navigate", targetElementId: undefined, navigateUrl: "https://not-allowed.test/x", confidence: 0.05 }),
+    context,
+    MIN_CONFIDENCE,
+  );
+  assert.equal(result.valid, false);
+  if (!result.valid) {
+    assert.equal(result.reason, "navigate_not_allowed");
+  }
+});
+
+test("FIX: low_confidence is reported only once every other structural check has already passed", () => {
+  const context = buildTestReasoningContext();
+  const result = validateClaudeDecision(basePayload({ confidence: 0.05 }), context, MIN_CONFIDENCE);
+  assert.equal(result.valid, false);
+  if (!result.valid) {
+    assert.equal(result.reason, "low_confidence");
+  }
+});
