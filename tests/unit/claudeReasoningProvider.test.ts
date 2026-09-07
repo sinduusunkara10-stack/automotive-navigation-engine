@@ -238,3 +238,140 @@ test("sanitisation: none of the new provider-error diagnostics ever leak the API
     "Claude reasoning provider could not produce a valid decision (response_schema_invalid); stopping safely.",
   );
 });
+
+// ---------------------------------------------------------------------------------------
+// FIX (run_57ca85c3-df96-4dcc-be6f-c3be55a202f1): PR #36 correctly classified a
+// response_schema_invalid/response_parse_failed failure but never changed anything before
+// the retry, which just resent the identical prompt and predictably failed the same way
+// again -- the run fell straight to stop_blocked. decide() now issues exactly one bounded
+// corrective retry for these two categories specifically: the same observation-derived
+// user prompt (never rescanned/re-selected), a system prompt amended to state the previous
+// response was invalid and restate only the allowed-action vocabulary, and never the raw
+// invalid response or any secret. Every other failure category is untouched -- still
+// governed only by the pre-existing, generic maxRetries policy.
+// ---------------------------------------------------------------------------------------
+
+function correctivePayload(): ClaudeDecisionPayload {
+  return {
+    action: "click",
+    targetElementId: "el-0",
+    reason: "Corrected: Continue is the visible path toward the objective.",
+    confidence: 0.9,
+  };
+}
+
+test("FIX (corrective retry): an invalid-schema first response followed by a valid corrective response is accepted", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), resultStep(correctivePayload())]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "click", target: "el-0" });
+  assert.equal(client.requests.length, 2, "expected exactly one corrective retry (2 calls total)");
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+  assert.equal(log[log.length - 1]?.correctiveRetry, true, "the accepted attempt must be flagged as the corrective retry");
+  assert.equal(log[0]?.reason, "response_schema_invalid");
+});
+
+test("FIX (corrective retry): a malformed-JSON first response followed by a valid corrective response is accepted", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_parse_failed"), resultStep(correctivePayload())]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "click", target: "el-0" });
+  assert.equal(client.requests.length, 2);
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+  assert.equal(log[log.length - 1]?.correctiveRetry, true);
+  assert.equal(log[0]?.reason, "response_parse_failed");
+});
+
+test("FIX (corrective retry): two invalid responses (original + failed correction) stop safely at stop_blocked, never chaining into a further generic retry", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), errorStep("response_schema_invalid")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.equal(client.requests.length, 2, "expected exactly 2 calls total: the original failure plus its one corrective retry, nothing more");
+  assert.equal(log.filter((e) => e.outcome === "error").length, 2);
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 1, "expected exactly one attempt flagged as the corrective retry");
+  assert.equal(log[log.length - 1]?.outcome, "fallback");
+});
+
+test("FIX (corrective retry): an HTTP/provider failure (rate limit) receives no new schema-correction retry -- only the existing generic maxRetries policy applies", async () => {
+  const client = new FakeReasoningModelClient([errorStep("rate_limited"), errorStep("rate_limited")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  // Unchanged from the pre-existing generic policy: 1 + maxRetries(1) = 2 calls, exactly
+  // as before this fix -- never an additional corrective attempt on top.
+  assert.equal(client.requests.length, 2);
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 0, "a transport/HTTP failure category must never be flagged as a corrective retry");
+});
+
+test("FIX (corrective retry): authentication and timeout failures also receive no schema-correction retry", async () => {
+  for (const category of ["authentication_failed", "timeout", "connection_error", "bad_request"]) {
+    const client = new FakeReasoningModelClient([errorStep(category), errorStep(category)]);
+    const { provider, log } = buildProvider(client);
+
+    await provider.decide(buildTestReasoningContext());
+
+    assert.equal(client.requests.length, 2, `expected no extra call for category "${category}"`);
+    assert.equal(log.filter((e) => e.correctiveRetry === true).length, 0, `expected no corrective retry for category "${category}"`);
+  }
+});
+
+test("FIX (corrective retry): the corrective retry reuses the exact same observation-derived user prompt and element selection -- never rescanned or re-selected", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), resultStep(correctivePayload())]);
+  const { provider, log } = buildProvider(client);
+
+  await provider.decide(buildTestReasoningContext());
+
+  assert.equal(client.requests.length, 2);
+  assert.equal(client.requests[0]?.userPrompt, client.requests[1]?.userPrompt, "the corrective retry's user prompt must be byte-identical to the original attempt's");
+  assert.deepEqual(log[0]?.elementSelection, log[1]?.elementSelection, "the corrective retry must carry the exact same element-selection diagnostic as the original attempt");
+});
+
+test("FIX (corrective retry): the corrective system prompt states the previous response was invalid and restates only the allowed actions -- never the raw invalid response or a secret", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), resultStep(correctivePayload())]);
+  const { provider } = buildProvider(client);
+  const context = buildTestReasoningContext({ allowedActions: ["click", "stop_blocked"] });
+
+  await provider.decide(context);
+
+  const originalSystem = client.requests[0]?.system ?? "";
+  const correctiveSystem = client.requests[1]?.system ?? "";
+
+  assert.notEqual(correctiveSystem, originalSystem, "the corrective retry's system prompt must differ from the original");
+  assert.ok(correctiveSystem.startsWith(originalSystem), "the corrective system prompt must be the original prompt plus an addendum, never a replacement");
+  assert.match(correctiveSystem, /previous response could not be used/i);
+  assert.match(correctiveSystem, /\["click","stop_blocked"\]/, "expected the corrective addendum to restate the exact allowed-action vocabulary");
+
+  // Never the API key, never anything resembling a raw provider error/response payload.
+  assert.ok(!correctiveSystem.includes(TEST_CONFIG.apiKey));
+  assert.ok(!correctiveSystem.toLowerCase().includes("response_schema_invalid"));
+  assert.ok(!correctiveSystem.toLowerCase().includes("stack"));
+});
+
+test("FIX (corrective retry): retryCount and provider call counts are accurate for both the recovered and the exhausted case", async () => {
+  const recoveredClient = new FakeReasoningModelClient([errorStep("response_schema_invalid"), resultStep(correctivePayload())]);
+  const { provider: recoveredProvider } = buildProvider(recoveredClient);
+  await recoveredProvider.decide(buildTestReasoningContext());
+  const recoveredDiagnostics = recoveredProvider.getUsageDiagnostics();
+  assert.equal(recoveredDiagnostics.callCount, 2);
+  assert.equal(recoveredDiagnostics.retryCount, 1, "the one corrective retry must count toward the existing retryCount");
+  assert.equal(recoveredDiagnostics.acceptedDecisionCount, 1);
+  assert.equal(recoveredDiagnostics.fallbackDecisionCount, 0);
+
+  const exhaustedClient = new FakeReasoningModelClient([errorStep("response_schema_invalid"), errorStep("response_schema_invalid")]);
+  const { provider: exhaustedProvider } = buildProvider(exhaustedClient);
+  await exhaustedProvider.decide(buildTestReasoningContext());
+  const exhaustedDiagnostics = exhaustedProvider.getUsageDiagnostics();
+  assert.equal(exhaustedDiagnostics.callCount, 2);
+  assert.equal(exhaustedDiagnostics.retryCount, 1);
+  assert.equal(exhaustedDiagnostics.rejectedDecisionCount, 2, "both the original error and the failed corrective retry count as rejected/error attempts");
+  assert.equal(exhaustedDiagnostics.fallbackDecisionCount, 1);
+});
