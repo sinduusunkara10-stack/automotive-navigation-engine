@@ -460,6 +460,61 @@ async function startBlockerFixtureServer(): Promise<{ baseUrl: string; close: ()
       );
     }
 
+    if (path === "/header-link-permanent-consent-overlay.html") {
+      // Mirrors the reported production incident's shape: an early-DOM, objective-
+      // irrelevant header/navigation link (never clicked by any well-behaved decision) sits
+      // under the very same full-viewport overlay that also covers the real, later,
+      // objective-relevant control -- and the overlay itself never clears. Consent-flavoured
+      // generic wording ("Manage cookie preferences"), never any brand/vendor text. See
+      // header-link-permanent-loading-overlay.html below for the non-consent variant proving
+      // the exact same mechanism applies identically either way.
+      return void page(
+        '<a id="header-link" href="#">Header link</a>' +
+          '<div id="overlay" style="position:fixed;inset:0;z-index:9999;" role="dialog">Manage cookie preferences</div>' +
+          OBJECTIVE_BUTTON,
+      );
+    }
+
+    if (path === "/header-link-permanent-loading-overlay.html") {
+      // Identical shape to the consent-flavoured fixture above, but with a loading/busy
+      // overlay instead -- proves the fix applies identically to a non-consent obstruction.
+      return void page(
+        '<a id="header-link" href="#">Header link</a>' +
+          '<div id="overlay" style="position:fixed;inset:0;z-index:9999;" role="status">Please wait, loading...</div>' +
+          OBJECTIVE_BUTTON,
+      );
+    }
+
+    if (path === "/tracked-target-clears-after-checks.html") {
+      // No overlay markup at all -- document.elementFromPoint is monkey-patched to
+      // synthesize "covered" for the objective control's own hit-test point for its first
+      // several checks (deterministic call-count, not wall-clock timing), then reports the
+      // real, uncovered result from then on. Proves that once a real decision's target is
+      // tracked as blocked and the obstruction is later confirmed gone, that same real
+      // target is attempted again and succeeds -- never abandoned or replaced.
+      return void page(
+        OBJECTIVE_BUTTON +
+          "<script>" +
+          "var checks = 0;" +
+          "var real = document.elementFromPoint.bind(document);" +
+          "document.elementFromPoint = function (x, y) {" +
+          "  var actual = real(x, y);" +
+          "  var objectiveEl = document.getElementById('objective');" +
+          "  if (actual === objectiveEl) {" +
+          "    checks += 1;" +
+          "    if (checks <= 6) {" +
+          "      var fake = document.createElement('div');" +
+          "      fake.setAttribute('role', 'dialog');" +
+          "      fake.textContent = 'Synthetic transient overlay';" +
+          "      return fake;" +
+          "    }" +
+          "  }" +
+          "  return actual;" +
+          "};" +
+          "</script>",
+      );
+    }
+
     res.writeHead(404).end("Not found");
   });
 
@@ -916,7 +971,7 @@ test("REGRESSION: the same mechanism applies identically to a non-consent persis
   }
 });
 
-test("REGRESSION: two mechanically-successful dismiss-type clicks are never trusted as proof the obstruction cleared -- only the covered-recheck is", async () => {
+test("REGRESSION: two mechanically-successful dismiss-type clicks are never trusted as proof the obstruction cleared -- the objective control (never itself selected or attempted) is never seeded as a tracked blocker target either", async () => {
   const { baseUrl, close } = await startBlockerFixtureServer();
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -931,10 +986,29 @@ test("REGRESSION: two mechanically-successful dismiss-type clicks are never trus
     const dismissSteps = response.steps.filter((s) => /dismiss attempt/i.test(s.decision) || s.selectedAction.type === "click");
     assert.ok(dismissSteps.slice(0, 2).every((s) => s.actionResult.success === true), "both dismiss clicks must succeed mechanically");
 
-    // Yet the run still correctly determines the obstruction never actually cleared.
+    // Yet the run still correctly determines the obstruction never actually cleared: the
+    // required success criterion (the objective control's own click handler) is never
+    // satisfied, so the run ends in failure regardless of the mechanical click outcomes.
     assert.equal(response.status, "failure");
-    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
-    assert.equal(reasoning.decisions.length, 2, "expected only the two real dismiss-attempt calls, nothing more");
+    // The covered objective control is never selected by a real decision and never
+    // dispatched -- FIX (blocker tracking must retain real semantic intent) means it is
+    // therefore never seeded as a tracked blocker target purely for being observably
+    // covered. Once the reasoning provider's own deliberately short candidate list (both
+    // dismiss attempts) is exhausted, it correctly proposes stop_failure itself -- the run
+    // never reaches stale_target_recovery_exhausted here, because no unattempted target was
+    // ever tracked in the first place.
+    assert.equal(response.diagnostics.finishReason, "stop_failure_action");
+    assert.equal(
+      reasoning.decisions.length,
+      3,
+      "expected the two real dismiss-attempt calls plus the provider's own final stop_failure, nothing skipped or extra",
+    );
+    const persistentBlockerSteps = response.steps.filter((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.equal(
+      persistentBlockerSteps.length,
+      0,
+      "no reasoning call may be skipped via the deterministic blocker path when no real decision ever targeted the covered objective control",
+    );
     await validateAgainstResponseSchema(response);
   } finally {
     await page.close();
@@ -967,6 +1041,219 @@ test("REGRESSION: a genuinely different obstruction (changed signature) between 
     );
     const skippedSteps = response.steps.filter((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
     assert.equal(skippedSteps.length, 0, "the never-matching signature must never trigger the deterministic skip path");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// FIX (real production run): core/loop.ts's proactive blocker-tracking branch used to seed
+// RunState.lastBlockerTargetId from `observation.interactiveElements.find((el) =>
+// el.covered)` -- the first covered element in DOM-scan order -- whenever nothing was
+// tracked yet, regardless of whether any real decision had ever selected or attempted it.
+// On a page where a full-viewport overlay covers both an early, objective-irrelevant header
+// link *and* the real, later, objective-relevant control, this picked up the header link
+// purely because of its position, and the deterministic stale-target-skip path then marched
+// toward stale_target_recovery_exhausted against that irrelevant target -- without the
+// reasoning provider ever getting a real attempt at the objective. The fix removes that
+// proactive seed entirely: tracking is now established only from the target a real decision
+// selected and the dispatched action for it actually failed as covered/intercepted (the
+// pre-existing, already-correct post-dispatch branch a few lines below). AlwaysSameTargetProvider
+// (defined above) is deliberately blind to reachability -- exactly the kind of decision that
+// must still be handled safely -- so it is the right stand-in to exercise this path, as it
+// already is for the bounded-recovery-exhausted test above. Entirely synthetic, generic
+// fixtures throughout -- no live brand, label, selector, or element id.
+// ---------------------------------------------------------------------------------------
+
+test("FIX: an early-DOM unrelated header link under the same overlay as a later objective-relevant control never becomes the blocker-recovery target merely because it appears first in DOM order", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/header-link-permanent-consent-overlay.html", {
+      limits: { maxSteps: 10, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    const headerLinkId = response.steps[0]?.observation.interactiveElements.find((el) => /header link/i.test(el.accessibleName))?.id;
+    assert.ok(headerLinkId, "expected the early header link to be present in the very first observation");
+    assert.ok(
+      response.steps.every((s) => s.selectedAction.target !== headerLinkId),
+      "the early, unrelated header link must never be dispatched against -- neither by a real decision (this stand-in never proposes it) nor by the deterministic blocker-recovery skip path",
+    );
+    await validateAgainstResponseSchema(response);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("FIX: a real decision selecting the objective-relevant control and getting intercepted anchors blocker tracking to that selected target, not to any other covered element", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/header-link-permanent-consent-overlay.html", {
+      limits: { maxSteps: 10, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    const objectiveId = response.steps[0]?.observation.interactiveElements.find((el) => /objective control/i.test(el.accessibleName))?.id;
+    assert.ok(objectiveId, "expected the objective control to be present in the very first observation");
+
+    // The first step's dispatched click is a real decision's own target, and it fails as
+    // covered/intercepted -- this is what actually establishes tracking (the pre-existing,
+    // unmodified post-dispatch branch), never mere observation.
+    const firstFailure = response.steps.find((s) => s.actionResult.staleTarget === true);
+    assert.ok(firstFailure, "expected at least one real, dispatched staleTarget failure");
+    assert.equal(firstFailure?.selectedAction.target, objectiveId, "the real decision's own target must be what actually failed");
+
+    // Once the deterministic skip path engages, it must act on that exact same
+    // decision-selected target -- never a substitute.
+    const skipStep = response.steps.find((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.ok(skipStep, "expected the deterministic blocker-recovery skip to eventually engage against a permanent obstruction");
+    assert.equal(skipStep?.selectedAction.target, objectiveId, "blocker tracking must be anchored to the real decision's target");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("FIX: the same blocker remaining after one recovery action produces exactly one bounded deterministic skip, spending no fresh reasoning call", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/header-link-permanent-consent-overlay.html", {
+      limits: { maxSteps: 10, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    // Verified empirically: a permanently covered, fixed real target reaches exhaustion in
+    // exactly 4 steps -- 2 real dispatched failures (the first establishes tracking, the
+    // second is the "one repeat" core/loop.ts always allows before skipping) followed by
+    // exactly 2 bounded deterministic skips, using exactly 4 real reasoning-provider calls
+    // total (the within-step pre-dispatch retry loop spends one extra call on each of the
+    // first 2 steps; the 2 skip steps spend zero).
+    assert.equal(response.steps.length, 4);
+    assert.equal(reasoning.decisions.length, 4, "expected exactly 4 real reasoning calls, all spent before the first skip");
+
+    const realFailureSteps = response.steps.filter((s) => !s.safetyFlags?.includes("persistent_blocker_detected"));
+    const skipSteps = response.steps.filter((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.equal(realFailureSteps.length, 2, "expected exactly 2 real recovery steps establishing and confirming the tracked target");
+    assert.equal(skipSteps.length, 2, "expected exactly 2 bounded deterministic skips once the same blocker remained");
+    assert.ok(realFailureSteps.every((s) => s.actionResult.staleTarget === true));
+
+    // The very first skip immediately follows the second real step -- one recovery action's
+    // worth of repeat is all that is ever allowed before skipping starts.
+    assert.equal(response.steps[2], skipSteps[0]);
+
+    // Every skip step dispatches deterministically -- no re-observation/recovery-retry
+    // bookkeeping of its own, since no reasoning call is made at all for it.
+    for (const s of skipSteps) {
+      assert.equal(s.reObservationAttempted, undefined);
+      assert.equal(s.recoveryAttempts, undefined);
+    }
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("FIX: once the blocker disappears, the same real intended target is attempted again and the journey continues", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/tracked-target-clears-after-checks.html", {
+      limits: { maxSteps: 10, maxBacktracks: 0, maxRepeatedActions: 10 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    const objectiveId = response.steps[0]?.observation.interactiveElements.find((el) => /objective control/i.test(el.accessibleName))?.id;
+    assert.ok(objectiveId, "expected the objective control to be present in the very first observation");
+
+    const firstFailureIndex = response.steps.findIndex((s) => s.selectedAction.target === objectiveId && s.actionResult.staleTarget === true);
+    const firstSuccessIndex = response.steps.findIndex((s) => s.selectedAction.target === objectiveId && s.actionResult.success === true);
+    assert.ok(firstFailureIndex >= 0, "expected the real, tracked target to genuinely fail as covered/intercepted at least once");
+    assert.ok(firstSuccessIndex >= 0, "expected the same real target to later succeed once the obstruction cleared");
+    assert.ok(firstFailureIndex < firstSuccessIndex, "the failure must precede the eventual success -- the journey resumes, it doesn't restart");
+
+    const successStep = response.steps[firstSuccessIndex];
+    assert.ok(
+      successStep?.progress.satisfiedCriteriaIds.includes("objective-clicked"),
+      "the objective's own success criterion must be satisfied once the same real target is successfully attempted",
+    );
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("FIX: a permanently-remaining blocker still reaches stale_target_recovery_exhausted without an infinite loop and without ever reverting to the unrelated first-covered header link", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/header-link-permanent-consent-overlay.html", {
+      limits: { maxSteps: 20, maxBacktracks: 0, maxRepeatedActions: 20 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+    assert.ok(response.steps.length < 20, `expected the dedicated recovery bound to stop the run well under maxSteps, took ${response.steps.length} steps`);
+
+    const headerLinkId = response.steps[0]?.observation.interactiveElements.find((el) => /header link/i.test(el.accessibleName))?.id;
+    assert.ok(headerLinkId, "expected the header link to be present in the observation");
+    assert.ok(
+      response.steps.every((s) => s.selectedAction.target !== headerLinkId),
+      "exhaustion must be reached against the real intended target, never by reverting to the unrelated first-covered header link",
+    );
+    await validateAgainstResponseSchema(response);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("FIX: the exact same mechanism applies to a generic non-consent overlay (a loading/busy panel), proving the behaviour is not consent-specific", async () => {
+  const { baseUrl, close } = await startBlockerFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = objectiveTask(baseUrl, "/header-link-permanent-loading-overlay.html", {
+      limits: { maxSteps: 20, maxBacktracks: 0, maxRepeatedActions: 20 },
+    });
+    const reasoning = new AlwaysSameTargetProvider(/objective control/i);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "failure");
+    assert.equal(response.diagnostics.finishReason, "stale_target_recovery_exhausted");
+
+    const headerLinkId = response.steps[0]?.observation.interactiveElements.find((el) => /header link/i.test(el.accessibleName))?.id;
+    assert.ok(headerLinkId, "expected the header link to be present in the observation");
+    assert.ok(
+      response.steps.every((s) => s.selectedAction.target !== headerLinkId),
+      "the non-consent overlay case must behave identically -- the unrelated header link is never targeted",
+    );
+
+    const objectiveId = response.steps[0]?.observation.interactiveElements.find((el) => /objective control/i.test(el.accessibleName))?.id;
+    const skipStep = response.steps.find((s) => s.safetyFlags?.includes("persistent_blocker_detected"));
+    assert.ok(skipStep, "expected the deterministic blocker-recovery skip to engage identically for a non-consent overlay");
+    assert.equal(skipStep?.selectedAction.target, objectiveId);
   } finally {
     await page.close();
     await browser.close();

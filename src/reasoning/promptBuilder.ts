@@ -68,6 +68,27 @@ const STRUCTURAL_RESERVE_FRACTION = 0.5;
 // selectPromptInteractiveElements below for why.
 const TAIL_ANCHOR_COUNT = 5;
 
+// A zero-relevance element chosen by stratifiedSample as its stratum's sole structural
+// representative can sit immediately next to other zero-relevance elements that together
+// form one semantic decision group (e.g. several sibling controls of one dismissible
+// panel) -- picking only the stratum representative can silently split that group across
+// the truncation boundary purely because of where the arithmetic stratum edges land. To
+// stay fully structural and language-independent (no CTA text dictionary, no
+// consent-keyword list, no brand-specific selector/wording), a bounded number of the
+// representative's immediate DOM-order neighbours are pulled in alongside it by index
+// proximity alone.
+//
+// MAX_NEIGHBOR_DISTANCE: how many index positions away, in either direction within the
+// zero-relevance pool, a neighbour can be and still count as "immediately nearby" a
+// stratum representative.
+const MAX_NEIGHBOR_DISTANCE = 2;
+
+// MAX_NEIGHBOR_ADDITIONS: hard ceiling, across one selectPromptInteractiveElements call, on
+// how many extra elements neighbour-inclusion can add beyond the normal tier-budgeted
+// selection -- keeps the existing prompt-budget protections intact: worst case,
+// selectedCount is `limit + MAX_NEIGHBOR_ADDITIONS`, never unbounded.
+const MAX_NEIGHBOR_ADDITIONS = 6;
+
 interface ScoredElement {
   el: InteractiveElement;
   index: number;
@@ -206,7 +227,33 @@ function selectPromptInteractiveElements(
   const stratified = stratifiedSample(strataPool, remainingBudget - tailAnchors.length);
 
   const structuralTaken = [...tailAnchors, ...stratified];
-  const selected = [...relevantTaken, ...structuralTaken].sort((a, b) => a.index - b.index);
+  const preNeighborIndices = new Set([...relevantTaken, ...structuralTaken].map((s) => s.index));
+
+  // See MAX_NEIGHBOR_DISTANCE/MAX_NEIGHBOR_ADDITIONS above: pull in a bounded number of each
+  // stratifiedSample pick's immediate DOM-order neighbours so a tight cluster of
+  // zero-relevance elements that together form one decision group isn't split across the
+  // stratum boundary that happened to select only one of them.
+  const zeroScoreByIndex = new Map<number, ScoredElement>(zeroScorePool.map((s) => [s.index, s]));
+  const neighborsTaken: ScoredElement[] = [];
+  for (const anchor of [...stratified].sort((a, b) => a.index - b.index)) {
+    if (neighborsTaken.length >= MAX_NEIGHBOR_ADDITIONS) {
+      break;
+    }
+    for (let distance = 1; distance <= MAX_NEIGHBOR_DISTANCE; distance += 1) {
+      for (const neighborIndex of [anchor.index - distance, anchor.index + distance]) {
+        if (neighborsTaken.length >= MAX_NEIGHBOR_ADDITIONS) {
+          break;
+        }
+        const neighbor = zeroScoreByIndex.get(neighborIndex);
+        if (neighbor && !preNeighborIndices.has(neighbor.index)) {
+          neighborsTaken.push(neighbor);
+          preNeighborIndices.add(neighbor.index);
+        }
+      }
+    }
+  }
+
+  const selected = [...relevantTaken, ...structuralTaken, ...neighborsTaken].sort((a, b) => a.index - b.index);
   const selectedIndices = new Set(selected.map((s) => s.index));
   const excludedRelevant = relevant.filter((s) => !selectedIndices.has(s.index));
 
@@ -216,7 +263,7 @@ function selectPromptInteractiveElements(
       candidateCount: elements.length,
       selectedCount: selected.length,
       relevantSelectedCount: relevantTaken.length,
-      structuralSelectedCount: structuralTaken.length,
+      structuralSelectedCount: structuralTaken.length + neighborsTaken.length,
       excludedRelevantCount: excludedRelevant.length,
       selected: selected.map((s) => ({
         id: s.el.id,
