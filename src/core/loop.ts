@@ -225,24 +225,20 @@ export async function runStep(params: {
       state.lastBlockerSignature = undefined;
       state.blockerSignatureRepeatCount = 0;
     }
-  } else {
-    // Nothing tracked yet: proactively pick up a covered element already visible in this
-    // fresh observation, if any, so the *actual* effect of whatever the model does next
-    // (including a click that dismisses/resolves it and mechanically "succeeds", per item
-    // 2) can be verified next step -- never trusting mechanical click success alone as
-    // proof the obstruction is gone. Deliberately the first covered element found, not a
-    // relevance-scored pick: keeping this generic and simple over clever, consistent with
-    // "smallest fix". No consent-specific detection anywhere in this branch (item 8).
-    const coveredElement = observation.interactiveElements.find((el) => el.covered);
-    if (coveredElement) {
-      const liveState = await readElementState(page, coveredElement.id);
-      if (liveState.covered && liveState.coveredBySignature) {
-        state.lastBlockerTargetId = coveredElement.id;
-        state.lastBlockerSignature = liveState.coveredBySignature;
-        state.blockerSignatureRepeatCount = 0;
-      }
-    }
   }
+  // Nothing tracked yet: intentionally left untracked here rather than seeding from
+  // whichever covered element happens to appear first in DOM order. An observationally
+  // covered element carries no evidence it is actually relevant to this run's objective --
+  // seeding from it let an early, unrelated covered element (e.g. a page header link
+  // sitting under a full-page overlay) become the tracked "blocker target" purely because
+  // of its DOM position, well before any real decision or dispatched action ever touched
+  // it, and the deterministic-skip path above would then march toward
+  // stale_target_recovery_exhausted against that irrelevant target without the reasoning
+  // provider ever getting a real attempt at the objective-relevant control. Tracking is
+  // seeded exactly once elsewhere in this function: after a real click actually fails as
+  // covered/intercepted (see the post-dispatch staleTarget handling below), which anchors
+  // it to the target a real decision selected or the effective action that actually
+  // failed, never to an arbitrary DOM-order guess.
 
   let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
 

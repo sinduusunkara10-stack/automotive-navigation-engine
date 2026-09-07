@@ -370,7 +370,7 @@ test("REGRESSION: dozens of repetitive, zero-relevance controls cannot consume t
   );
 });
 
-test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMENTS (40), regardless of candidate count", () => {
+test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMENTS + the bounded neighbour allowance (40 + 6 = 46), regardless of candidate count", () => {
   const manyElements = buildManyElements(500);
   const context = buildTestReasoningContext({
     objective: ENGLISH_OBJECTIVE,
@@ -383,7 +383,10 @@ test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMEN
 
   const prompt = buildReasoningPrompt(context);
   const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: unknown[] } };
-  assert.ok(payload.currentPage.interactiveElements.length <= 40);
+  // Selection is normally capped at 40 (MAX_INTERACTIVE_ELEMENTS); the bounded
+  // adjacent-decision-group neighbour allowance (MAX_NEIGHBOR_ADDITIONS) can add up to 6
+  // more on top, but selectedCount must never exceed that combined ceiling.
+  assert.ok(payload.currentPage.interactiveElements.length <= 46);
   assert.equal(prompt.elementSelection.selectedCount, payload.currentPage.interactiveElements.length);
   assert.ok(prompt.elementSelection.candidateCount === 500);
 });
@@ -493,6 +496,73 @@ test("REGRESSION: essential_only never permits granting broad/optional consent, 
   assert.match(prompt.system, /"essential_only"/);
   assert.match(prompt.system, /never click a control whose purpose is to grant broad or optional consent/i);
   assert.match(prompt.system, /never guess at or alter a granular settings screen/i);
+});
+
+// ---------------------------------------------------------------------------------------
+// FIX (real production run): a stratum can contain several *adjacent* zero-relevance
+// elements that together form one semantic decision group (e.g. several sibling controls
+// of one dismissible panel) -- stratifiedSample picks only one representative per stratum,
+// so the group could be silently split across the truncation boundary depending purely on
+// where the arithmetic stratum edges land, with no regard for which elements are actually
+// related. The fix (MAX_NEIGHBOR_DISTANCE/MAX_NEIGHBOR_ADDITIONS in promptBuilder.ts) pulls
+// in a bounded number of a stratum representative's immediate DOM-order neighbours, purely
+// by index proximity -- no CTA text dictionary, no consent-keyword list, no brand-specific
+// wording. This fixture is entirely generic/synthetic (no live brand, label, or element id).
+// ---------------------------------------------------------------------------------------
+
+test("FIX: an adjacent zero-relevance decision group near a stratum boundary reaches the prompt together, while a distant unrelated control does not, and the total stays bounded", () => {
+  const objective = "Advance through the product setup wizard and confirm the final review step.";
+
+  // 215 zero-relevance elements: with MAX_INTERACTIVE_ELEMENTS=40, no relevant matches, and
+  // TAIL_ANCHOR_COUNT=5, the structural strata pool is exactly 210 wide over 35 strata --
+  // an exact stratum width of 6, so stratum 0 covers indices [0, 6) precisely.
+  const elements = Array.from({ length: 215 }, (_, i) => ({
+    id: `el-${i}`,
+    role: "button",
+    accessibleName: `Row ${i}`,
+    visible: true,
+  }));
+
+  // Three adjacent controls at the very start of stratum 0 -- generic fixture wording for
+  // "continue without optional consent / manage settings / accept all", deliberately not
+  // the real incident's wording. stratifiedSample always prefers the first actionable,
+  // non-option-like element in a stratum, so el-0 becomes stratum 0's sole representative;
+  // being the lowest-index anchor overall, its neighbour pull runs first and is guaranteed
+  // to claim el-1/el-2 before any other stratum's pull can spend the shared budget.
+  elements[0] = { id: "el-0", role: "button", accessibleName: "Continue without accepting optional data", visible: true };
+  elements[1] = { id: "el-1", role: "button", accessibleName: "Manage settings", visible: true };
+  elements[2] = { id: "el-2", role: "button", accessibleName: "Accept all data collection", visible: true };
+
+  // Sits mid-stratum (index 33, stratum 5 spans [30, 36)) -- distance >=3 from every
+  // stratum boundary (30, 36) that could itself be a neighbour-pulling anchor, so it is
+  // never selected as a stratum representative and never falls within MAX_NEIGHBOR_DISTANCE
+  // of one either.
+  elements[33] = { id: "el-33", role: "button", accessibleName: "Isolated distant unrelated control", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective,
+    observation: {
+      url: "https://example-fictional-oem.test/setup",
+      title: "Setup wizard",
+      interactiveElements: elements,
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
+  const ids = payload.currentPage.interactiveElements.map((el) => el.id);
+
+  assert.ok(ids.includes("el-0"), "the stratum-selected member of the decision group must reach the prompt");
+  assert.ok(ids.includes("el-1"), "an immediate neighbour of the selected group member must reach the prompt too");
+  assert.ok(ids.includes("el-2"), "the whole adjacent decision group must reach the prompt together");
+
+  assert.ok(!ids.includes("el-33"), "a distant, unrelated control must not be pulled in by the neighbour allowance");
+
+  // Bound: normal per-tier selection is capped at MAX_INTERACTIVE_ELEMENTS (40); neighbour
+  // inclusion can add at most MAX_NEIGHBOR_ADDITIONS (6) more, never unbounded.
+  assert.ok(prompt.elementSelection.selectedCount > 40, "neighbour inclusion must have added elements beyond the normal cap");
+  assert.ok(prompt.elementSelection.selectedCount <= 46, "selectedCount must never exceed limit + MAX_NEIGHBOR_ADDITIONS");
+  assert.equal(payload.currentPage.interactiveElements.length, prompt.elementSelection.selectedCount);
 });
 
 test("REGRESSION: the system prompt never mentions accepting/granting consent as a preference under any policy except the explicit accept_optional opt-in", () => {
