@@ -5,8 +5,13 @@ import { buildClaudeDecisionSchema, type ClaudeDecisionPayload } from "./claudeD
 import { buildReasoningPrompt, type PromptElementSelectionDiagnostic } from "./promptBuilder.js";
 import { validateClaudeDecision } from "./validateClaudeDecision.js";
 import { readClaudeReasoningConfig, type ClaudeReasoningConfig } from "./config.js";
-import { createAnthropicReasoningModelClient } from "./anthropicReasoningModelClient.js";
+import {
+  createAnthropicReasoningModelClient,
+  RESPONSE_PARSE_FAILED_CATEGORY,
+  RESPONSE_SCHEMA_INVALID_CATEGORY,
+} from "./anthropicReasoningModelClient.js";
 import type { ReasoningProviderDiagnostics, ReasoningProviderDecisionSummary } from "../types/task-response.js";
+import type { ActionType } from "../types/actions.js";
 
 export interface ClaudeDecisionLogEntry {
   timestamp: string;
@@ -26,6 +31,50 @@ export interface ClaudeDecisionLogEntry {
    * reached the model, without having to reconstruct the selection logic themselves.
    */
   elementSelection?: PromptElementSelectionDiagnostic;
+  /**
+   * True only for the one bounded corrective retry issued after a response_schema_invalid/
+   * response_parse_failed failure (see decide() below). Internal-only -- never forwarded to
+   * ReasoningProviderDecisionSummary/the response schema -- exists purely so a caller of
+   * getDecisionLog() (e.g. a test) can distinguish this attempt from an ordinary retry
+   * without having to infer it from the attempt number.
+   */
+  correctiveRetry?: boolean;
+}
+
+// The two sanitised categories that indicate the model's response itself was unusable
+// (not valid JSON, or JSON that failed the decision schema) rather than a transport/HTTP
+// failure -- see anthropicReasoningModelClient.ts's sanitizeError. Only these two ever
+// trigger the bounded corrective retry below; every other error category (auth, rate
+// limit, timeout, connection, bad request, etc.) is left to whatever the existing
+// maxRetries policy already does, unchanged.
+const CORRECTIVE_RETRY_CATEGORIES: ReadonlySet<string> = new Set([
+  RESPONSE_PARSE_FAILED_CATEGORY,
+  RESPONSE_SCHEMA_INVALID_CATEGORY,
+]);
+
+type AttemptOutcome =
+  | { kind: "success"; decision: Decision }
+  | { kind: "failure"; reason: string };
+
+/**
+ * Builds the one-shot corrective retry's system prompt: the original system prompt
+ * (unchanged, so every other instruction -- objective handling, safety wording, consent
+ * policy, etc. -- still applies) plus a short, fully generic addendum appended at the end.
+ * The addendum states only that the previous response was invalid and restates the exact
+ * allowed-action vocabulary -- never the raw invalid response, never a provider payload,
+ * never brand/site-specific wording (item 2/5/6/12 of the fix). The actual JSON schema
+ * itself is unchanged and still passed structurally via outputSchema on every attempt
+ * (including this one) -- this addendum only reinforces it in plain language.
+ */
+function buildCorrectiveSystemPrompt(baseSystem: string, allowedActions: readonly ActionType[]): string {
+  return (
+    baseSystem +
+    " Your previous response could not be used: it was not valid JSON, or it did not conform to the " +
+    "required decision schema you were given. This is a one-time corrective retry -- respond with exactly " +
+    "one JSON object that strictly conforms to that schema, choosing \"action\" only from this exact " +
+    `allowed vocabulary: ${JSON.stringify(allowedActions)}. Include nothing outside the JSON object, and ` +
+    "never invent a field or action that isn't part of the schema you were given."
+  );
 }
 
 export interface ClaudeReasoningProviderOptions {
@@ -92,71 +141,151 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
     const prompt = buildReasoningPrompt(context);
     const attempts = 1 + this.config.maxRetries;
     let lastReason = "unknown_error";
+    // Bounded to at most one per decide() call (item 11 of the fix), regardless of
+    // maxRetries -- see CORRECTIVE_RETRY_CATEGORIES's doc comment above.
+    let correctiveRetryUsed = false;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const startedAt = Date.now();
-      try {
-        const result = await this.modelClient.createDecision<ClaudeDecisionPayload>({
-          model: this.config.model,
-          maxOutputTokens: this.config.maxOutputTokens,
-          timeoutMs: this.config.timeoutMs,
-          system: prompt.system,
-          userPrompt: prompt.user,
-          outputSchema: schema,
-        });
-        const latencyMs = Date.now() - startedAt;
+      const outcome = await this.attemptOnce({
+        context,
+        schema,
+        stepIndex,
+        attempt,
+        systemPrompt: prompt.system,
+        userPrompt: prompt.user,
+        elementSelection: prompt.elementSelection,
+      });
+      if (outcome.kind === "success") {
+        return outcome.decision;
+      }
+      lastReason = outcome.reason;
 
-        if (!result.parsedOutput) {
-          lastReason = result.stopReason === "refusal" ? "refusal" : "malformed_output";
-          this.log({
-            stepIndex,
-            attempt,
-            outcome: "rejected",
-            reason: lastReason,
-            latencyMs,
-            usage: result.usage,
-            elementSelection: prompt.elementSelection,
-          });
-          continue;
-        }
-
-        const validation = validateClaudeDecision(result.parsedOutput, context, this.config.minConfidence);
-        if (!validation.valid) {
-          lastReason = validation.reason;
-          this.log({
-            stepIndex,
-            attempt,
-            outcome: "rejected",
-            reason: lastReason,
-            confidence: result.parsedOutput.confidence,
-            latencyMs,
-            usage: result.usage,
-            elementSelection: prompt.elementSelection,
-          });
-          continue;
-        }
-
-        this.log({
+      // REGRESSION (run_57ca85c3-df96-4dcc-be6f-c3be55a202f1): PR #36 correctly classified
+      // a response_schema_invalid/response_parse_failed failure but never changed anything
+      // before the (already-existing, generic) retry, which simply resent the identical
+      // prompt and predictably failed the same way again -- the run fell straight to
+      // stop_blocked without ever giving the model a corrective signal. On the first
+      // occurrence of either category, one bounded corrective retry is issued instead: the
+      // exact same observation-derived prompt.user (never rescanned, never re-selected --
+      // items 3/4) plus a short system-prompt addendum stating the previous response was
+      // invalid and restating only the allowed-action vocabulary (never the raw invalid
+      // response, never any provider payload -- items 2/5/6). Whatever this one corrective
+      // attempt produces (success or failure) is final for this failure category this
+      // step -- the loop never falls through to a second, blind generic retry on top of it.
+      if (!correctiveRetryUsed && CORRECTIVE_RETRY_CATEGORIES.has(outcome.reason)) {
+        correctiveRetryUsed = true;
+        const correctiveOutcome = await this.attemptOnce({
+          context,
+          schema,
           stepIndex,
-          attempt,
-          outcome: "accepted",
-          confidence: validation.confidence,
-          latencyMs,
-          usage: result.usage,
+          attempt: attempt + 1,
+          systemPrompt: buildCorrectiveSystemPrompt(prompt.system, context.allowedActions),
+          userPrompt: prompt.user,
           elementSelection: prompt.elementSelection,
+          correctiveRetry: true,
         });
-        return {
-          action: validation.action,
-          rationale: `${validation.reason} (Claude confidence ${validation.confidence.toFixed(2)})`,
-        };
-      } catch (error) {
-        const latencyMs = Date.now() - startedAt;
-        lastReason = error instanceof ReasoningModelError ? error.category : "provider_error";
-        this.log({ stepIndex, attempt, outcome: "error", reason: lastReason, latencyMs, elementSelection: prompt.elementSelection });
+        if (correctiveOutcome.kind === "success") {
+          return correctiveOutcome.decision;
+        }
+        lastReason = correctiveOutcome.reason;
+        break;
       }
     }
 
     return this.fallback(lastReason, stepIndex, prompt.elementSelection);
+  }
+
+  /**
+   * Performs exactly one model call, parse, and validation cycle, and logs its outcome --
+   * factored out so decide()'s normal attempt loop and its one bounded corrective retry
+   * (see decide() above) share identical call/validate/log behaviour, differing only in
+   * which system/user prompt and attempt number they're given.
+   */
+  private async attemptOnce(params: {
+    context: ReasoningContext;
+    schema: ReturnType<typeof buildClaudeDecisionSchema>;
+    stepIndex: number;
+    attempt: number;
+    systemPrompt: string;
+    userPrompt: string;
+    elementSelection?: PromptElementSelectionDiagnostic;
+    correctiveRetry?: boolean;
+  }): Promise<AttemptOutcome> {
+    const { context, schema, stepIndex, attempt, systemPrompt, userPrompt, elementSelection, correctiveRetry } = params;
+    const startedAt = Date.now();
+    try {
+      const result = await this.modelClient.createDecision<ClaudeDecisionPayload>({
+        model: this.config.model,
+        maxOutputTokens: this.config.maxOutputTokens,
+        timeoutMs: this.config.timeoutMs,
+        system: systemPrompt,
+        userPrompt,
+        outputSchema: schema,
+      });
+      const latencyMs = Date.now() - startedAt;
+
+      if (!result.parsedOutput) {
+        const reason = result.stopReason === "refusal" ? "refusal" : "malformed_output";
+        this.log({
+          stepIndex,
+          attempt,
+          outcome: "rejected",
+          reason,
+          latencyMs,
+          usage: result.usage,
+          elementSelection,
+          ...(correctiveRetry ? { correctiveRetry } : {}),
+        });
+        return { kind: "failure", reason };
+      }
+
+      const validation = validateClaudeDecision(result.parsedOutput, context, this.config.minConfidence);
+      if (!validation.valid) {
+        this.log({
+          stepIndex,
+          attempt,
+          outcome: "rejected",
+          reason: validation.reason,
+          confidence: result.parsedOutput.confidence,
+          latencyMs,
+          usage: result.usage,
+          elementSelection,
+          ...(correctiveRetry ? { correctiveRetry } : {}),
+        });
+        return { kind: "failure", reason: validation.reason };
+      }
+
+      this.log({
+        stepIndex,
+        attempt,
+        outcome: "accepted",
+        confidence: validation.confidence,
+        latencyMs,
+        usage: result.usage,
+        elementSelection,
+        ...(correctiveRetry ? { correctiveRetry } : {}),
+      });
+      return {
+        kind: "success",
+        decision: {
+          action: validation.action,
+          rationale: `${validation.reason} (Claude confidence ${validation.confidence.toFixed(2)})`,
+        },
+      };
+    } catch (error) {
+      const latencyMs = Date.now() - startedAt;
+      const reason = error instanceof ReasoningModelError ? error.category : "provider_error";
+      this.log({
+        stepIndex,
+        attempt,
+        outcome: "error",
+        reason,
+        latencyMs,
+        elementSelection,
+        ...(correctiveRetry ? { correctiveRetry } : {}),
+      });
+      return { kind: "failure", reason };
+    }
   }
 
   /**

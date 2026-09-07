@@ -24,6 +24,11 @@ import {
 const RESPONSE_NOT_JSON_PREFIX = "Failed to parse structured output as JSON:";
 const RESPONSE_SCHEMA_INVALID_PREFIX = "Failed to parse structured output:";
 
+// Exported so ClaudeReasoningProvider can recognise these two specific categories (to
+// trigger its bounded corrective retry) without duplicating the literal strings.
+export const RESPONSE_PARSE_FAILED_CATEGORY = "response_parse_failed";
+export const RESPONSE_SCHEMA_INVALID_CATEGORY = "response_schema_invalid";
+
 // Maps real SDK exceptions to a small, sanitised category set. Never forwards
 // error.message across this boundary — the real Anthropic client is constructed with
 // the caller-supplied API key, and SDK error messages are not a place this code
@@ -40,8 +45,8 @@ export function sanitizeError(error: unknown): ReasoningModelError {
   if (error instanceof Anthropic.APIError) return new ReasoningModelError(`api_error_${error.status ?? "unknown"}`);
   if (error instanceof Anthropic.AnthropicError) {
     const message = error.message ?? "";
-    if (message.startsWith(RESPONSE_NOT_JSON_PREFIX)) return new ReasoningModelError("response_parse_failed");
-    if (message.startsWith(RESPONSE_SCHEMA_INVALID_PREFIX)) return new ReasoningModelError("response_schema_invalid");
+    if (message.startsWith(RESPONSE_NOT_JSON_PREFIX)) return new ReasoningModelError(RESPONSE_PARSE_FAILED_CATEGORY);
+    if (message.startsWith(RESPONSE_SCHEMA_INVALID_PREFIX)) return new ReasoningModelError(RESPONSE_SCHEMA_INVALID_CATEGORY);
   }
   return new ReasoningModelError("provider_error");
 }
