@@ -375,3 +375,111 @@ test("FIX (corrective retry): retryCount and provider call counts are accurate f
   assert.equal(exhaustedDiagnostics.rejectedDecisionCount, 2, "both the original error and the failed corrective retry count as rejected/error attempts");
   assert.equal(exhaustedDiagnostics.fallbackDecisionCount, 1);
 });
+
+// ---------------------------------------------------------------------------------------
+// FIX (run_e78d8d76-b487-4ece-8e0b-a0e2fbd48b1b, PART 2): a structurally valid decision
+// rejected only for confidence below the run's minimum now gets the same kind of one-shot
+// bounded corrective retry as a schema/parse failure -- sharing the exact same
+// correctiveRetryUsed budget (item 11 of the fix), never a second, independent allowance.
+// ---------------------------------------------------------------------------------------
+
+function lowConfidencePayload(confidence: number): ClaudeDecisionPayload {
+  return {
+    action: "click",
+    targetElementId: "el-0",
+    reason: "Not very sure about this one.",
+    confidence,
+  };
+}
+
+test("FIX (low-confidence corrective retry): a structurally valid but low-confidence first response followed by a confident corrective response is accepted", async () => {
+  const client = new FakeReasoningModelClient([resultStep(lowConfidencePayload(0.1)), resultStep(correctivePayload())]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "click", target: "el-0" });
+  assert.equal(client.requests.length, 2, "expected exactly one corrective retry (2 calls total)");
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+  assert.equal(log[log.length - 1]?.correctiveRetry, true, "the accepted attempt must be flagged as the corrective retry");
+  assert.equal(log[0]?.reason, "low_confidence");
+});
+
+test("FIX (low-confidence corrective retry): two low-confidence decisions still stop safely at stop_blocked, using exactly the shared corrective budget", async () => {
+  const client = new FakeReasoningModelClient([resultStep(lowConfidencePayload(0.1)), resultStep(lowConfidencePayload(0.2))]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.equal(client.requests.length, 2, "expected exactly 2 calls total: the original low-confidence decision plus its one corrective retry, nothing more");
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 1);
+  assert.equal(log[log.length - 1]?.outcome, "fallback");
+});
+
+test("FIX (low-confidence corrective retry): the corrective system prompt states the previous decision was below the confidence threshold and restates the earliest-unfinished/pending/terminal instruction partition -- never the previous raw response or a secret", async () => {
+  const client = new FakeReasoningModelClient([resultStep(lowConfidencePayload(0.1)), resultStep(correctivePayload())]);
+  const { provider } = buildProvider(client);
+  const orderedCriteria = [
+    { id: "select-item", type: "element_present" as const, description: "Select the specified item.", config: {}, required: true },
+    { id: "primary-progression", type: "element_present" as const, description: "Activate the primary progression action.", config: {}, required: true },
+    { id: "terminal-action", type: "url_pattern" as const, description: "Select the specified terminal action.", config: {}, required: true },
+  ];
+  const context = buildTestReasoningContext({ successCriteria: orderedCriteria, satisfiedCriteriaIds: ["select-item"] });
+
+  await provider.decide(context);
+
+  const originalSystem = client.requests[0]?.system ?? "";
+  const correctiveSystem = client.requests[1]?.system ?? "";
+
+  assert.notEqual(correctiveSystem, originalSystem);
+  assert.ok(correctiveSystem.startsWith(originalSystem));
+  assert.match(correctiveSystem, /rejected only because its stated confidence was below the minimum/i);
+  assert.match(correctiveSystem, /Completed instructions so far:.*Select the specified item\./i);
+  assert.match(correctiveSystem, /earliest unfinished instruction to act on now:.*Activate the primary progression action\./i);
+  assert.match(correctiveSystem, /terminal instruction.*Select the specified terminal action\./i);
+
+  // Never the API key, never the numeric rejected confidence value, never a raw response.
+  assert.ok(!correctiveSystem.includes(TEST_CONFIG.apiKey));
+  assert.ok(!correctiveSystem.includes("0.1"));
+});
+
+test("FIX: schema/parse correction and low-confidence correction share one strict budget -- they never chain into two corrective attempts", async () => {
+  // The original attempt fails schema-invalid (triggers the corrective retry); the
+  // corrective attempt itself comes back low-confidence -- this must never be treated as a
+  // *second*, independent trigger for another corrective attempt.
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), resultStep(lowConfidencePayload(0.1))]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.equal(
+    client.requests.length,
+    2,
+    "expected exactly 2 calls: the original schema failure plus its one corrective retry -- never a second corrective attempt for the low-confidence outcome",
+  );
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 1);
+  assert.equal(log[log.length - 1]?.reason, "low_confidence");
+});
+
+test("FIX: the maximum possible provider calls per reasoning step is bounded at (1 + maxRetries) + 1 shared corrective retry, never more", async () => {
+  const badTargetPayload: ClaudeDecisionPayload = {
+    action: "click",
+    targetElementId: "el-not-real",
+    reason: "Targeting an element that was never observed.",
+    confidence: 0.9,
+  };
+  // attempt0: a non-corrective-eligible rejection (unknown_target_element_id) -- the normal
+  // generic maxRetries loop continues as before this fix, no corrective retry yet.
+  // attempt1 (the single generic retry maxRetries=1 allows): low-confidence -- *now* the
+  // shared corrective budget triggers for the first time, spending one more call.
+  const client = new FakeReasoningModelClient([resultStep(badTargetPayload), resultStep(lowConfidencePayload(0.1)), resultStep(correctivePayload())]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.equal(client.requests.length, 3, "worst case under this fix: 2 normal attempts (1 + maxRetries=1) plus exactly 1 shared corrective retry = 3 total calls");
+  assert.deepEqual(decision.action, { type: "click", target: "el-0" });
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 1);
+});

@@ -32,10 +32,6 @@ export function validateClaudeDecision(
     return { valid: false, reason: "action_not_allowed" };
   }
 
-  if (payload.confidence < minConfidence) {
-    return { valid: false, reason: "low_confidence" };
-  }
-
   if (ACTIONS_REQUIRING_ELEMENT_TARGET.has(payload.action)) {
     if (!payload.targetElementId) {
       return { valid: false, reason: "missing_target_element_id" };
@@ -50,6 +46,15 @@ export function validateClaudeDecision(
     if (!payload.navigateUrl || !checkNavigationAllowed(payload.navigateUrl, context.allowedDomains)) {
       return { valid: false, reason: "navigate_not_allowed" };
     }
+  }
+
+  // Checked last, deliberately: "low_confidence" must mean the decision was otherwise
+  // structurally valid (allowed action, resolvable target, allowed navigate host) and only
+  // its confidence fell short -- see claudeReasoningProvider.ts's bounded corrective retry,
+  // which relies on this reason meaning exactly that before it re-asks for a corrected
+  // choice rather than treating an unrelated structural problem as a confidence issue.
+  if (payload.confidence < minConfidence) {
+    return { valid: false, reason: "low_confidence" };
   }
 
   return { valid: true, action: buildSelectedAction(payload), reason: payload.reason, confidence: payload.confidence };

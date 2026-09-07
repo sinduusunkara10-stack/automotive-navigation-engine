@@ -291,6 +291,12 @@ export async function runTask(params: {
     let steps: StepLog[] = [];
     let terminal: TerminalStatus | undefined;
     let finishReason = "loop_exhausted";
+    // Tracked from the *live*, unbounded step sequence as the loop runs -- never from the
+    // (possibly storage-bounded, middle-steps-dropped) `steps` array below, since a step
+    // whose action actually produced a URL can be pruned from storage by maxStoredSteps
+    // while a later step's own action never produces one (e.g. the terminal stop_success
+    // step itself never navigates). See resolveFinalUrl's doc comment for why this matters.
+    let lastResultingUrl: string | undefined;
 
     while (!terminal) {
       const outcome = await runStep({
@@ -303,6 +309,9 @@ export async function runTask(params: {
         semanticVerifier,
         isMemoryThresholdBreached,
       });
+      if (outcome.stepLog.actionResult.resultingUrl) {
+        lastResultingUrl = outcome.stepLog.actionResult.resultingUrl;
+      }
       // Bounded for storage only, after everything that needs the step's *live*,
       // unbounded observation (decision validation, journey_path capture) has already run
       // against outcome.stepLog itself -- see boundStepLogForStorage's own comment.
@@ -328,7 +337,7 @@ export async function runTask(params: {
       status: terminal,
       finishReason,
       statusReason: finishReason,
-      finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
+      finalUrl: resolveFinalUrl(lastResultingUrl, lastStep ? lastStep.currentUrl : task.startUrl),
       reasoning,
       semanticVerifier,
       domainDiscovery: discovery,
@@ -338,6 +347,24 @@ export async function runTask(params: {
     detachGa4Capture?.();
     detachErrorCapture?.();
   }
+}
+
+/**
+ * Prefers the most recent action that actually produced a URL, tracked live across the
+ * whole (unbounded) step sequence, over the naive "last stored step's pre-action
+ * observation URL" -- the two already agree for an ordinary same-page/same-tab navigation
+ * (the next step's own observation is built fresh against that same post-action URL), but
+ * diverge for a click that opens a new tab/window: the engine's tracked `page` never
+ * navigates in that case (see actions/click.ts's popup handling), so the terminal step's
+ * own currentUrl would otherwise silently keep reporting the pre-click page instead of the
+ * new tab's actual destination. Deliberately never re-derived from the *stored* `steps`
+ * array here: maxStoredSteps can prune the one middle step that actually produced the
+ * relevant URL while keeping only the first and terminal steps, which would otherwise walk
+ * back past the terminal step to a stale, unrelated resultingUrl. Falls back to `fallback`
+ * (the previous, pre-existing behaviour) when no step ever produced a resultingUrl at all.
+ */
+function resolveFinalUrl(lastResultingUrl: string | undefined, fallback: string): string {
+  return lastResultingUrl ?? fallback;
 }
 
 function buildTerminalResponse(params: {

@@ -323,6 +323,24 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
 
   const urlBeforeClick = safePageUrl(page) ?? "";
 
+  // Generic new-tab/popup evidence: a control with target="_blank" (or a window.open()
+  // handler) never navigates *this* page at all -- mainFrameNavigated below would stay
+  // false and the click would otherwise be reported as a no-op with the unchanged
+  // pre-click URL, even though it genuinely opened a destination. Registered on the
+  // browser context (fires for any new page/tab within it) before the click so a fast
+  // popup is never missed; only the first one is captured, matching "one action, one
+  // result." The engine's own tracked `page` never switches to it -- only its resulting
+  // URL is surfaced, via the exact same ActionResult.resultingUrl a same-tab navigation
+  // already reports, so every downstream consumer (analytics capture, finalUrl) needs no
+  // extra concept for this case.
+  let capturedPopup: Page | undefined;
+  const onPopup = (newPage: Page) => {
+    if (!capturedPopup) {
+      capturedPopup = newPage;
+    }
+  };
+  page.context().on("page", onPopup);
+
   let mainFrameNavigated = false;
   const onFrameNavigated = (frame: Frame) => {
     if (frame === page.mainFrame()) {
@@ -336,6 +354,8 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     await clickTarget.click(selector, { timeout: CLICK_ELEMENT_TIMEOUT_MS });
   } catch (error) {
     page.off("framenavigated", onFrameNavigated);
+    page.context().off("page", onPopup);
+    await capturedPopup?.close().catch(() => {});
     const message = error instanceof Error ? error.message : String(error);
     if (!/timeout/i.test(message)) {
       return { success: false, error: message };
@@ -367,6 +387,26 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     await page.waitForTimeout(NAVIGATION_DETECT_GRACE_MS).catch(() => {});
   }
   page.off("framenavigated", onFrameNavigated);
+  page.context().off("page", onPopup);
+
+  if (capturedPopup) {
+    try {
+      await capturedPopup.waitForLoadState("domcontentloaded", { timeout: timeoutMs });
+    } catch {
+      // Best-effort settle only -- still read whatever URL the popup currently has rather
+      // than treating a slow-loading new tab as a failure of this (already-dispatched)
+      // click.
+    }
+    const popupUrl = safePageUrl(capturedPopup);
+    await capturedPopup.close().catch(() => {});
+    if (popupUrl && checkNavigationAllowed(popupUrl, allowedDomains)) {
+      await page.waitForTimeout(PAGE_SETTLE_DELAY_MS).catch(() => {});
+      return { success: true, resultingUrl: popupUrl };
+    }
+    // No usable popup URL, or it fell outside allowedDomains -- never report an unreadable
+    // or unsafe URL as this click's result; fall through to the normal same-page
+    // resolution below exactly as if no popup had appeared.
+  }
 
   if (!mainFrameNavigated) {
     // Generic settle wait, same fixed budget as the post-navigation case below -- lets a
