@@ -160,3 +160,81 @@ test("returns a safe fallback immediately when no actions are allowed, without c
   assert.equal(log.length, 1);
   assert.equal(log[0]?.outcome, "fallback");
 });
+
+// ---------------------------------------------------------------------------------------
+// FIX (CONFIRMED ISSUE 2, run_a9eb40df-0191-44af-9ce9-acdcab7e8bb5): a real run's error
+// outcome reported nothing more actionable than the generic "provider_error" -- see
+// anthropicReasoningModelClient.test.ts for the underlying sanitizeError fix (it now
+// classifies the two failure shapes the Anthropic SDK's own response-parsing helper can
+// throw: raw output that isn't valid JSON, and JSON that fails the decision schema). These
+// tests confirm end-to-end, at the ReasoningProvider boundary, that a specific category
+// reaches both the structured decision log and the human-readable fallback rationale
+// safely -- never the API key, never a raw model response, never a full prompt -- based
+// only on failure shapes already represented by the ReasoningModelClient abstraction
+// (ReasoningModelError + its category), with no dependency on the real Anthropic SDK.
+// ---------------------------------------------------------------------------------------
+
+test("FIX (issue 2): a malformed/invalid decision response (JSON parse failure) is recorded and reported as response_parse_failed, never the generic provider_error", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_parse_failed"), errorStep("response_parse_failed")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.match(decision.rationale, /response_parse_failed/);
+  assert.doesNotMatch(decision.rationale, /provider_error/);
+  assert.ok(log.some((e) => e.reason === "response_parse_failed"));
+});
+
+test("FIX (issue 2): a malformed/invalid decision response (schema validation failure) is recorded and reported as response_schema_invalid, never the generic provider_error", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), errorStep("response_schema_invalid")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.match(decision.rationale, /response_schema_invalid/);
+  assert.doesNotMatch(decision.rationale, /provider_error/);
+  assert.ok(log.some((e) => e.reason === "response_schema_invalid"));
+});
+
+test("FIX (issue 2): a provider timeout is recorded and reported as timeout, never the generic provider_error", async () => {
+  const client = new FakeReasoningModelClient([errorStep("timeout"), errorStep("timeout")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.match(decision.rationale, /timeout/);
+  assert.doesNotMatch(decision.rationale, /provider_error/);
+  assert.ok(log.some((e) => e.reason === "timeout"));
+});
+
+test("FIX (issue 2): an empty/unparseable response (no thrown error, but no parsed output either) is still recorded as malformed_output, never the generic provider_error -- confirms this pre-existing path is already actionable", async () => {
+  const client = new FakeReasoningModelClient([resultStep<ClaudeDecisionPayload>(null), resultStep<ClaudeDecisionPayload>(null)]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.match(decision.rationale, /malformed_output/);
+  assert.doesNotMatch(decision.rationale, /provider_error/);
+  assert.ok(log.some((e) => e.reason === "malformed_output"));
+});
+
+test("sanitisation: none of the new provider-error diagnostics ever leak the API key, and the fallback rationale never carries a raw error message", async () => {
+  const client = new FakeReasoningModelClient([errorStep("response_schema_invalid"), errorStep("response_schema_invalid")]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext());
+
+  const serializedLog = JSON.stringify(log);
+  assert.ok(!serializedLog.includes(TEST_CONFIG.apiKey));
+  assert.ok(!decision.rationale.includes(TEST_CONFIG.apiKey));
+  // The rationale is the short, fixed template string plus the sanitised category only --
+  // never a raw SDK message, never prompt content.
+  assert.equal(
+    decision.rationale,
+    "Claude reasoning provider could not produce a valid decision (response_schema_invalid); stopping safely.",
+  );
+});
