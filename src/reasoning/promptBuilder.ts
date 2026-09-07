@@ -2,6 +2,7 @@ import type { ReasoningContext } from "./reasoningProvider.js";
 import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
 import type { InteractiveElement, PromptElementSelectionDiagnostic } from "../types/task-response.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
+import { parseOrderedInstructions } from "./instructionParser.js";
 
 /**
  * Plain-language instruction for this run's consentInteractionPolicy (see
@@ -85,13 +86,31 @@ export interface InstructionProgress {
   terminal?: InstructionPosition;
 }
 
+/**
+ * `internalInstructionProgress` (see src/core/instructionProgress.ts) covers the real n8n
+ * request shape: a single semantic_page_match successCriterion whose own description is the
+ * caller's complete multiline ordered objective, rather than one criterion per instruction.
+ * When an ungrouped, required criterion's description generically parses (see
+ * src/reasoning/instructionParser.ts) into two or more explicit instruction lines, that one
+ * criterion's single position is expanded here into one synthetic position per parsed line
+ * (id `${criterion.id}#${index}`) -- completed exactly up to whatever
+ * internalInstructionProgress reports for that criterion, except the criterion's *final*
+ * parsed line, which is only ever marked completed once the criterion's own id is already in
+ * satisfiedCriteriaIds (the real, caller-supplied evaluation remains the sole stop_success
+ * gate; this is guidance for action selection only). A criterion whose description does not
+ * parse into multiple lines (e.g. a short single-sentence description, as every existing
+ * multi-criterion caller already uses) is completely unaffected -- this reproduces the
+ * previous behaviour exactly for that case.
+ */
 export function computeInstructionProgress(
   successCriteria: readonly SuccessCriterion[],
   satisfiedCriteriaIds: readonly string[],
+  internalInstructionProgress?: Readonly<Record<string, number>>,
 ): InstructionProgress {
   const satisfied = new Set(satisfiedCriteriaIds);
   const positions: InstructionPosition[] = [];
   const groupIndex = new Map<string, number>();
+  const syntheticCompleted = new Set<string>();
 
   for (const criterion of successCriteria) {
     if (criterion.required === false) {
@@ -105,14 +124,34 @@ export function computeInstructionProgress(
         continue;
       }
       groupIndex.set(criterion.group, positions.length);
+      positions.push({ ids: [criterion.id], descriptions: [criterion.description] });
+      continue;
     }
-    positions.push({ ids: [criterion.id], descriptions: [criterion.description] });
+
+    const segments = parseOrderedInstructions(criterion.description);
+    if (segments.length < 2) {
+      positions.push({ ids: [criterion.id], descriptions: [criterion.description] });
+      continue;
+    }
+
+    const completedCount = satisfied.has(criterion.id)
+      ? segments.length
+      : Math.min(internalInstructionProgress?.[criterion.id] ?? 0, segments.length - 1);
+    segments.forEach((description, index) => {
+      const id = `${criterion.id}#${index}`;
+      if (index < completedCount) {
+        syntheticCompleted.add(id);
+      }
+      positions.push({ ids: [id], descriptions: [description] });
+    });
   }
 
   const completed: InstructionPosition[] = [];
   const unfinished: InstructionPosition[] = [];
   for (const position of positions) {
-    (position.ids.some((id) => satisfied.has(id)) ? completed : unfinished).push(position);
+    (position.ids.some((id) => satisfied.has(id) || syntheticCompleted.has(id)) ? completed : unfinished).push(
+      position,
+    );
   }
 
   return {
@@ -137,7 +176,11 @@ function orderedInstructionClause(progress: InstructionProgress): string {
   return (
     " This run's \"successCriteria\" are given in the exact order their underlying " +
     "instructions must be completed -- entries sharing the same \"group\" value count as " +
-    "one instruction position (alternative ways to satisfy it). \"satisfiedCriteriaIds\" " +
+    "one instruction position (alternative ways to satisfy it). A single criterion's own " +
+    "\"description\" may itself list several explicit ordered instructions (e.g. numbered or " +
+    "bulleted lines) -- when it does, treat each line with exactly the same earliest-" +
+    "unfinished-first priority as if it were its own successCriteria entry; the \"progress\" " +
+    "field below already reflects this. \"satisfiedCriteriaIds\" " +
     "lists which positions are already done. Your next action must primarily satisfy the " +
     "earliest required position not yet reflected in \"satisfiedCriteriaIds\", even when a " +
     "control matching a LATER required position is also currently visible on the page -- " +
@@ -462,9 +505,10 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     recentActions,
     satisfiedCriteriaIds,
     consentInteractionPolicy,
+    internalInstructionProgress,
   } = context;
 
-  const instructionProgress = computeInstructionProgress(successCriteria, satisfiedCriteriaIds);
+  const instructionProgress = computeInstructionProgress(successCriteria, satisfiedCriteriaIds, internalInstructionProgress);
 
   const system =
     "You are the decision component of an automated browser-navigation engine. " +

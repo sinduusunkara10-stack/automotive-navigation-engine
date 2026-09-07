@@ -223,7 +223,11 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
           outcome.reason === "low_confidence"
             ? buildLowConfidenceCorrectionSystemPrompt(
                 prompt.system,
-                computeInstructionProgress(context.successCriteria, context.satisfiedCriteriaIds),
+                computeInstructionProgress(
+                  context.successCriteria,
+                  context.satisfiedCriteriaIds,
+                  context.internalInstructionProgress,
+                ),
               )
             : buildCorrectiveSystemPrompt(prompt.system, context.allowedActions);
         const correctiveOutcome = await this.attemptOnce({
