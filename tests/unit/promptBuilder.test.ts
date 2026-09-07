@@ -370,7 +370,7 @@ test("REGRESSION: dozens of repetitive, zero-relevance controls cannot consume t
   );
 });
 
-test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMENTS + the bounded neighbour allowance (40 + 6 = 46), regardless of candidate count", () => {
+test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMENTS + the bounded group allowance (40 + 10 = 50), regardless of candidate count", () => {
   const manyElements = buildManyElements(500);
   const context = buildTestReasoningContext({
     objective: ENGLISH_OBJECTIVE,
@@ -384,9 +384,14 @@ test("selected prompt candidates always remain bounded by MAX_INTERACTIVE_ELEMEN
   const prompt = buildReasoningPrompt(context);
   const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: unknown[] } };
   // Selection is normally capped at 40 (MAX_INTERACTIVE_ELEMENTS); the bounded
-  // adjacent-decision-group neighbour allowance (MAX_NEIGHBOR_ADDITIONS) can add up to 6
-  // more on top, but selectedCount must never exceed that combined ceiling.
-  assert.ok(payload.currentPage.interactiveElements.length <= 46);
+  // container-group allowance (MAX_GROUP_ADDITIONS) can add up to 10 more on top, but
+  // selectedCount must never exceed that combined ceiling. This fixture is one giant
+  // uninterrupted zero-relevance run (no relevance-scored elements anywhere), so per
+  // MAX_CONTAINER_SPAN's own bound every stratum representative's natural run is far
+  // longer than the cap and group-inclusion contributes nothing here at all --
+  // selectedCount actually lands at exactly 40, still comfortably within the combined
+  // ceiling this test asserts.
+  assert.ok(payload.currentPage.interactiveElements.length <= 50);
   assert.equal(prompt.elementSelection.selectedCount, payload.currentPage.interactiveElements.length);
   assert.ok(prompt.elementSelection.candidateCount === 500);
 });
@@ -504,40 +509,40 @@ test("REGRESSION: essential_only never permits granting broad/optional consent, 
 // of one dismissible panel) -- stratifiedSample picks only one representative per stratum,
 // so the group could be silently split across the truncation boundary depending purely on
 // where the arithmetic stratum edges land, with no regard for which elements are actually
-// related. The fix (MAX_NEIGHBOR_DISTANCE/MAX_NEIGHBOR_ADDITIONS in promptBuilder.ts) pulls
-// in a bounded number of a stratum representative's immediate DOM-order neighbours, purely
-// by index proximity -- no CTA text dictionary, no consent-keyword list, no brand-specific
-// wording. This fixture is entirely generic/synthetic (no live brand, label, or element id).
+// related. The fix (MAX_CONTAINER_SPAN/MAX_GROUP_ADDITIONS in promptBuilder.ts) walks the
+// natural, uninterrupted run of zero-relevance elements around a stratum representative
+// (bounded by relevance-scored elements on either side, or by the array edge) and includes
+// the whole run when it's short enough to plausibly be one small shared container -- purely
+// structural, no CTA text dictionary, no consent-keyword list, no brand-specific wording.
+// This fixture is entirely generic/synthetic (no live brand, label, or element id).
 // ---------------------------------------------------------------------------------------
 
-test("FIX: an adjacent zero-relevance decision group near a stratum boundary reaches the prompt together, while a distant unrelated control does not, and the total stays bounded", () => {
+test("FIX: an adjacent zero-relevance decision group bounded by relevant elements reaches the prompt together, while content outside that boundary does not, and the total stays bounded", () => {
   const objective = "Advance through the product setup wizard and confirm the final review step.";
 
-  // 215 zero-relevance elements: with MAX_INTERACTIVE_ELEMENTS=40, no relevant matches, and
-  // TAIL_ANCHOR_COUNT=5, the structural strata pool is exactly 210 wide over 35 strata --
-  // an exact stratum width of 6, so stratum 0 covers indices [0, 6) precisely.
-  const elements = Array.from({ length: 215 }, (_, i) => ({
+  // 205 elements: 203 zero-relevance plus 2 relevance-scored "boundary" elements (sharing
+  // objective vocabulary) flanking a 3-element decision group at indices 61-63 -- the
+  // boundaries give the group a natural, provable edge, distinct from an unrelated
+  // open-ended run of filler. With MAX_INTERACTIVE_ELEMENTS=40, 2 relevant matches, and
+  // TAIL_ANCHOR_COUNT=5, the structural strata pool is exactly 198 wide over 33 strata --
+  // an exact stratum width of 6, so stratum 10 covers pool positions [60, 66), which maps
+  // (skipping the boundary at true index 60) to true indices {61, 62, 63, 65, 66, 67}.
+  const elements = Array.from({ length: 205 }, (_, i) => ({
     id: `el-${i}`,
     role: "button",
     accessibleName: `Row ${i}`,
     visible: true,
   }));
 
-  // Three adjacent controls at the very start of stratum 0 -- generic fixture wording for
-  // "continue without optional consent / manage settings / accept all", deliberately not
-  // the real incident's wording. stratifiedSample always prefers the first actionable,
-  // non-option-like element in a stratum, so el-0 becomes stratum 0's sole representative;
-  // being the lowest-index anchor overall, its neighbour pull runs first and is guaranteed
-  // to claim el-1/el-2 before any other stratum's pull can spend the shared budget.
-  elements[0] = { id: "el-0", role: "button", accessibleName: "Continue without accepting optional data", visible: true };
-  elements[1] = { id: "el-1", role: "button", accessibleName: "Manage settings", visible: true };
-  elements[2] = { id: "el-2", role: "button", accessibleName: "Accept all data collection", visible: true };
-
-  // Sits mid-stratum (index 33, stratum 5 spans [30, 36)) -- distance >=3 from every
-  // stratum boundary (30, 36) that could itself be a neighbour-pulling anchor, so it is
-  // never selected as a stratum representative and never falls within MAX_NEIGHBOR_DISTANCE
-  // of one either.
-  elements[33] = { id: "el-33", role: "button", accessibleName: "Isolated distant unrelated control", visible: true };
+  elements[60] = { id: "el-60", role: "text", accessibleName: "Product setup step information", visible: true };
+  // Three adjacent controls -- generic fixture wording for "continue without optional
+  // consent / manage settings / accept all", deliberately not the real incident's wording.
+  // stratifiedSample always prefers the first actionable, non-option-like element in a
+  // stratum, so el-61 (the group's first member) becomes stratum 10's sole representative.
+  elements[61] = { id: "el-61", role: "button", accessibleName: "Continue without accepting optional data", visible: true };
+  elements[62] = { id: "el-62", role: "button", accessibleName: "Manage settings", visible: true };
+  elements[63] = { id: "el-63", role: "button", accessibleName: "Accept all data collection", visible: true };
+  elements[64] = { id: "el-64", role: "text", accessibleName: "Product setup step information", visible: true };
 
   const context = buildTestReasoningContext({
     objective,
@@ -552,17 +557,99 @@ test("FIX: an adjacent zero-relevance decision group near a stratum boundary rea
   const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
   const ids = payload.currentPage.interactiveElements.map((el) => el.id);
 
-  assert.ok(ids.includes("el-0"), "the stratum-selected member of the decision group must reach the prompt");
-  assert.ok(ids.includes("el-1"), "an immediate neighbour of the selected group member must reach the prompt too");
-  assert.ok(ids.includes("el-2"), "the whole adjacent decision group must reach the prompt together");
+  assert.ok(ids.includes("el-61"), "the stratum-selected member of the decision group must reach the prompt");
+  assert.ok(ids.includes("el-62"), "a member of the same natural run as the selected group member must reach the prompt too");
+  assert.ok(ids.includes("el-63"), "the whole adjacent decision group must reach the prompt together");
 
-  assert.ok(!ids.includes("el-33"), "a distant, unrelated control must not be pulled in by the neighbour allowance");
+  // el-59 sits just before the left boundary (relevant, at el-60) -- outside the group's
+  // natural run entirely. el-65/66/67 are the *rest* of stratum 10's own window, on the
+  // far side of the right boundary (el-64) -- proving the boundary actually stopped the
+  // walk rather than it silently continuing to sweep in the whole stratum window.
+  assert.ok(!ids.includes("el-59"), "content on the far side of the group's left boundary must not be pulled in");
+  assert.ok(!ids.includes("el-65"), "content on the far side of the group's right boundary must not be pulled in");
+  assert.ok(!ids.includes("el-66"), "content on the far side of the group's right boundary must not be pulled in");
+  assert.ok(!ids.includes("el-67"), "content on the far side of the group's right boundary must not be pulled in");
 
-  // Bound: normal per-tier selection is capped at MAX_INTERACTIVE_ELEMENTS (40); neighbour
-  // inclusion can add at most MAX_NEIGHBOR_ADDITIONS (6) more, never unbounded.
-  assert.ok(prompt.elementSelection.selectedCount > 40, "neighbour inclusion must have added elements beyond the normal cap");
-  assert.ok(prompt.elementSelection.selectedCount <= 46, "selectedCount must never exceed limit + MAX_NEIGHBOR_ADDITIONS");
+  // Bound: normal per-tier selection is capped at MAX_INTERACTIVE_ELEMENTS (40); group
+  // inclusion can add at most MAX_GROUP_ADDITIONS (10) more, never unbounded.
+  assert.ok(prompt.elementSelection.selectedCount > 40, "group inclusion must have added elements beyond the normal cap");
+  assert.ok(prompt.elementSelection.selectedCount <= 50, "selectedCount must never exceed limit + MAX_GROUP_ADDITIONS");
   assert.equal(payload.currentPage.interactiveElements.length, prompt.elementSelection.selectedCount);
+
+  // Deduplication: every selected id is unique.
+  assert.equal(new Set(ids).size, ids.length, "the final selection must never contain duplicate elements");
+});
+
+// ---------------------------------------------------------------------------------------
+// CONFIRMED ISSUE 1 (run_a9eb40df-0191-44af-9ce9-acdcab7e8bb5): PR #35's fixed +/-2
+// index-distance neighbour pull still split a real, adjacent decision group when its
+// primary decline/continue control sat *three* index positions away from the
+// stratum-selected anchor, with two purely informational links in between it and the
+// manage/accept controls -- exactly the shape reproduced generically below (never the
+// real incident's brand, wording, URL, or selector). The container-span walk above fixes
+// this generally: it recovers the group's *entire* natural run regardless of which member
+// happens to be the stratum's own pick, and regardless of how many non-action informational
+// elements sit between the group's ends.
+// ---------------------------------------------------------------------------------------
+
+test("FIX (issue 1): a five-element overlay group -- decline, two informational links, manage, accept -- reaches the prompt together even though the decline control sits three positions before the stratum-selected manage control", () => {
+  const objective = "Advance through the product setup wizard and confirm the final review step.";
+
+  // 205 elements: 203 zero-relevance plus 2 relevance-scored boundary elements flanking a
+  // 5-element overlay group at indices 184-188. Stratum 30 (pool [180,186)) picks el-180
+  // (plain filler) as its own representative; stratum 31 (pool [186,192)) picks el-187
+  // ("Manage settings") as its own representative -- reproducing the reported shape
+  // exactly: the primary decline/continue control (el-184) is three index positions before
+  // the stratum-selected manage control (el-187), with two informational links in between.
+  const elements = Array.from({ length: 205 }, (_, i) => ({
+    id: `el-${i}`,
+    role: "button",
+    accessibleName: `Row ${i}`,
+    visible: true,
+  }));
+
+  elements[183] = { id: "el-183", role: "text", accessibleName: "Product setup step information", visible: true };
+  elements[184] = { id: "el-184", role: "button", accessibleName: "Continue without accepting optional data", visible: true };
+  elements[185] = { id: "el-185", role: "link", accessibleName: "Cookie policy information", visible: true };
+  elements[186] = { id: "el-186", role: "link", accessibleName: "Privacy policy information", visible: true };
+  elements[187] = { id: "el-187", role: "button", accessibleName: "Manage settings", visible: true };
+  elements[188] = { id: "el-188", role: "button", accessibleName: "Accept all", visible: true };
+  elements[189] = { id: "el-189", role: "text", accessibleName: "Product setup step information", visible: true };
+
+  const context = buildTestReasoningContext({
+    objective,
+    observation: {
+      url: "https://example-fictional-oem.test/setup",
+      title: "Setup wizard",
+      interactiveElements: elements,
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
+  const ids = payload.currentPage.interactiveElements.map((el) => el.id);
+
+  assert.ok(ids.includes("el-187"), "the stratum-selected manage control must reach the prompt");
+  assert.ok(
+    ids.includes("el-184"),
+    "the primary decline/continue control must reach the prompt even though it is three positions before the selected manage control -- this is the exact issue-1 regression",
+  );
+  assert.ok(ids.includes("el-185"), "the informational link between decline and manage must reach the prompt");
+  assert.ok(ids.includes("el-186"), "the second informational link between decline and manage must reach the prompt");
+  assert.ok(ids.includes("el-188"), "the accept control must reach the prompt alongside the rest of the group");
+
+  // Unrelated controls just outside the overlay (immediately past each boundary) are not
+  // added.
+  assert.ok(!ids.includes("el-182"), "content just outside the overlay's left boundary must not be pulled in");
+  assert.ok(!ids.includes("el-190"), "content just outside the overlay's right boundary must not be pulled in");
+
+  // The prompt selection ceiling remains enforced.
+  assert.ok(prompt.elementSelection.selectedCount > 40, "group inclusion must have added elements beyond the normal cap");
+  assert.ok(prompt.elementSelection.selectedCount <= 50, "selectedCount must never exceed limit + MAX_GROUP_ADDITIONS");
+  assert.equal(payload.currentPage.interactiveElements.length, prompt.elementSelection.selectedCount);
+
+  // Deduplication remains correct.
+  assert.equal(new Set(ids).size, ids.length, "the final selection must never contain duplicate elements");
 });
 
 test("REGRESSION: the system prompt never mentions accepting/granting consent as a preference under any policy except the explicit accept_optional opt-in", () => {

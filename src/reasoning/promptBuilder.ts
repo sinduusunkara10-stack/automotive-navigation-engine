@@ -69,25 +69,88 @@ const STRUCTURAL_RESERVE_FRACTION = 0.5;
 const TAIL_ANCHOR_COUNT = 5;
 
 // A zero-relevance element chosen by stratifiedSample as its stratum's sole structural
-// representative can sit immediately next to other zero-relevance elements that together
-// form one semantic decision group (e.g. several sibling controls of one dismissible
-// panel) -- picking only the stratum representative can silently split that group across
-// the truncation boundary purely because of where the arithmetic stratum edges land. To
-// stay fully structural and language-independent (no CTA text dictionary, no
-// consent-keyword list, no brand-specific selector/wording), a bounded number of the
-// representative's immediate DOM-order neighbours are pulled in alongside it by index
-// proximity alone.
+// representative can sit inside a small cluster of other zero-relevance elements that
+// together form one real decision group (e.g. several sibling controls of one dismissible
+// panel, possibly interleaved with a couple of purely informational links) -- picking only
+// the stratum representative can silently split that group across the truncation boundary.
 //
-// MAX_NEIGHBOR_DISTANCE: how many index positions away, in either direction within the
-// zero-relevance pool, a neighbour can be and still count as "immediately nearby" a
-// stratum representative.
-const MAX_NEIGHBOR_DISTANCE = 2;
+// REGRESSION (real production run, second occurrence): a fixed +/-2 index-distance
+// neighbour pull (the first fix for this) still failed when the group's own primary
+// decline/continue control sat 3 index positions away from the stratum-selected anchor
+// (two informational links in between it and the manage/accept controls) -- outside that
+// fixed radius, so it was dropped anyway. Simply enlarging that fixed radius was rejected:
+// nothing in the existing, generic observation data distinguishes "a slightly wider but
+// still small decision group" from "the start of a long, unrelated, repetitive list" using
+// distance alone, so any single fixed radius large enough to always cover a wider group is
+// also large enough to start pulling in unrelated bulk content near it.
+//
+// The existing Observation/InteractiveElement contract carries no explicit DOM-container/
+// ancestor identifier (see schemas/task-response.schema.json's interactiveElements items,
+// additionalProperties:false) -- adding one would be a wire-schema change, so true
+// container-aware grouping is not available from existing observation data without one.
+// The fix below is the smallest bounded alternative that stays entirely within the
+// existing data: instead of a fixed radius, it walks outward from the stratum
+// representative through the *natural* contiguous run of zero-relevance elements
+// surrounding it (a run ends the moment a relevance-scored element, an already-selected
+// index, or the array boundary is hit) -- a compact run of interactive elements with
+// nothing else scored in between is model-agnostic proxy evidence that they likely all
+// belong to one small, nearby structural unit (e.g. one dialog/overlay), since an
+// unrelated repetitive list of any real size is exceedingly unlikely to be *entirely*
+// zero-relevance AND *entirely* uninterrupted for its whole length by the time truncation
+// is even being considered (MAX_INTERACTIVE_ELEMENTS elements already dominate the page).
+//
+// Still, a natural run alone is not proof of anything -- a long, genuinely repetitive,
+// entirely zero-relevance section (e.g. 90 near-identical filler controls) produces
+// exactly this same "uninterrupted run" shape. MAX_CONTAINER_SPAN is the hard cutoff that
+// keeps this safe either way: the whole natural run is only ever included when its total
+// length is at or below this cap; a run *longer* than the cap is indistinguishable, from
+// this data alone, from ordinary bulk/repeated content, so it contributes nothing beyond
+// the stratum representative itself -- this is precisely what stops an unbounded section
+// of the page from ever being pulled into the prompt by this mechanism, regardless of how
+// long an unrelated repetitive run happens to be.
+const MAX_CONTAINER_SPAN = 8;
 
-// MAX_NEIGHBOR_ADDITIONS: hard ceiling, across one selectPromptInteractiveElements call, on
-// how many extra elements neighbour-inclusion can add beyond the normal tier-budgeted
-// selection -- keeps the existing prompt-budget protections intact: worst case,
-// selectedCount is `limit + MAX_NEIGHBOR_ADDITIONS`, never unbounded.
-const MAX_NEIGHBOR_ADDITIONS = 6;
+// MAX_GROUP_ADDITIONS: hard ceiling, across one selectPromptInteractiveElements call, on
+// how many extra elements group-inclusion can add beyond the normal tier-budgeted
+// selection -- a defense-in-depth backstop on top of MAX_CONTAINER_SPAN (which already
+// bounds any single group): keeps the existing prompt-budget protections intact even if
+// several small groups are recovered in the same call. Worst case, selectedCount is
+// `limit + MAX_GROUP_ADDITIONS`, never unbounded.
+const MAX_GROUP_ADDITIONS = 10;
+
+/**
+ * Walks outward from `anchorIndex` through the *natural* contiguous run of zero-relevance,
+ * not-yet-selected elements surrounding it (see MAX_CONTAINER_SPAN's doc comment above for
+ * why this is a safe, generic, language-independent proxy for "shares one small nearby
+ * structural container"). Returns the run's member indices (anchor included) in ascending
+ * order, or just `[anchorIndex]` when the natural run exceeds MAX_CONTAINER_SPAN -- a run
+ * that long is treated as ordinary bulk/repeated content, not a compact decision group, so
+ * nothing beyond the anchor itself is ever added for it.
+ */
+function containerGroupIndices(anchorIndex: number, zeroScoreByIndex: ReadonlyMap<number, ScoredElement>): number[] {
+  // The natural run's true extent is found unbounded (never truncated mid-walk) so a run
+  // longer than MAX_CONTAINER_SPAN is rejected outright rather than silently clipped to an
+  // arbitrary partial slice of what is, by construction, indistinguishable from ordinary
+  // bulk/repeated content once it's that long.
+  let lo = anchorIndex;
+  while (zeroScoreByIndex.has(lo - 1)) {
+    lo -= 1;
+  }
+  let hi = anchorIndex;
+  while (zeroScoreByIndex.has(hi + 1)) {
+    hi += 1;
+  }
+
+  if (hi - lo + 1 > MAX_CONTAINER_SPAN) {
+    return [anchorIndex];
+  }
+
+  const indices: number[] = [];
+  for (let i = lo; i <= hi; i += 1) {
+    indices.push(i);
+  }
+  return indices;
+}
 
 interface ScoredElement {
   el: InteractiveElement;
@@ -236,19 +299,20 @@ function selectPromptInteractiveElements(
   const zeroScoreByIndex = new Map<number, ScoredElement>(zeroScorePool.map((s) => [s.index, s]));
   const neighborsTaken: ScoredElement[] = [];
   for (const anchor of [...stratified].sort((a, b) => a.index - b.index)) {
-    if (neighborsTaken.length >= MAX_NEIGHBOR_ADDITIONS) {
+    if (neighborsTaken.length >= MAX_GROUP_ADDITIONS) {
       break;
     }
-    for (let distance = 1; distance <= MAX_NEIGHBOR_DISTANCE; distance += 1) {
-      for (const neighborIndex of [anchor.index - distance, anchor.index + distance]) {
-        if (neighborsTaken.length >= MAX_NEIGHBOR_ADDITIONS) {
-          break;
-        }
-        const neighbor = zeroScoreByIndex.get(neighborIndex);
-        if (neighbor && !preNeighborIndices.has(neighbor.index)) {
-          neighborsTaken.push(neighbor);
-          preNeighborIndices.add(neighbor.index);
-        }
+    for (const memberIndex of containerGroupIndices(anchor.index, zeroScoreByIndex)) {
+      if (neighborsTaken.length >= MAX_GROUP_ADDITIONS) {
+        break;
+      }
+      if (memberIndex === anchor.index) {
+        continue;
+      }
+      const member = zeroScoreByIndex.get(memberIndex);
+      if (member && !preNeighborIndices.has(member.index)) {
+        neighborsTaken.push(member);
+        preNeighborIndices.add(member.index);
       }
     }
   }

@@ -8,11 +8,28 @@ import {
   type ReasoningModelResult,
 } from "./reasoningModelClient.js";
 
+// The zodOutputFormat().parse() helper (helpers/zod.ts, invoked internally by
+// client.messages.parse() below) throws a bare Anthropic.AnthropicError -- never an
+// APIError subclass -- in exactly two cases, each with a fixed, version-pinned message
+// prefix: the model's raw output isn't valid JSON at all, or it parsed but failed the
+// requested decision schema. Neither is a transport/HTTP failure, so no APIError check
+// below ever catches them -- they used to fall all the way through to the generic
+// "provider_error" catch-all, discarding exactly the distinction ("was the output not
+// JSON at all, or was it JSON that didn't match the schema") that's most useful for
+// debugging a bad decision response. Matched by prefix only (never forwarded) since
+// AnthropicError carries no other structured field to distinguish the two cases; this is
+// a real, current coupling to this pinned SDK version's exact wording -- if a future SDK
+// upgrade changes it, classification degrades gracefully back to "provider_error" rather
+// than misclassifying or throwing.
+const RESPONSE_NOT_JSON_PREFIX = "Failed to parse structured output as JSON:";
+const RESPONSE_SCHEMA_INVALID_PREFIX = "Failed to parse structured output:";
+
 // Maps real SDK exceptions to a small, sanitised category set. Never forwards
 // error.message across this boundary — the real Anthropic client is constructed with
 // the caller-supplied API key, and SDK error messages are not a place this code
-// chooses to trust not to echo request/response details.
-function sanitizeError(error: unknown): ReasoningModelError {
+// chooses to trust not to echo request/response details. A message is inspected only
+// internally, to pick a category, and never included in what this function returns.
+export function sanitizeError(error: unknown): ReasoningModelError {
   if (error instanceof Anthropic.AuthenticationError) return new ReasoningModelError("authentication_failed");
   if (error instanceof Anthropic.PermissionDeniedError) return new ReasoningModelError("permission_denied");
   if (error instanceof Anthropic.NotFoundError) return new ReasoningModelError("not_found");
@@ -21,6 +38,11 @@ function sanitizeError(error: unknown): ReasoningModelError {
   if (error instanceof Anthropic.APIConnectionError) return new ReasoningModelError("connection_error");
   if (error instanceof Anthropic.BadRequestError) return new ReasoningModelError("bad_request");
   if (error instanceof Anthropic.APIError) return new ReasoningModelError(`api_error_${error.status ?? "unknown"}`);
+  if (error instanceof Anthropic.AnthropicError) {
+    const message = error.message ?? "";
+    if (message.startsWith(RESPONSE_NOT_JSON_PREFIX)) return new ReasoningModelError("response_parse_failed");
+    if (message.startsWith(RESPONSE_SCHEMA_INVALID_PREFIX)) return new ReasoningModelError("response_schema_invalid");
+  }
   return new ReasoningModelError("provider_error");
 }
 
