@@ -63,6 +63,11 @@ export async function runStep(params: {
   const stepIndex = state.stepCount;
 
   let observation = await buildObservation(page);
+  // See RunState.resolveLastActionProgress: fills in observedProgress on the action
+  // recorded by the *previous* step, purely by comparing that action's before-state (also
+  // just recorded url/title) against this fresh observation -- generic, no extra page
+  // interaction beyond the buildObservation call every step already performs.
+  state.resolveLastActionProgress(observation.url, observation.title);
   state.recordVisit(observation.url);
 
   // Bounded, names-only cookie/storage footprint (never a value -- see
@@ -121,7 +126,7 @@ export async function runStep(params: {
     // when memoryThresholdBreached is false, limitsBreach must be truthy here.
     const breachReason: string = memoryThresholdBreached ? "container_memory_threshold" : (limitsBreach as LimitBreach);
     const forcedAction: SelectedAction = { type: limitsBreach === "max_backtracks" ? "stop_blocked" : "stop_failure" };
-    state.recordAction(forcedAction);
+    state.recordAction(forcedAction, { url: observation.url, title: observation.title });
     if (task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         stepIndex,
@@ -185,7 +190,7 @@ export async function runStep(params: {
       state.consecutiveStaleTargetFailures += 1;
       const staleTargetExhausted = state.consecutiveStaleTargetFailures > MAX_STALE_TARGET_RECOVERY_ATTEMPTS;
       const forcedAction: SelectedAction = { type: "click", target: blockedTargetId };
-      state.recordAction(forcedAction);
+      state.recordAction(forcedAction, { url: observation.url, title: observation.title });
       if (task.captureModules.includes("errors")) {
         recordDiagnosticError(captures, {
           stepIndex,
@@ -458,7 +463,7 @@ export async function runStep(params: {
     }
   }
 
-  state.recordAction(effectiveAction);
+  state.recordAction(effectiveAction, { url: observation.url, title: observation.title });
 
   const satisfiedCountBeforeThisAction = state.satisfiedCriteriaIds.size;
   const verifierDecisionCountBefore = semanticVerifier?.getUsageDiagnostics?.()?.decisions?.length ?? 0;
