@@ -15,7 +15,12 @@ import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
-import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds, type SuccessCriteriaEvidence } from "./successEvaluator.js";
+import {
+  computeEstimatedCompletion,
+  evaluateSuccessCriteria,
+  getMissingRequiredCriteriaIds,
+  type SuccessCriteriaEvidence,
+} from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
 
@@ -139,6 +144,7 @@ export async function runStep(params: {
       selectedAction: forcedAction,
       actionResult: { success: true },
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+      successCriteria: task.successCriteria,
       safetyFlags: [breachReason],
       reObservationAttempted: false,
       recoveryAttempts: 0,
@@ -206,6 +212,7 @@ export async function runStep(params: {
         selectedAction: forcedAction,
         actionResult: { success: false, staleTarget: true, error: "persistent_blocker_signature_unchanged" },
         satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+        successCriteria: task.successCriteria,
         safetyFlags: ["persistent_blocker_detected"],
         reObservationAttempted: false,
         recoveryAttempts: 0,
@@ -544,6 +551,7 @@ export async function runStep(params: {
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+    successCriteria: task.successCriteria,
     safetyFlags: stopSuccessRejected
       ? [
           ...safetyResult.flags,
@@ -601,6 +609,7 @@ function buildStepLog(params: {
   selectedAction: SelectedAction;
   actionResult: StepLog["actionResult"];
   satisfiedCriteriaIds: string[];
+  successCriteria: ResolvedTaskRequest["successCriteria"];
   safetyFlags: string[];
   reObservationAttempted: boolean;
   recoveryAttempts: number;
@@ -612,6 +621,7 @@ function buildStepLog(params: {
     selectedAction,
     actionResult,
     satisfiedCriteriaIds,
+    successCriteria,
     safetyFlags,
     reObservationAttempted,
     recoveryAttempts,
@@ -626,7 +636,7 @@ function buildStepLog(params: {
     actionResult,
     progress: {
       satisfiedCriteriaIds,
-      estimatedCompletion: satisfiedCriteriaIds.length === 0 ? 0 : 1,
+      estimatedCompletion: computeEstimatedCompletion(successCriteria, new Set(satisfiedCriteriaIds)),
     },
     ...(safetyFlags.length > 0 ? { safetyFlags } : {}),
     ...(reObservationAttempted ? { reObservationAttempted } : {}),

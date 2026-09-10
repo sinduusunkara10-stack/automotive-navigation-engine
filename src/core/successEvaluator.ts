@@ -118,10 +118,19 @@ export async function evaluateSuccessCriteria(
  * empty when every required group has at least one satisfied member, and always empty for
  * a task where every criterion/group is explicitly optional.
  */
-export function getMissingRequiredCriteriaIds(
-  criteria: readonly SuccessCriterion[],
-  satisfiedCriteriaIds: ReadonlySet<string>,
-): string[] {
+interface CriterionGroup {
+  members: SuccessCriterion[];
+  required: boolean;
+}
+
+/**
+ * Buckets criteria into their groups (a shared, non-empty `group` value, or an implicit
+ * singleton group per ungrouped criterion) and computes each group's required-ness -- the
+ * same required-unless-false-at-group-level semantics documented on
+ * getMissingRequiredCriteriaIds below. Shared by that function and by
+ * computeEstimatedCompletion so both agree on exactly what "a required criterion/group" is.
+ */
+function groupCriteria(criteria: readonly SuccessCriterion[]): CriterionGroup[] {
   const groups = new Map<string, SuccessCriterion[]>();
   for (const criterion of criteria) {
     const key = criterion.group && criterion.group.length > 0 ? `g:${criterion.group}` : `c:${criterion.id}`;
@@ -132,19 +141,58 @@ export function getMissingRequiredCriteriaIds(
       groups.set(key, [criterion]);
     }
   }
+  return [...groups.values()].map((members) => ({
+    members,
+    required: members.some((member) => member.required !== false),
+  }));
+}
 
+export function getMissingRequiredCriteriaIds(
+  criteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIds: ReadonlySet<string>,
+): string[] {
   const missing: string[] = [];
-  for (const members of groups.values()) {
-    const groupRequired = members.some((member) => member.required !== false);
-    if (!groupRequired) {
+  for (const group of groupCriteria(criteria)) {
+    if (!group.required) {
       continue;
     }
-    const groupSatisfied = members.some((member) => satisfiedCriteriaIds.has(member.id));
+    const groupSatisfied = group.members.some((member) => satisfiedCriteriaIds.has(member.id));
     if (!groupSatisfied) {
-      missing.push(...members.map((member) => member.id));
+      missing.push(...group.members.map((member) => member.id));
     }
   }
   return missing;
+}
+
+/**
+ * Generic, criterion-type-agnostic completion estimate for Progress.estimatedCompletion:
+ * the fraction of required criteria/groups (same grouping semantics as
+ * getMissingRequiredCriteriaIds) that are currently satisfied. Deliberately structured so
+ * estimatedCompletion can only reach 1 when every required criterion/group is satisfied --
+ * i.e. exactly when engineAssessment.objectiveAchieved's own required-criteria check
+ * (src/core/engine.ts) would also pass on a successful stop -- rather than saturating to 1
+ * the moment *any* single criterion (including a merely optional, informational one) is
+ * satisfied while the actual objective remains unmet.
+ *
+ * A task with no required criteria/groups at all has no required signal to measure
+ * completion against, so it falls back to the fraction satisfied across every (optional)
+ * group instead -- still a proportional signal, never a step function that jumps to 1 on
+ * the first unrelated criterion.
+ */
+export function computeEstimatedCompletion(
+  criteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIds: ReadonlySet<string>,
+): number {
+  const groups = groupCriteria(criteria);
+  if (groups.length === 0) {
+    return 0;
+  }
+  const requiredGroups = groups.filter((group) => group.required);
+  const targetGroups = requiredGroups.length > 0 ? requiredGroups : groups;
+  const satisfiedCount = targetGroups.filter((group) =>
+    group.members.some((member) => satisfiedCriteriaIds.has(member.id)),
+  ).length;
+  return satisfiedCount / targetGroups.length;
 }
 
 async function evaluateSingle(

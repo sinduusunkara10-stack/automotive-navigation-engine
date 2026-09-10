@@ -2,7 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chromium, type Page } from "playwright";
 
-import { evaluateSuccessCriteria, getMissingRequiredCriteriaIds } from "../../src/core/successEvaluator.js";
+import {
+  computeEstimatedCompletion,
+  evaluateSuccessCriteria,
+  getMissingRequiredCriteriaIds,
+} from "../../src/core/successEvaluator.js";
 import { gatherSemanticPageSignals, scoreSemanticPageMatch } from "../../src/core/semanticPageMatch.js";
 import type {
   SemanticCriterionVerifier,
@@ -531,6 +535,70 @@ test("getMissingRequiredCriteriaIds: an ungrouped required criterion alongside a
     ["domain-confirmed", "cta-clicked", "basket-page-reached"],
   );
   assert.deepEqual(getMissingRequiredCriteriaIds(criteria, new Set(["domain-confirmed", "cta-clicked"])), []);
+});
+
+// ---------------------------------------------------------------------------------------
+// computeEstimatedCompletion: REGRESSION (production incident) -- progress.estimatedCompletion
+// was previously `satisfiedCriteriaIds.length === 0 ? 0 : 1`, a binary flag over *any*
+// satisfied criterion regardless of required-ness. A reported run had an optional
+// milestone criterion satisfied early (landing on the model page) while the sole required
+// criterion (actually completing the configurator) was never satisfied -- the response
+// reported estimatedCompletion: 1 on every step alongside objectiveAchieved: false and
+// navigationSuccessful: false, a direct contradiction. estimatedCompletion must now only
+// ever reach 1 when engineAssessment.objectiveAchieved's own required-criteria check
+// (src/core/engine.ts, getMissingRequiredCriteriaIds) would also pass.
+// ---------------------------------------------------------------------------------------
+
+test("computeEstimatedCompletion: an optional milestone satisfied alone must never saturate completion to 1 while the required criterion remains unmet", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "configurator-entered", type: "semantic_page_match", description: "d", required: false },
+    { id: "configuration-finished", type: "semantic_page_match", description: "d", required: true },
+  ];
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["configurator-entered"])), 0);
+  assert.equal(computeEstimatedCompletion(criteria, new Set()), 0);
+  assert.equal(
+    computeEstimatedCompletion(criteria, new Set(["configurator-entered", "configuration-finished"])),
+    1,
+  );
+});
+
+test("computeEstimatedCompletion: reports a proportional fraction across multiple required criteria/groups, not a binary 0/1", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d", required: true },
+    { id: "b", type: "url_pattern", description: "d", required: true },
+    { id: "c", type: "url_pattern", description: "d", required: true },
+    { id: "d", type: "url_pattern", description: "d", required: true },
+  ];
+  assert.equal(computeEstimatedCompletion(criteria, new Set()), 0);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["a"])), 0.25);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["a", "b"])), 0.5);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["a", "b", "c", "d"])), 1);
+});
+
+test("computeEstimatedCompletion: a required OR-group counts as one satisfied unit as soon as any one member is satisfied", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "domain-confirmed", type: "url_pattern", description: "d", required: true },
+    { id: "cta-clicked", type: "semantic_page_match", description: "d", group: "objective-reached" },
+    { id: "basket-page-reached", type: "url_pattern", description: "d", group: "objective-reached" },
+  ];
+  assert.equal(computeEstimatedCompletion(criteria, new Set()), 0);
+  // Only the OR-group satisfied: 1 of 2 required units (the standalone criterion, the group).
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["cta-clicked"])), 0.5);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["domain-confirmed", "cta-clicked"])), 1);
+});
+
+test("computeEstimatedCompletion: a task with no required criteria falls back to the fraction of optional criteria satisfied, never jumping straight to 1", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "optional-one", type: "url_pattern", description: "d", required: false },
+    { id: "optional-two", type: "url_pattern", description: "d", required: false },
+  ];
+  assert.equal(computeEstimatedCompletion(criteria, new Set()), 0);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["optional-one"])), 0.5);
+  assert.equal(computeEstimatedCompletion(criteria, new Set(["optional-one", "optional-two"])), 1);
+});
+
+test("computeEstimatedCompletion: a task with zero success criteria reports 0, never 1", () => {
+  assert.equal(computeEstimatedCompletion([], new Set()), 0);
 });
 
 // ---------------------------------------------------------------------------------------
