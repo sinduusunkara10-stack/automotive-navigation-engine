@@ -93,6 +93,10 @@ async function startConsistencyFixtureServer(): Promise<{ baseUrl: string; close
       return void page("Start", "<button disabled>Continue</button>");
     }
 
+    if (path === "/popup-anchor.html") {
+      return void page("Start", '<a href="/done.html" target="_blank">Continue</a>');
+    }
+
     res.writeHead(404).end("Not found");
   });
 
@@ -494,6 +498,49 @@ test("disabled button without destinationUrl: fails cleanly with no fallback pos
     assert.ok(actionFailure);
     assert.match(actionFailure?.message ?? "", /hasDestinationUrl=false/);
     assert.match(actionFailure?.message ?? "", /fallbackRejectedReason=no_destination_url/);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+/**
+ * REGRESSION (production incident, case NIS-20260909-1893F7): a configurator entry point
+ * that opens in a new tab (target="_blank") was clicked repeatedly and reported successful
+ * every time -- Playwright's click() resolves without throwing, and the only navigation
+ * signal actions/click.ts checked for ("framenavigated" on the *tracked* page's main frame)
+ * never fires for a popup, since the popup is a separate browsing context. The tracked
+ * page's URL and title stayed unchanged across every attempt, but the engine kept reporting
+ * success, so the same click kept being re-proposed until the repeated-action guard stopped
+ * the run without ever reaching the configurator -- exactly matching the reported run's
+ * finishReason "repeated_action" with objectiveAchieved: false. The fix: actions/click.ts
+ * now listens for Playwright's "popup" event; when a click opens a new browsing context
+ * instead of navigating the tracked page, the popup is closed and the same generic,
+ * already-tested destinationUrl fallback used for other unactionable-click categories is
+ * attempted on the tracked page itself.
+ */
+test("click opens a new tab (target=\"_blank\"): the popup is not silently left unadopted -- the engine falls back to the tracked page's own destinationUrl navigation", async () => {
+  const { baseUrl, close } = await startConsistencyFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = buildTask({ startUrl: `${baseUrl}/popup-anchor.html`, successUrlPattern: `${baseUrl}/done.html` });
+    const response = await runTask({ page, task, reasoning: new ClickByNameProvider(page, "Continue") });
+
+    assert.equal(response.status, "success");
+    assert.equal(response.finalUrl, `${baseUrl}/done.html`);
+    // Proves this run actually went through the popup-recovery path (not a coincidental
+    // ordinary navigation): exactly one click step, no repeated-action stall.
+    assert.equal(response.steps.filter((s) => s.selectedAction.type === "click").length, 1);
+    const fallbackWarning = response.captures.errors?.find((e) => e.category === "navigation_failure");
+    assert.ok(fallbackWarning, "expected a warning diagnostic recording that the popup fallback was used");
+    assert.equal(fallbackWarning?.severity, "warning");
+    assert.equal(fallbackWarning?.recoverable, true);
+    assert.match(fallbackWarning?.message ?? "", /clickErrorCategory=popup_opened/);
+    assert.match(fallbackWarning?.message ?? "", /fallbackNavigationUsed=true/);
+    assert.match(fallbackWarning?.message ?? "", /new browsing context/);
   } finally {
     await page.close();
     await browser.close();

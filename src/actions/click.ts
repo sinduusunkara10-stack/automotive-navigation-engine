@@ -50,20 +50,34 @@ export interface ExecuteClickParams {
   knownDestinationUrl?: string;
 }
 
-type ClickErrorCategory = "detached" | "hidden" | "disabled" | "intercepted" | "timeout" | "frame_unavailable" | "unknown";
+type ClickErrorCategory =
+  | "detached"
+  | "hidden"
+  | "disabled"
+  | "intercepted"
+  | "timeout"
+  | "frame_unavailable"
+  | "popup_opened"
+  | "unknown";
 
 // A target in one of these categories failed only because it went stale (the DOM changed)
 // between when it was decided on and when it was actually acted on -- never because it was
 // a genuinely wrong or unsafe decision. "disabled" is deliberately excluded: a disabled
 // control is a legitimate, already-visible-as-such fact the reasoning layer could already
-// see, not a race condition. Drives ActionResult.staleTarget (see core/loop.ts's bounded,
-// non-fatal recovery for exactly this class of failure).
+// see, not a race condition. "popup_opened" belongs here too: the click itself was executed
+// correctly against a genuinely valid target, but it opened a new browsing context (a
+// target="_blank" anchor or a window.open() handler) rather than navigating the tracked
+// page -- the same "not a wrong decision, just not yet made progress on the tracked page"
+// situation, so it gets the same bounded, non-fatal retry treatment rather than being
+// reported as an unqualified success. Drives ActionResult.staleTarget (see core/loop.ts's
+// bounded, non-fatal recovery for exactly this class of failure).
 const STALE_TARGET_CATEGORIES = new Set<ClickErrorCategory>([
   "detached",
   "hidden",
   "intercepted",
   "timeout",
   "frame_unavailable",
+  "popup_opened",
 ]);
 
 interface ClickDiagnostics {
@@ -264,7 +278,11 @@ async function resolveUnactionableClick(params: {
  * reached, and the resulting URL (including any redirect) is checked against
  * allowedDomains before the click is reported as successful. A click that never triggers
  * navigation at all (a toggle/expand button, say) is not made to pay this
- * navigation-timeout budget -- see NAVIGATION_DETECT_GRACE_MS.
+ * navigation-timeout budget -- see NAVIGATION_DETECT_GRACE_MS. A click that opens a new
+ * browsing context instead of navigating the tracked page (target="_blank", window.open())
+ * is never reported as an unqualified success either: the new context is closed and the
+ * same generic destinationUrl fallback is attempted on the tracked page, since there is
+ * nothing else the engine could otherwise observe changing.
  */
 export async function executeClick(params: ExecuteClickParams): Promise<ActionResult> {
   const {
@@ -329,13 +347,25 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       mainFrameNavigated = true;
     }
   };
-  // Registered before the click so a navigation that commits fast is never missed.
+  // Generic, brand/site-agnostic detection of a click that opens a new browsing context
+  // (a target="_blank" anchor, or a window.open() call from a click handler) instead of
+  // navigating the tracked page itself -- Playwright never fires "framenavigated" on this
+  // page's main frame for that case, so without this the click below would otherwise be
+  // reported an unqualified success with the URL/title left completely unchanged.
+  let popupOpened: Page | undefined;
+  const onPopup = (popup: Page) => {
+    popupOpened = popup;
+  };
+  // Registered before the click so a navigation (or popup) that commits fast is never missed.
   page.on("framenavigated", onFrameNavigated);
+  page.on("popup", onPopup);
 
   try {
     await clickTarget.click(selector, { timeout: CLICK_ELEMENT_TIMEOUT_MS });
   } catch (error) {
     page.off("framenavigated", onFrameNavigated);
+    page.off("popup", onPopup);
+    await popupOpened?.close().catch(() => {});
     const message = error instanceof Error ? error.message : String(error);
     if (!/timeout/i.test(message)) {
       return { success: false, error: message };
@@ -367,6 +397,32 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     await page.waitForTimeout(NAVIGATION_DETECT_GRACE_MS).catch(() => {});
   }
   page.off("framenavigated", onFrameNavigated);
+  page.off("popup", onPopup);
+
+  if (!mainFrameNavigated && popupOpened) {
+    const popup = popupOpened;
+    const popupUrl = safePageUrl(popup);
+    await popup.close().catch(() => {});
+    const postPopupState = await readElementState(page, targetElementId);
+    return resolveUnactionableClick({
+      page,
+      targetElementId,
+      category: "popup_opened",
+      state: {
+        ...postPopupState,
+        destinationUrl: postPopupState.destinationUrl ?? preClickState.destinationUrl ?? knownDestinationUrl,
+      },
+      allowedDomains,
+      timeoutMs,
+      captures,
+      stepIndex,
+      captureModules,
+      reObservationAttempted: reObservationAttempted ?? false,
+      originalErrorMessage:
+        `click opened a new browsing context (popup/tab)${popupUrl ? ` at ${popupUrl}` : ""} instead of ` +
+        `navigating the tracked page; the tracked page's URL and title are unchanged`,
+    });
+  }
 
   if (!mainFrameNavigated) {
     // Generic settle wait, same fixed budget as the post-navigation case below -- lets a
