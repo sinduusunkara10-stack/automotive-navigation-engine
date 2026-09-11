@@ -1,4 +1,4 @@
-import type { ActionType, SelectedAction } from "../types/actions.js";
+import type { ActionType, RecordedAction, SelectedAction } from "../types/actions.js";
 import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
 import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
 
@@ -29,7 +29,7 @@ export interface ReasoningContext {
   allowedDomains: string[];
   limits: ReasoningContextLimits;
   observation: Observation;
-  recentActions: SelectedAction[];
+  recentActions: RecordedAction[];
   satisfiedCriteriaIds: string[];
   /** See ConsentInteractionPolicy (types/task-request.ts). Always present -- core/loop.ts resolves the task's omitted-field default ("reject_optional") before building this context, so a provider never has to know the default itself. */
   consentInteractionPolicy: ConsentInteractionPolicy;

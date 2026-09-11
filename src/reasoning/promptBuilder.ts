@@ -379,7 +379,11 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "scrolling. Only choose \"scroll\" when no visible control yet matches, or when " +
     "\"recentActions\" shows scrolling has genuinely been revealing new elements; if you've " +
     "recently scrolled without \"currentPage\" changing in a way that helps, say so in your " +
-    "reason and prefer a different action. An interactiveElements entry marked " +
+    "reason and prefer a different action. An entry in \"recentActions\" marked " +
+    "\"observedProgress\": false means that when that exact action last ran, the page's URL " +
+    "and title were unchanged the next time it was observed -- treat that as evidence the " +
+    "same action is unlikely to help if chosen again, and prefer a different action instead " +
+    "of repeating it verbatim. An interactiveElements entry marked " +
     "\"covered\": true currently has some other element sitting on top of it and cannot " +
     "actually be clicked -- when an uncovered control also matches the objective, prefer " +
     "that uncovered control over a covered one. Only choose a covered control when clearing " +
@@ -435,7 +439,9 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
         ...(el.covered ? { covered: el.covered } : {}),
       })),
     },
-    recentActions: recentActions.slice(-MAX_RECENT_ACTIONS).map((a) => ({ type: a.type, target: a.target })),
+    recentActions: recentActions
+      .slice(-MAX_RECENT_ACTIONS)
+      .map((a) => ({ type: a.type, target: a.target, observedProgress: a.observedProgress })),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };

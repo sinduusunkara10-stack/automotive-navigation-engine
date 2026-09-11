@@ -78,6 +78,45 @@ test("buildReasoningPrompt bounds recentActions, notableText, and interactiveEle
 });
 
 // ---------------------------------------------------------------------------------------
+// REGRESSION (production incident NIS-20260910-94E42B): after successfully reaching an
+// offer-details page, the engine re-selected the exact same click action again. The repeat
+// produced no observable page-state change, but nothing in `recentActions` told the
+// reasoning model that -- it only ever carried `{type, target}`, identical on both calls,
+// with no outcome evidence distinguishing "already tried, went nowhere" from "never tried
+// yet". core/state.ts now fills in a generic, capture-module-independent
+// `observedProgress` flag (a plain url/title diff, computed identically for every action
+// type -- see RunState.resolveLastActionProgress) on each RecordedAction; this proves that
+// flag actually reaches the prompt payload once buildReasoningPrompt maps it through, and
+// that a still-unresolved (most recent) action is omitted rather than sent as a stray
+// `null`/`undefined` key.
+// ---------------------------------------------------------------------------------------
+
+test("buildReasoningPrompt forwards each recentActions entry's observedProgress flag to the prompt payload", () => {
+  const context = buildTestReasoningContext({
+    recentActions: [
+      { type: "click", target: "el-0", observedProgress: false },
+      { type: "click", target: "el-1", observedProgress: true },
+      { type: "scroll" },
+    ],
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    recentActions: Array<{ type: string; target?: string; observedProgress?: boolean }>;
+  };
+
+  assert.equal(payload.recentActions.length, 3);
+  assert.equal(payload.recentActions[0]?.observedProgress, false);
+  assert.equal(payload.recentActions[1]?.observedProgress, true);
+  // The most recently recorded action has no outcome yet (no further observation has been
+  // taken to compare against) -- it must be omitted, not sent as an explicit null/undefined.
+  assert.ok(!("observedProgress" in (payload.recentActions[2] ?? {})));
+
+  // The system prompt must explain the flag generically -- no brand/CTA/URL wording.
+  assert.match(prompt.system, /observedProgress/);
+});
+
+// ---------------------------------------------------------------------------------------
 // REGRESSION (real production configurator run, schemaVersion 1.3.0): the run blocked on
 // repeated_action because Navigation Claude never selected the visible terminal-route
 // controls the observation already contained -- it kept scrolling instead. Root cause
