@@ -18,12 +18,22 @@ import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import {
   computeEstimatedCompletion,
+  computeMilestoneRollup,
   evaluateSuccessCriteria,
   getMissingRequiredCriteriaIds,
   type SuccessCriteriaEvidence,
 } from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
 import type { RunState } from "./state.js";
+import {
+  DEFAULT_MAX_BRANCH_DEPTH,
+  MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
+  assessBranchProgress,
+  classifyClosureFromSafetyFlags,
+  computeEffectiveBranchDepth,
+  isAmbiguousMultiCandidateDecisionPoint,
+  type BranchRecord,
+} from "./branchExploration.js";
 
 export type TerminalStatus =
   | "success"
@@ -182,6 +192,197 @@ export async function runStep(params: {
     };
   }
 
+  // Goal-Directed Bounded Branch Exploration (see core/branchExploration.ts): while a
+  // branch is active, this block decides, before any reasoning call, whether to (a)
+  // recognise the objective itself as already satisfied (closing the branch as "success"
+  // and falling through to a completely ordinary decision this same step -- no forced
+  // action, no return needed), (b) assess the branch's own progress from existing evidence
+  // and close it early on a dead end (never a bare Claude assertion), or (c) perform the
+  // next hop of an already-in-progress, fingerprint-verified return to the branch's own
+  // origin decision point. Only ever engages when state.activeBranch is set; a run with no
+  // branch active (every pre-existing task, and every ordinary decision point) skips this
+  // block entirely and behaves exactly as it did before this phase.
+  if (state.activeBranch) {
+    const branch = state.activeBranch;
+    const currentFingerprint = computeDecisionPointFingerprint(observation);
+
+    if (!branch.result) {
+      if (getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length === 0) {
+        branch.result = "success";
+        state.routeMemory.recordBranchResult(branch.decisionPointId, branch.candidateId, {
+          depthReached: branch.depth,
+          result: "success",
+        });
+        state.archiveActiveBranch();
+      } else {
+        const lastAction = state.actionHistory[state.actionHistory.length - 1];
+        // A step whose last action produced no observable page-state change (
+        // observedProgress === false) never left the current page in the first place --
+        // re-observing the exact same, already-visited fingerprint here is not a genuine
+        // "the branch looped back to an earlier state" revisit, just "nothing happened
+        // yet". That distinct case is what the dedicated consecutive-no-progress check
+        // (assessBranchProgress) exists to catch instead; only a fingerprint reached via
+        // an action that *did* change something (a real navigation) is compared against
+        // -- and recorded into -- visitedFingerprints, so the two DEAD END triggers stay
+        // meaningfully distinct rather than the no-progress case always being pre-empted
+        // by a trivial same-page "revisit".
+        const stayedOnSamePage = lastAction?.observedProgress === false;
+        const isRevisitFingerprint = !stayedOnSamePage && branch.visitedFingerprints.includes(currentFingerprint);
+        if (!stayedOnSamePage && !isRevisitFingerprint) {
+          branch.visitedFingerprints.push(currentFingerprint);
+        }
+        const newlySatisfiedThisStep = [...state.satisfiedCriteriaIds].filter(
+          (id) => !branch.satisfiedCriteriaIdsAtEntry.includes(id) && !branch.newlySatisfiedCriteriaIds.includes(id),
+        );
+        if (newlySatisfiedThisStep.length > 0) {
+          branch.newlySatisfiedCriteriaIds.push(...newlySatisfiedThisStep);
+        }
+        const assessment = assessBranchProgress({
+          depth: branch.depth,
+          maxDepth: branch.maxDepth,
+          isRevisitFingerprint,
+          lastActionObservedProgress: lastAction?.observedProgress,
+          consecutiveNoProgress: branch.consecutiveNoProgress,
+          newlySatisfiedCountThisStep: newlySatisfiedThisStep.length,
+          hasAnyNewlySatisfiedInBranch: branch.newlySatisfiedCriteriaIds.length > 0,
+        });
+        branch.consecutiveNoProgress = assessment.consecutiveNoProgress;
+        if (!assessment.shouldContinue) {
+          branch.result = assessment.result;
+          branch.returnHopsBudget = branch.depth + 1;
+          state.routeMemory.recordBranchResult(branch.decisionPointId, branch.candidateId, {
+            depthReached: branch.depth,
+            result: assessment.result,
+          });
+          if (task.captureModules.includes("errors")) {
+            recordDiagnosticError(captures, {
+              stepIndex,
+              category: "safety_guard_stop",
+              severity: "warning",
+              pageUrl: observation.url,
+              message: `Bounded branch "${branch.candidateLabel}" ended (${assessment.result}): ${assessment.reason} Returning toward the original decision point.`,
+              recoverable: true,
+              stoppedRun: false,
+            });
+          }
+        }
+      }
+    }
+
+    if (branch.result && branch.result !== "success" && branch.returnStatus !== "restored") {
+      // Branch closed unproductively: perform (or continue) the bounded,
+      // fingerprint-verified return sequence toward its own recorded decisionPointId,
+      // reusing the exact same go_back execution/accounting PR #41's own journey
+      // replanning uses -- never more than the fixed number of hops this specific
+      // branch's own recorded depth implies. Never assumes browser-history depth equals
+      // branch depth: each hop is followed by a fresh fingerprint check (at the top of
+      // the *next* runStep call, since that's when the next observation exists), not a
+      // fixed count of go_backs dispatched blindly in a row.
+      if (currentFingerprint === branch.decisionPointId) {
+        branch.returnStatus = "restored";
+        state.archiveActiveBranch();
+        // Falls through below to a completely ordinary decision this same step.
+      } else if (
+        branch.returnHopsAttempted >= branch.returnHopsBudget ||
+        !task.safety.allowedActions.includes("go_back") ||
+        state.backtrackCount >= task.limits.maxBacktracks ||
+        state.stepCount + 1 >= task.limits.maxSteps
+      ) {
+        branch.returnStatus = "restore_failed";
+        state.archiveActiveBranch();
+        const forcedAction: SelectedAction = { type: "stop_blocked" };
+        state.recordAction(forcedAction, { url: observation.url, title: observation.title });
+        if (task.captureModules.includes("errors")) {
+          recordDiagnosticError(captures, {
+            stepIndex,
+            category: "safety_guard_stop",
+            severity: "critical",
+            pageUrl: observation.url,
+            message:
+              `Could not verify a return to the original decision point after bounded branch ` +
+              `"${branch.candidateLabel}" ended (${branch.result}); stopping the run rather than ` +
+              `continuing from an unverified position.`,
+            recoverable: false,
+            stoppedRun: true,
+          });
+        }
+        const stepLog = buildStepLog({
+          stepIndex,
+          observation,
+          decision:
+            `The original decision point could not be safely restored after bounded branch ` +
+            `"${branch.candidateLabel}" ended (${branch.result}); stopping.`,
+          selectedAction: forcedAction,
+          actionResult: { success: true },
+          satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+          successCriteria: task.successCriteria,
+          safetyFlags: ["branch_restore_failed"],
+          reObservationAttempted: false,
+          recoveryAttempts: 0,
+        });
+        recordJourneyPathEntry(captures, task.captureModules, stepLog);
+        return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
+      } else {
+        branch.returnHopsAttempted += 1;
+        const forcedAction: SelectedAction = { type: "go_back" };
+        const returnActionResult = await dispatchAction({
+          page,
+          action: forcedAction,
+          captures,
+          stepIndex,
+          captureModules: task.captureModules,
+          allowedDomains: task.allowedDomains,
+          actionNavigationTimeoutMs,
+        });
+        state.recordAction(forcedAction, { url: observation.url, title: observation.title });
+        if (!returnActionResult.success) {
+          branch.returnStatus = "restore_failed";
+          state.archiveActiveBranch();
+          if (task.captureModules.includes("errors")) {
+            recordDiagnosticError(captures, {
+              stepIndex,
+              category: "safety_guard_stop",
+              severity: "critical",
+              pageUrl: observation.url,
+              actionType: "go_back",
+              message: `A return hop toward the original decision point failed to execute (${returnActionResult.error ?? "unknown error"}); stopping.`,
+              recoverable: false,
+              stoppedRun: true,
+            });
+          }
+          const stepLog = buildStepLog({
+            stepIndex,
+            observation,
+            decision: `Branch return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget} for bounded branch "${branch.candidateLabel}" failed to execute; the original decision point could not be restored.`,
+            selectedAction: forcedAction,
+            actionResult: returnActionResult,
+            satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+            successCriteria: task.successCriteria,
+            safetyFlags: ["branch_restore_failed"],
+            reObservationAttempted: false,
+            recoveryAttempts: 0,
+          });
+          recordJourneyPathEntry(captures, task.captureModules, stepLog);
+          return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
+        }
+        const stepLog = buildStepLog({
+          stepIndex,
+          observation,
+          decision: `Branch return (hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget}): returning toward the original decision point after bounded branch "${branch.candidateLabel}" ended (${branch.result}).`,
+          selectedAction: forcedAction,
+          actionResult: returnActionResult,
+          satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+          successCriteria: task.successCriteria,
+          safetyFlags: ["branch_return_attempted"],
+          reObservationAttempted: false,
+          recoveryAttempts: 0,
+        });
+        recordJourneyPathEntry(captures, task.captureModules, stepLog);
+        return { stepLog };
+      }
+    }
+  }
+
   // Generic obstruction-persistence check (see RunState.lastBlocker* fields): if the
   // target that most recently failed as covered/intercepted is, per a fresh, direct
   // re-check, still covered by the exact same intercepting element, nothing about the
@@ -328,6 +529,43 @@ export async function runStep(params: {
     effectiveAction = retry.effectiveAction;
   }
 
+  // Goal-Directed Bounded Branch Exploration: while a branch is actively being explored, a
+  // safety-layer rejection of the decision that would have continued it (or the reasoning
+  // layer itself proposing stop_blocked mid-branch) closes the branch immediately --
+  // "dead_end"/"blocked"/"unsafe" per classifyClosureFromSafetyFlags -- and begins its own
+  // bounded, fingerprint-verified return sequence (continued, hop by hop, by the block at
+  // the top of this function) in place of PR #41's own single-hop stop_blocked
+  // substitution just below, which remains the fallback only for a stop_blocked situation
+  // *outside* any active branch, exactly as before this phase.
+  const branchActiveAndExploring = Boolean(state.activeBranch && !state.activeBranch.result);
+  let branchReturnAttempted = false;
+  // Captured here (rather than re-read from state.branchHistory/activeBranch later) since
+  // the branch may or may not have been archived yet by the time the step log is built --
+  // this keeps that later text correct regardless of which path below was taken.
+  let branchClosureResultForLog: BranchRecord["result"];
+  if (branchActiveAndExploring && effectiveAction.type === "stop_blocked") {
+    const branch = state.activeBranch as BranchRecord;
+    const closureResult = safetyResult.allowed ? "dead_end" : classifyClosureFromSafetyFlags(safetyResult.flags);
+    branch.result = closureResult;
+    branchClosureResultForLog = closureResult;
+    state.routeMemory.recordBranchResult(branch.decisionPointId, branch.candidateId, {
+      depthReached: branch.depth,
+      result: closureResult,
+    });
+    if (task.safety.allowedActions.includes("go_back")) {
+      branch.returnHopsBudget = branch.depth + 1;
+      branch.returnHopsAttempted += 1;
+      effectiveAction = { type: "go_back" };
+      branchReturnAttempted = true;
+    } else {
+      // go_back is not an allowed action at all -- there is no way to even attempt a
+      // return, so the branch is closed unrestored and the existing stop_blocked handling
+      // below runs unmodified (effectiveAction is still stop_blocked).
+      branch.returnStatus = "restore_failed";
+      state.archiveActiveBranch();
+    }
+  }
+
   // Bounded journey replanning (see MAX_JOURNEY_REPLANNING_ATTEMPTS above): decided here,
   // before the safety-guard diagnostic immediately below is written, so that diagnostic
   // accurately reflects whether the run is actually about to stop or is instead being given
@@ -339,7 +577,12 @@ export async function runStep(params: {
   // run), and when one more go_back would not itself already exceed maxBacktracks/maxSteps
   // -- those hard ceilings are re-checked independently at the top of the next runStep call
   // regardless, so this is a conservative early check, never the sole enforcement of either.
+  // Never engaged while a branch is actively exploring (branchActiveAndExploring above
+  // already handled or is handling that case) -- PR #41 remains the fallback only outside
+  // an active branch.
   const journeyReplanningEligible =
+    !branchActiveAndExploring &&
+    !branchReturnAttempted &&
     effectiveAction.type === "stop_blocked" &&
     state.journeyReplanningAttempts < MAX_JOURNEY_REPLANNING_ATTEMPTS &&
     task.safety.allowedActions.includes("go_back") &&
@@ -352,18 +595,21 @@ export async function runStep(params: {
     const category: ErrorCategory = safetyResult.flags.some((flag) => limitFlags.has(flag))
       ? "limit_stop"
       : "safety_guard_stop";
+    const willRecover = journeyReplanningEligible || branchReturnAttempted;
     recordDiagnosticError(captures, {
       stepIndex,
       category,
-      severity: journeyReplanningEligible ? "warning" : "critical",
+      severity: willRecover ? "warning" : "critical",
       pageUrl: observation.url,
       actionType: decision.action.type,
       ...(decision.action.target ? { targetElementId: decision.action.target } : {}),
       message: journeyReplanningEligible
         ? `Guardrail(s) rejected this decision: ${safetyResult.flags.join(", ")}. Attempting bounded journey replanning (go_back) before giving up.`
-        : `Run stopped by guardrail(s): ${safetyResult.flags.join(", ")}.`,
-      recoverable: journeyReplanningEligible,
-      stoppedRun: !journeyReplanningEligible,
+        : branchReturnAttempted
+          ? `Guardrail(s) rejected this decision: ${safetyResult.flags.join(", ")}. Closing the active bounded branch and returning to its original decision point.`
+          : `Run stopped by guardrail(s): ${safetyResult.flags.join(", ")}.`,
+      recoverable: willRecover,
+      stoppedRun: !willRecover,
     });
   }
 
@@ -511,6 +757,17 @@ export async function runStep(params: {
 
   state.recordAction(effectiveAction, { url: observation.url, title: observation.title });
 
+  // Goal-Directed Bounded Branch Exploration: this step's own dispatched action counts as
+  // one downstream action against the active branch's depth budget, but only while a
+  // branch is both active and still exploring (never while it's already closed and
+  // returning, e.g. the go_back dispatched by the branch-closure block above) -- the
+  // branch's own entry action itself (dispatched the step state.startBranch was called,
+  // further below) is never counted here, since state.activeBranch isn't set yet at that
+  // point in *this* function.
+  if (state.activeBranch && !state.activeBranch.result) {
+    state.activeBranch.depth += 1;
+  }
+
   // Route Memory (Phase 1, see core/routeMemory.ts): records what happened to whichever
   // candidate the reasoning layer actually chose (decision.action) at this decision point,
   // identified by its stable role+accessibleName/URL identity rather than the ephemeral
@@ -526,14 +783,79 @@ export async function runStep(params: {
   // observation confirms the page actually moved on -- mirroring
   // RecordedAction.observedProgress's own generic, deferred url/title-diff evidence exactly.
   const routeCandidate = computeCandidateIdentity(decision.action, observation);
-  if (routeCandidate) {
-    const decisionPointFingerprint = computeDecisionPointFingerprint(observation);
+  const preDispatchDecisionPointFingerprint = routeCandidate ? computeDecisionPointFingerprint(observation) : undefined;
+  if (routeCandidate && preDispatchDecisionPointFingerprint) {
     if (!safetyResult.allowed) {
-      state.recordRouteMemoryOutcome(decisionPointFingerprint, routeCandidate, "blocked");
+      state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "blocked");
     } else if (!actionResult.success) {
-      state.recordRouteMemoryOutcome(decisionPointFingerprint, routeCandidate, "failed");
+      state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "failed");
     } else {
-      state.recordRouteMemoryPending(decisionPointFingerprint, routeCandidate);
+      state.recordRouteMemoryPending(preDispatchDecisionPointFingerprint, routeCandidate);
+    }
+  }
+
+  // Goal-Directed Bounded Branch Exploration: entry detection. Deliberately conservative
+  // and structural -- see isAmbiguousMultiCandidateDecisionPoint/computeEffectiveBranchDepth
+  // (core/branchExploration.ts) -- so an ordinary, unambiguous decision (any page where a
+  // candidate's own label already lexically matches the objective/successCriteria, or where
+  // fewer than two distinct candidates exist at all) never enters branch mode: this is what
+  // keeps a simple, existing single-criterion journey's behaviour byte-for-byte unchanged.
+  // Only ever considered for the exact candidate the reasoning layer actually chose and
+  // that was dispatched successfully and without any safety rejection -- entry never
+  // changes *which* action gets taken, only whether the engine starts tracking it as a
+  // bounded branch afterward.
+  if (
+    !state.activeBranch &&
+    routeCandidate &&
+    preDispatchDecisionPointFingerprint &&
+    safetyResult.allowed &&
+    actionResult.success &&
+    task.safety.allowedActions.includes("go_back") &&
+    getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length > 0 &&
+    state.getBranchAttempts(preDispatchDecisionPointFingerprint) < MAX_CANDIDATE_BUDGET_PER_DECISION_POINT &&
+    !state.routeMemory.hasBranchResult(preDispatchDecisionPointFingerprint, routeCandidate.id) &&
+    isAmbiguousMultiCandidateDecisionPoint({
+      observation,
+      relevanceText: [task.objective, ...task.successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
+    })
+  ) {
+    const effectiveMaxDepth = computeEffectiveBranchDepth({
+      requestedMaxDepth: DEFAULT_MAX_BRANCH_DEPTH,
+      stepsRemaining: task.limits.maxSteps - state.stepCount,
+      backtracksRemaining: task.limits.maxBacktracks - state.backtrackCount,
+      maxDurationSeconds: task.limits.maxDurationSeconds,
+      elapsedMs: Date.now() - state.startedAtMs,
+    });
+    if (effectiveMaxDepth > 0) {
+      const branchRecord: BranchRecord = {
+        branchId: state.nextBranchId(),
+        decisionPointId: preDispatchDecisionPointFingerprint,
+        candidateId: routeCandidate.id,
+        candidateLabel: routeCandidate.label,
+        entryStepIndex: stepIndex,
+        depth: 0,
+        maxDepth: effectiveMaxDepth,
+        visitedFingerprints: [],
+        satisfiedCriteriaIdsAtEntry: [...state.satisfiedCriteriaIds],
+        newlySatisfiedCriteriaIds: [],
+        consecutiveNoProgress: 0,
+        returnHopsAttempted: 0,
+        returnHopsBudget: 0,
+      };
+      state.startBranch(branchRecord);
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "safety_guard_stop",
+          severity: "info",
+          pageUrl: observation.url,
+          actionType: effectiveAction.type,
+          ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
+          message: `Entering bounded branch "${branchRecord.branchId}" through candidate ${routeCandidate.label} (depth budget ${effectiveMaxDepth}, candidate ${state.getBranchAttempts(preDispatchDecisionPointFingerprint)}/${MAX_CANDIDATE_BUDGET_PER_DECISION_POINT} at this decision point).`,
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
     }
   }
 
@@ -628,20 +950,24 @@ export async function runStep(params: {
       ? `Bounded journey replanning (attempt ${state.journeyReplanningAttempts}/${MAX_JOURNEY_REPLANNING_ATTEMPTS}): substituting go_back for a stop_blocked action ${
           blockedDecisionWasProposedDirectly ? "proposed by the reasoning layer" : "substituted by the safety layer for a rejected decision"
         }, to try an alternate path before giving up. Original rationale: ${decision.rationale}`
-      : decision.rationale,
+      : branchReturnAttempted
+        ? `Bounded branch closed (${branchClosureResultForLog}): substituting go_back for a stop_blocked action to return to the branch's original decision point. Original rationale: ${decision.rationale}`
+        : decision.rationale,
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     successCriteria: task.successCriteria,
     safetyFlags: journeyReplanningAttempted
       ? [...safetyResult.flags, "journey_replanning_attempted"]
-      : stopSuccessRejected
-        ? [
-            ...safetyResult.flags,
-            "required_criteria_unsatisfied",
-            ...(noProgressDetected ? ["no_progress_detected"] : []),
-          ]
-        : safetyResult.flags,
+      : branchReturnAttempted
+        ? [...safetyResult.flags, "branch_return_attempted"]
+        : stopSuccessRejected
+          ? [
+              ...safetyResult.flags,
+              "required_criteria_unsatisfied",
+              ...(noProgressDetected ? ["no_progress_detected"] : []),
+            ]
+          : safetyResult.flags,
     reObservationAttempted,
     recoveryAttempts,
   });
@@ -653,6 +979,18 @@ export async function runStep(params: {
     // blocked outcome the original stop_blocked action would have produced, rather than the
     // unrelated action_execution_error the generic action-failure handling below would
     // otherwise report for a failed go_back.
+    return {
+      stepLog,
+      terminal: "blocked",
+      finishReason: safetyResult.flags[0] ?? "stop_blocked_action",
+    };
+  }
+
+  if (branchReturnAttempted && !actionResult.success) {
+    // The branch-closure return's own first go_back failed to execute -- the branch was
+    // already archived with returnStatus left unset (not yet restored); treat this exactly
+    // like PR #41's own failed-substitution case: fall through to a blocked outcome rather
+    // than the unrelated action_execution_error the generic handling below would report.
     return {
       stepLog,
       terminal: "blocked",
@@ -688,6 +1026,25 @@ export async function runStep(params: {
     if (actionResult.staleTarget && !staleTargetExhausted) {
       return { stepLog };
     }
+
+    // Goal-Directed Bounded Branch Exploration: a non-recoverable failure of a downstream
+    // action taken *inside* an actively-exploring branch (never the branch's own entry
+    // action, which only starts being tracked after a successful dispatch -- see the
+    // entry-detection block above) closes the branch as "blocked" -- a recoverable,
+    // mechanical obstruction, per the task's own BLOCKED definition -- rather than ending
+    // the whole run. The step is not terminal: the next runStep call's top-of-function
+    // block picks up from here and begins the bounded, fingerprint-verified return.
+    if (state.activeBranch && !state.activeBranch.result) {
+      const branch = state.activeBranch;
+      branch.result = "blocked";
+      branch.returnHopsBudget = branch.depth + 1;
+      state.routeMemory.recordBranchResult(branch.decisionPointId, branch.candidateId, {
+        depthReached: branch.depth,
+        result: "blocked",
+      });
+      return { stepLog };
+    }
+
     return {
       stepLog,
       terminal: "failure",
@@ -797,6 +1154,28 @@ async function obtainDecision(params: {
   const decisionPointFingerprint = computeDecisionPointFingerprint(observation);
   const triedCandidates = state.routeMemory.getTriedCandidates(decisionPointFingerprint);
 
+  // Goal-Directed Bounded Branch Exploration: milestones reuses existing successCriteria
+  // (see computeMilestoneRollup, core/successEvaluator.ts) as the objective's milestones --
+  // never a second, parallel milestone system. branch is present only while a branch is
+  // both active and still exploring (never while it's closed and returning, since no
+  // further reasoning call is made during a return sequence -- see runStep above).
+  const milestoneRollup = computeMilestoneRollup(task.successCriteria, state.satisfiedCriteriaIds);
+  const branch = state.activeBranch;
+  const branchContext =
+    branch && !branch.result
+      ? {
+          candidateLabel: branch.candidateLabel,
+          depthUsed: branch.depth,
+          depthRemaining: Math.max(0, branch.maxDepth - branch.depth),
+          newlySatisfiedCriteriaIds: branch.newlySatisfiedCriteriaIds,
+          candidateBudgetUsed: state.getBranchAttempts(branch.decisionPointId),
+          candidateBudgetRemaining: Math.max(
+            0,
+            MAX_CANDIDATE_BUDGET_PER_DECISION_POINT - state.getBranchAttempts(branch.decisionPointId),
+          ),
+        }
+      : undefined;
+
   const decision = await reasoning.decide({
     objective: task.objective,
     successCriteria: task.successCriteria,
@@ -813,6 +1192,8 @@ async function obtainDecision(params: {
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     consentInteractionPolicy: task.safety.consentInteractionPolicy ?? "reject_optional",
     ...(triedCandidates.length > 0 ? { routeMemory: triedCandidates } : {}),
+    milestones: milestoneRollup,
+    ...(branchContext ? { branch: branchContext } : {}),
   });
 
   const safetyResult = validateDecision({

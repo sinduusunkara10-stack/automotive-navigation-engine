@@ -1,6 +1,7 @@
 import type { Page } from "playwright";
 import type { SuccessCriterion } from "../types/task-request.js";
 import type { LastActionEvidence, SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
+import type { MilestoneRollup } from "../types/branch.js";
 import { readDataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
 import {
   ALL_SEMANTIC_SIGNALS,
@@ -193,6 +194,56 @@ export function computeEstimatedCompletion(
     group.members.some((member) => satisfiedCriteriaIds.has(member.id)),
   ).length;
   return satisfiedCount / targetGroups.length;
+}
+
+/**
+ * Goal-Directed Bounded Branch Exploration: a compact, evidence-backed rollup of objective
+ * progress for the reasoning prompt (see reasoning/promptBuilder.ts), reusing existing
+ * successCriteria/satisfiedCriteriaIds as the objective's milestones rather than
+ * introducing a second, parallel milestone system -- per the investigation report's
+ * recommendation. Milestone *order* is simply declaration order in the `criteria` array
+ * (the same order groupCriteria's Map already preserves via insertion order): the smallest
+ * additive approach that needs no new schema field. A task with a single criterion (the
+ * common case, and every pre-existing task) produces a trivial single-group rollup;
+ * whether the prompt actually includes it at all is a promptBuilder.ts decision (it omits
+ * a trivial, single-milestone rollup entirely -- see MAX_MILESTONE... note there), so this
+ * function's own behaviour needs no special-casing for that.
+ *
+ * Each milestone group is represented by its first member's id/description -- a group is
+ * conceptually one milestone even when it has several alternative members (see
+ * groupCriteria's own doc comment on alternatives), so a single representative label is
+ * enough for the compact rollup; the full member list remains available, unchanged, via
+ * the existing successCriteria/satisfiedCriteriaIds fields for anything that needs it.
+ */
+export function computeMilestoneRollup(
+  criteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIds: ReadonlySet<string>,
+): MilestoneRollup {
+  const groups = groupCriteria(criteria);
+  const completed: MilestoneRollup["completed"] = [];
+  const remaining: MilestoneRollup["remaining"] = [];
+
+  for (const group of groups) {
+    const representative = group.members[0];
+    if (!representative) {
+      continue;
+    }
+    const summary = { id: representative.id, description: representative.description };
+    const groupSatisfied = group.members.some((member) => satisfiedCriteriaIds.has(member.id));
+    if (groupSatisfied) {
+      completed.push(summary);
+    } else {
+      remaining.push(summary);
+    }
+  }
+
+  return {
+    totalMilestones: groups.length,
+    completedMilestones: completed.length,
+    completed,
+    remaining,
+    ...(remaining.length > 0 ? { activeSubGoal: remaining[0] } : {}),
+  };
 }
 
 async function evaluateSingle(

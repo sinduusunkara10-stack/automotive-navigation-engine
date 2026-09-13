@@ -61,6 +61,12 @@ const MAX_INTERACTIVE_ELEMENTS = 40;
 // so a truncation here always keeps whichever dead ends have been repeated the most --
 // the strongest signal for "don't choose this again" -- ahead of a once-tried candidate.
 const MAX_ROUTE_MEMORY_CANDIDATES = 10;
+// Goal-Directed Bounded Branch Exploration: a task with a single milestone group (every
+// pre-existing task, and any task with just one required success criterion) gets no
+// "milestones" block in the prompt at all -- the rollup would be trivial ("1 of 1" or
+// "0 of 1") and would only add tokens without adding decision-relevant information over
+// what satisfiedCriteriaIds already conveys.
+const MIN_MILESTONE_GROUPS_FOR_PROMPT = 2;
 
 // At least this fraction of the cap is always reserved for structural/positional coverage
 // (see selectPromptInteractiveElements below), even when lexical relevance alone could
@@ -366,6 +372,8 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     satisfiedCriteriaIds,
     consentInteractionPolicy,
     routeMemory,
+    milestones,
+    branch,
   } = context;
 
   const system =
@@ -394,9 +402,14 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "back and returning here -- with how many times each was tried and its most recent " +
     "outcome: \"advanced\" (the page moved forward), \"no_change\" (nothing observably " +
     "changed), \"failed\" (the action could not be executed), or \"blocked\" (a safety rule " +
-    "rejected it). Prefer a control not listed in \"routeMemory\" at all, or one whose " +
+    "rejected it). A routeMemory entry may also show \"branchResult\" (with " +
+    "\"branchDepthReached\") -- the accumulated result of following that candidate several " +
+    "steps deep in an earlier bounded branch: \"dead_end\", \"blocked\", or \"unsafe\" means " +
+    "that whole direction was already explored and did not work out, not just that one " +
+    "click failed. Prefer a control not listed in \"routeMemory\" at all, or one whose " +
     "lastOutcome is \"advanced\", over repeating one whose lastOutcome is \"no_change\", " +
-    "\"failed\", or \"blocked\" -- unless every other option has already been exhausted too. " +
+    "\"failed\", or \"blocked\", or whose branchResult is \"dead_end\", \"blocked\", or " +
+    "\"unsafe\" -- unless every other option has already been exhausted too. " +
     "An interactiveElements entry marked " +
     "\"covered\": true currently has some other element sitting on top of it and cannot " +
     "actually be clicked -- when an uncovered control also matches the objective, prefer " +
@@ -414,7 +427,23 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "personal-data/contractual action, regardless of what the objective asks for. When two " +
     "or more entries in \"successCriteria\" share the same \"group\" value, they are " +
     "alternatives -- satisfying any one of them is enough to satisfy that whole group, so " +
-    "you do not need every member of a group to hold at once.";
+    "you do not need every member of a group to hold at once. An intermediate action's " +
+    "accessible name does not need to share any words with the objective or " +
+    "\"successCriteria\" to be worth choosing -- a detail, continuation, or exploration " +
+    "action can be a legitimate step toward the objective even when its own label looks " +
+    "unrelated; judge its plausibility from where it is likely to lead (its role, its " +
+    "\"destinationUrl\" when present, and what \"activeSubGoal\" in \"milestones\" still " +
+    "needs), not from label similarity alone. When \"branch\" is present, you are currently " +
+    "following such a candidate: keep choosing the next reasonable action within it while " +
+    "it keeps producing new, relevant evidence, but abandon it -- by choosing \"go_back\", " +
+    "or a \"stop_*\" action if that is not currently allowed -- once evidence clearly stops " +
+    "supporting the active sub-goal, required context looks lost, or nothing safe and " +
+    "plausible remains; the engine independently enforces a bounded depth regardless of " +
+    "what you choose. When \"milestones\" is present, treat its \"completed\" entries as " +
+    "permanently established regardless of what a later branch does -- a branch that fails " +
+    "never undoes an already-completed milestone -- and focus on \"activeSubGoal\". Never " +
+    "assert that a milestone or the objective itself is complete yourself; only the " +
+    "engine's own evaluation of \"successCriteria\" decides that.";
 
   const { selected: interactiveElements, diagnostic: elementSelection } = selectPromptInteractiveElements(
     observation.interactiveElements,
@@ -463,9 +492,26 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
             label: c.label,
             attempts: c.attempts,
             lastOutcome: c.lastOutcome,
+            ...(c.branchResult
+              ? { branchResult: c.branchResult, branchDepthReached: c.branchDepthReached }
+              : {}),
           })),
         }
       : {}),
+    // Goal-Directed Bounded Branch Exploration: omitted entirely (never a trivial
+    // single-milestone rollup) when the task declares fewer than two milestone groups --
+    // the common case, and every pre-existing task -- so an ordinary run's prompt payload
+    // is byte-for-byte unaffected by this field's existence. See MIN_MILESTONE_GROUPS_FOR_PROMPT.
+    ...(milestones && milestones.totalMilestones >= MIN_MILESTONE_GROUPS_FOR_PROMPT
+      ? {
+          milestones: {
+            completedMilestones: milestones.completedMilestones,
+            totalMilestones: milestones.totalMilestones,
+            ...(milestones.activeSubGoal ? { activeSubGoal: milestones.activeSubGoal } : {}),
+          },
+        }
+      : {}),
+    ...(branch ? { branch } : {}),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };

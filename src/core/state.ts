@@ -1,6 +1,7 @@
 import type { RecordedAction, SelectedAction } from "../types/actions.js";
 import type { RouteMemoryCandidate, RouteMemoryOutcome } from "../types/routeMemory.js";
 import { RouteMemory } from "./routeMemory.js";
+import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 
 export class RunState {
   stepCount = 0;
@@ -161,5 +162,62 @@ export class RunState {
       this.routeMemory.updateLastOutcome(this.pendingRouteMemory.fingerprint, this.pendingRouteMemory.candidateId, "advanced");
     }
     this.pendingRouteMemory = undefined;
+  }
+
+  /**
+   * Goal-Directed Bounded Branch Exploration: the single currently-active bounded branch
+   * (see core/branchExploration.ts), or undefined when no branch is in progress. Only one
+   * active branch is supported in this phase -- deliberately, per the investigation report
+   * and the task's own scope: nested/concurrent branches are not implemented. Stays
+   * populated (with `result` set) throughout its own multi-hop return sequence, so
+   * core/loop.ts can tell "still exploring" (`!activeBranch.result`) apart from "closed,
+   * returning" (`activeBranch.result` set, `returnStatus !== "restored"`) across the
+   * several separate runStep calls a return can take.
+   */
+  activeBranch: BranchRecord | undefined;
+
+  /**
+   * Closed branches, most recent last, bounded the same way every other per-run diagnostic
+   * collection in this file is (never unbounded) -- see MAX_BRANCH_HISTORY. Never persisted
+   * beyond this run, never surfaced on TaskResponse directly; used only for in-run
+   * diagnostics text (StepLog.decision / captures.errors -- see core/loop.ts) and for the
+   * candidate-budget accounting below.
+   */
+  readonly branchHistory: BranchRecord[] = [];
+
+  private branchCounter = 0;
+
+  /** How many branches have been *entered* (not necessarily yet closed) at each decision-point fingerprint -- the candidate-budget accounting (MAX_CANDIDATE_BUDGET_PER_DECISION_POINT, core/branchExploration.ts). */
+  private readonly branchAttemptsByDecisionPoint = new Map<string, number>();
+
+  getBranchAttempts(decisionPointFingerprint: string): number {
+    return this.branchAttemptsByDecisionPoint.get(decisionPointFingerprint) ?? 0;
+  }
+
+  nextBranchId(): string {
+    this.branchCounter += 1;
+    return `branch-${this.branchCounter}`;
+  }
+
+  /** Begins tracking a new active branch and counts it against its decision point's candidate budget. Caller (core/loop.ts) is responsible for confirming no branch is already active and that the budget/depth preconditions hold before calling this. */
+  startBranch(record: BranchRecord): void {
+    this.activeBranch = record;
+    this.branchAttemptsByDecisionPoint.set(
+      record.decisionPointId,
+      this.getBranchAttempts(record.decisionPointId) + 1,
+    );
+  }
+
+  /** Moves the active branch into bounded history and clears it, once it has fully finished (either succeeded, or its return sequence has resolved to restored/restore_failed). No-op if no branch is active. */
+  archiveActiveBranch(): void {
+    const branch = this.activeBranch;
+    if (!branch) {
+      return;
+    }
+    this.activeBranch = undefined;
+    this.branchHistory.push(branch);
+    if (this.branchHistory.length > MAX_BRANCH_HISTORY) {
+      this.branchHistory.splice(0, this.branchHistory.length - MAX_BRANCH_HISTORY);
+    }
   }
 }

@@ -1,4 +1,5 @@
 import type { ActionType } from "./actions.js";
+import type { BranchResult } from "./branch.js";
 
 /**
  * Shared Route Memory types (see core/routeMemory.ts for the fingerprint/candidate-identity
@@ -22,4 +23,17 @@ export interface RouteMemoryCandidateSummary {
   label: string;
   attempts: number;
   lastOutcome: RouteMemoryOutcome;
+  /**
+   * Goal-Directed Bounded Branch Exploration (see core/branchExploration.ts): the deepest
+   * downstream depth reached by a bounded branch entered through this candidate, and that
+   * branch's own accumulated result -- distinct from, and never overwriting,
+   * `lastOutcome`/`attempts` above, which continue to describe only this candidate's own
+   * single dispatched-action outcome exactly as PR #42 (Route Memory Phase 1) defined it.
+   * Absent when no branch was ever entered through this candidate (the common case for a
+   * candidate that was a clear, direct, non-ambiguous choice).
+   */
+  branchDepthReached?: number;
+  branchResult?: BranchResult;
+  /** How many separate branches have been entered through this candidate (bounded by MAX_CANDIDATE_BUDGET_PER_DECISION_POINT at the owning decision point, never by this candidate alone). */
+  branchAttempts?: number;
 }

@@ -1,6 +1,7 @@
 import type { SelectedAction } from "../types/actions.js";
 import type { Observation } from "../types/task-response.js";
 import type { RouteMemoryCandidate, RouteMemoryCandidateSummary, RouteMemoryOutcome } from "../types/routeMemory.js";
+import type { BranchResult } from "../types/branch.js";
 
 export type { RouteMemoryCandidate, RouteMemoryCandidateSummary, RouteMemoryOutcome } from "../types/routeMemory.js";
 
@@ -32,6 +33,10 @@ interface RouteMemoryEntry {
   label: string;
   attempts: number;
   lastOutcome: RouteMemoryOutcome;
+  /** See RouteMemoryCandidateSummary's own doc comment (types/routeMemory.ts) -- set only by recordBranchResult below, never by record()/updateLastOutcome(). */
+  branchDepthReached?: number;
+  branchResult?: BranchResult;
+  branchAttempts?: number;
 }
 
 /**
@@ -108,7 +113,42 @@ export class RouteMemory {
       label: candidate.label,
       attempts: (existing?.attempts ?? 0) + 1,
       lastOutcome: outcome,
+      // Preserved across a repeated record() call for the same candidate (e.g. this
+      // candidate is later dispatched again as an ordinary, non-branch action once its own
+      // candidate budget is exhausted) -- a candidate's own single-dispatch bookkeeping
+      // must never erase what an earlier bounded branch through it already established.
+      ...(existing?.branchDepthReached !== undefined ? { branchDepthReached: existing.branchDepthReached } : {}),
+      ...(existing?.branchResult !== undefined ? { branchResult: existing.branchResult } : {}),
+      ...(existing?.branchAttempts !== undefined ? { branchAttempts: existing.branchAttempts } : {}),
     });
+  }
+
+  /**
+   * Records the accumulated result of a bounded branch (core/branchExploration.ts)
+   * entered through this candidate -- see RouteMemoryCandidateSummary's own doc comment
+   * for why this is kept separate from, and never overwrites, lastOutcome/attempts above.
+   * A no-op if this exact (fingerprint, candidateId) pair was never record()ed in the first
+   * place (branch entry is only ever attempted for a candidate whose entry dispatch has
+   * already been recorded via record()/recordRouteMemoryPending -- see core/state.ts -- so
+   * this should always find an existing entry in practice).
+   */
+  recordBranchResult(
+    fingerprint: string,
+    candidateId: string,
+    params: { depthReached: number; result: BranchResult },
+  ): void {
+    const existing = this.byDecisionPoint.get(fingerprint)?.get(candidateId);
+    if (!existing) {
+      return;
+    }
+    existing.branchDepthReached = params.depthReached;
+    existing.branchResult = params.result;
+    existing.branchAttempts = (existing.branchAttempts ?? 0) + 1;
+  }
+
+  /** True when a bounded branch has already been entered and closed through this exact candidate at this decision point -- used to avoid re-entering an already-explored branch. */
+  hasBranchResult(fingerprint: string, candidateId: string): boolean {
+    return this.byDecisionPoint.get(fingerprint)?.get(candidateId)?.branchResult !== undefined;
   }
 
   /**
