@@ -118,6 +118,34 @@ test("isAmbiguousMultiCandidateDecisionPoint: false when one candidate already l
   assert.equal(result, false);
 });
 
+test("isAmbiguousMultiCandidateDecisionPoint: false when one candidate has a weak but UNIQUE top score -- an incidental single-word match still trusts direct selection", () => {
+  const obs = observation([
+    { role: "link", accessibleName: "See more" },
+    { role: "link", accessibleName: "Continue reading this page" },
+  ]);
+  // "Continue reading this page" shares only "page" with the objective -- a weak, non-zero
+  // score, but still the *unique* top scorer among the two candidates.
+  const result = isAmbiguousMultiCandidateDecisionPoint({
+    observation: obs,
+    relevanceText: "Reach the designated target page.",
+  });
+  assert.equal(result, false);
+});
+
+test("isAmbiguousMultiCandidateDecisionPoint: true when two candidates TIE for the highest (non-zero) relevance score -- a genuine tie, not just an absence of signal", () => {
+  const obs = observation([
+    { role: "link", accessibleName: "Continue to the page" },
+    { role: "link", accessibleName: "Proceed to the page" },
+  ]);
+  // Both candidates share exactly the same token ("page") with the objective and score
+  // identically -- lexical overlap alone cannot decide between them.
+  const result = isAmbiguousMultiCandidateDecisionPoint({
+    observation: obs,
+    relevanceText: "Reach the designated target page.",
+  });
+  assert.equal(result, true);
+});
+
 test("isAmbiguousMultiCandidateDecisionPoint: false when fewer than two distinct candidates are present", () => {
   const obs = observation([{ role: "link", accessibleName: "See more" }]);
   const result = isAmbiguousMultiCandidateDecisionPoint({

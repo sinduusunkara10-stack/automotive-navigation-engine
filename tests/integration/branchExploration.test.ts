@@ -161,6 +161,25 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
       return void page("W6 dead 2", "<p>Nothing here either.</p>");
     }
 
+    // ---- Wing 7: two candidates TIE for the highest (non-zero) relevance score against
+    // the objective -- exercises the revised entry condition ("no unique top-scoring
+    // candidate"), not just the original "every candidate scores zero" case. ----
+    if (path === "/w7/start.html") {
+      return void page("W7 start", '<a href="/w7/hub.html">Go</a>');
+    }
+    if (path === "/w7/hub.html") {
+      return void page(
+        "W7 hub",
+        '<a href="/w7/dead-end.html">Continue to page</a><a href="/w7/target.html">Proceed to page</a>',
+      );
+    }
+    if (path === "/w7/dead-end.html") {
+      return void page("W7 dead end", "<p>Nothing else here.</p>");
+    }
+    if (path === "/w7/target.html") {
+      return void page("W7 target", "<h1>Reached.</h1>");
+    }
+
     res.writeHead(404).end("Not found");
   });
 
@@ -401,7 +420,7 @@ test("a return that cannot be fingerprint-verified produces restore_failed and s
 
     const errorMessages = (response.captures.errors ?? []).map((e) => e.message);
     assert.ok(
-      errorMessages.some((m) => m.toLowerCase().includes("could not") && m.toLowerCase().includes("restor")),
+      errorMessages.some((m) => m.toLowerCase().includes("could not verify a return")),
       "expected a diagnostic explaining the failed restoration",
     );
 
@@ -532,7 +551,7 @@ test("a branch closes safely (unsafe) when a downstream decision is rejected by 
   try {
     const task = baseTask({
       startUrl: `${baseUrl}/w5/start.html`,
-      objective: "Check the available option and continue from there.",
+      objective: "Proceed to explore and arrive at a suitable destination.",
       successCriteria: [
         {
           id: "reached-outcome",
@@ -583,7 +602,7 @@ test("the candidate budget at one decision point is never exceeded: once both ca
   try {
     const task = baseTask({
       startUrl: `${baseUrl}/w6/start.html`,
-      objective: "Try a path and see where it leads.",
+      objective: "Proceed to explore and arrive at a suitable destination.",
       successCriteria: [
         {
           id: "reached-outcome",
@@ -609,6 +628,60 @@ test("the candidate budget at one decision point is never exceeded: once both ca
     assert.ok(entryMessages.some((m) => m.includes("Path one")));
     assert.ok(entryMessages.some((m) => m.includes("Path two")));
     assert.ok(entryMessages.every((m) => m.includes("candidate 1/2") || m.includes("candidate 2/2")));
+
+    const validation = await validateAgainstTaskResponseSchema(response);
+    assert.ok(validation.valid, validation.errorsText);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+// =========================================================================================
+// Wing 7: two candidates TIE for the highest, non-zero relevance score -- branch entry
+// engages even though not every candidate scores zero (the revised entry condition).
+// =========================================================================================
+
+test("branch exploration engages when two candidates TIE for the highest relevance score, not only when every candidate scores zero", async () => {
+  const { baseUrl, close } = await startFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/w7/start.html`,
+      objective: "Reach the destination page.",
+      successCriteria: [
+        {
+          id: "reached-target",
+          type: "url_pattern",
+          description: "The destination page was reached.",
+          config: { pattern: `${baseUrl}/w7/target.html` },
+          required: true,
+        },
+      ],
+    });
+    // Both "Continue to page" and "Proceed to page" share exactly one token ("page") with
+    // the objective/criteria text and so score identically under objectiveRelevanceScore --
+    // a genuine tie, not an absence of signal. Under the earlier "every candidate scores
+    // zero" condition this decision point would never have entered branch mode at all.
+    const provider = new RouteMemoryAwareScriptedProvider(["Go", "Continue to page", "Proceed to page"]);
+    const response = await runTask({ page, task, reasoning: provider });
+
+    assert.equal(response.status, "success", `expected success, got ${response.status}/${response.statusReason}`);
+
+    const entryMessages = (response.captures.errors ?? [])
+      .map((e) => e.message)
+      .filter((m) => m.includes("Entering bounded branch"));
+    assert.ok(
+      entryMessages.some((m) => m.includes("Continue to page")),
+      "expected branch mode to engage for the tied, dead-end candidate",
+    );
+
+    const afterReturn = provider.contextsSeen.find(
+      (ctx) => routeMemoryFor(ctx.routeMemory, 'a "Continue to page"')?.branchResult === "dead_end",
+    );
+    assert.ok(afterReturn, "the tied dead-end candidate's branch result must be surfaced before the other tied candidate is tried");
 
     const validation = await validateAgainstTaskResponseSchema(response);
     assert.ok(validation.valid, validation.errorsText);

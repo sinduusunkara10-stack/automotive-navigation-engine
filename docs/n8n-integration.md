@@ -816,6 +816,115 @@ group members are alternatives — purely to help the model propose `stop_succes
 engine's own independent re-check (§9's `required` section) is what actually enforces OR
 semantics regardless of what the model proposes.
 
+## 9f. Milestone-ordered successCriteria for objective progress tracking (Goal-Directed Bounded Branch Exploration)
+
+**What this is for.** `src/core/successEvaluator.ts`'s `computeMilestoneRollup` and the bounded
+branch-exploration mechanism it feeds (`src/core/branchExploration.ts`, `src/core/loop.ts`) let
+the reasoning layer see compact objective progress ("2 of 5 milestones completed", "active
+sub-goal: reach the quote entry point") and follow a weakly-labelled candidate for a few
+downstream steps before judging it — see `docs/architecture.md` §17. Both reuse the existing
+`successCriteria` array as-is; **no new schema field exists for this**, and none is planned. This
+section is the authoritative guide for what a caller (the n8n "Build Navigation Engine Task"
+node, §11 below) should send to get useful milestone tracking.
+
+**Activation is automatic and threshold-gated.** `computeMilestoneRollup` runs unconditionally
+over whatever `successCriteria` a task supplies, but `src/reasoning/promptBuilder.ts` only
+includes the resulting `milestones` block in the reasoning prompt once there are **two or more**
+milestone groups (`MIN_MILESTONE_GROUPS_FOR_PROMPT`). A task with the one required criterion
+every pre-existing task already sends produces a trivial one-milestone rollup that is silently
+omitted from the prompt — **zero behavioural or token-cost change** for any caller that doesn't
+adopt the pattern below.
+
+**How a "milestone" is defined.** Every distinct criterion **group** in `successCriteria` is one
+milestone — a criterion with no `group` is its own implicit singleton group (§9e), and two-or-more
+criteria sharing a `group` value count as *one* milestone, satisfied once any member is (the
+alternative-criteria mechanism, unchanged). This applies uniformly to `required: true` and
+`required: false` groups alike: **`computeMilestoneRollup` does not filter by `required`** — an
+optional (`required: false`) milestone, such as §9c's "configurator entered" pattern, still counts
+toward `totalMilestones`/`completedMilestones` and can still be the `activeSubGoal` while
+unsatisfied. This is a deliberate, simple definition ("a milestone is a group, in order") rather
+than a second, required-only notion of progress — keep it in mind if you mix optional milestones
+into a criteria list: an unsatisfied optional milestone is still reported as the active sub-goal
+until it (or something later) is satisfied, even though it will never by itself block
+`stop_success`.
+
+**Ordering: declaration order, no explicit sequence field.** Milestones are read off
+`successCriteria` in **array order** — the smallest additive change available, deliberately
+chosen over adding a `milestoneOrder`/`sequence` field. `activeSubGoal` is simply the first group,
+in that order, not yet present in the run's `satisfiedCriteriaIds`. **The caller is responsible
+for emitting the array in the sequence the journey is actually expected to proceed through** —
+the engine has no other way to know intended order, and does not attempt to infer it from
+`description` text or criterion `type`.
+
+**Recommended shape**, one criterion per real journey milestone:
+
+| Field | Guidance |
+|---|---|
+| `id` | Stable, unique, kebab/snake-case — this is what shows up in `progress.satisfiedCriteriaIds`, so make it something a human reviewer of `TaskResponse` can read directly. |
+| `type` | Whichever criterion type actually verifies that step: `url_pattern` for a page-based milestone, `element_present` for "some marker exists on the page," `semantic_page_match` for a page that varies by language/market (see §9a) and shouldn't be pinned to a literal URL. |
+| `description` | Plain English describing the *milestone*, not a copy of a specific button's label — this text also feeds `objectiveRelevanceScore`, which now also drives branch-entry ambiguity detection (`docs/architecture.md` §17), so an overly literal description can incidentally suppress branch exploration at a decision point whose candidate happens to share a word with it. |
+| `required` | `true` for anything that must actually happen for the objective to count as achieved; `false` for a purely informational milestone (§9c's existing pattern). |
+| `group` | Only when two-or-more criteria are alternative ways of reaching the *same* milestone (§9e) — omit otherwise. |
+
+The **final** entry in the array should be exactly what a single-criterion task already sends
+today (the ultimate, `required: true` success signal) — this pattern is purely additive in front
+of it, and a caller migrating from one criterion to several changes nothing about how the last
+one is evaluated.
+
+**Example — a five-milestone journey** (replacing a single "reach the quote form" criterion):
+
+```json
+"successCriteria": [
+  {
+    "id": "reached-offers-page",
+    "type": "url_pattern",
+    "description": "The offers listing page was reached.",
+    "config": { "pattern": "https://example-automotive-oem.com/offers**" },
+    "required": true
+  },
+  {
+    "id": "selected-required-offer",
+    "type": "url_pattern",
+    "description": "The specific offer's own page was reached.",
+    "config": { "pattern": "https://example-automotive-oem.com/offers/*/**" },
+    "required": true
+  },
+  {
+    "id": "reached-offer-details",
+    "type": "semantic_page_match",
+    "description": "Full details for the selected offer are displayed.",
+    "required": true
+  },
+  {
+    "id": "reached-quote-entry-point",
+    "type": "semantic_page_match",
+    "description": "A control or page that begins the quote or enquiry process is reachable.",
+    "required": true
+  },
+  {
+    "id": "quote-form-displayed",
+    "type": "element_present",
+    "description": "The quote/enquiry form and its fields are visible.",
+    "config": { "selector": "form[data-form-type='quote']" },
+    "required": true
+  }
+]
+```
+
+With `satisfiedCriteriaIds` containing the first two ids, `computeMilestoneRollup` reports
+`totalMilestones: 5`, `completedMilestones: 2`, and `activeSubGoal: { id: "reached-offer-details",
+description: "..." }` — exactly the "2 of 5 completed" / active-sub-goal framing surfaced to the
+reasoning layer, computed entirely from data the caller already controls.
+
+**Minimum viable version.** Only two required criteria are needed to activate the rollup at all —
+even splitting one existing terminal criterion into "reached the right section" + the original
+terminal criterion is enough to get non-trivial milestone context; the five-entry example above is
+the *recommended* granularity, not a required minimum.
+
+**This is optional.** Nothing in the engine requires multiple criteria, and no existing task needs
+to change — see the "one required criterion" backward-compatibility guarantee at the top of this
+section.
+
 ## 10. taskId, and brand/market/language as reporting metadata only
 
 **taskId.** With only `startUrl`, `journeyType`, and `objective` coming out of the Form

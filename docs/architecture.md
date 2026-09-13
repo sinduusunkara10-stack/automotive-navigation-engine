@@ -1555,3 +1555,231 @@ Per this phase's own scope (see `docs/v1-scope.md`):
   scoped to one `RunState`, discarded with the rest of the run's state once `runTask`
   returns — matching every other per-run mechanism in this file (e.g. `lastBlockerSignature`,
   `journeyReplanningAttempts`).
+
+## 17. Goal-Directed Bounded Branch Exploration
+
+A real journey frequently reaches a decision point where the objective is not yet directly
+represented by any visible control's label — a page offering "View Details" and "Finance
+Calculator" when the objective is to reach a quote form, neither of which shares any vocabulary
+with "quote". Before this section's mechanism existed, the reasoning layer had exactly one shot
+at such a candidate: pick it, and if it turned out to be a dead end, either PR #41's bounded
+journey replanning (§"Bounded journey replanning") or an eventual `stop_blocked` was the only
+recourse — there was no way for the engine to let the reasoning layer follow a plausible-but-
+unlabelled candidate a few steps deep, judge it on accumulated evidence, and cleanly try the next
+one without burning the run's entire replanning allowance on a single shallow probe.
+
+This is a **current-run, local, bounded, goal-directed** capability — never cross-run learning,
+never a persisted experience repository, never RAG or a vector store, and never brute-force
+"click every visible control." It builds directly on, and does not replace, PR #40 (Action
+Progress Awareness), PR #41 (Bounded Journey Replanning), and PR #42 (Route Memory Phase 1): the
+same `observedProgress` evidence, the same `go_back` execution/accounting, and the same
+decision-point fingerprint/candidate-identity mechanism are all reused, never duplicated.
+
+### Objective milestone rollup
+
+`computeMilestoneRollup` (`src/core/successEvaluator.ts`) reuses existing `successCriteria` —
+never a second, parallel milestone system — as the objective's milestones. Every criterion
+**group** (§9e's alternative-criteria grouping; an ungrouped criterion is its own singleton
+group) is one milestone, in **array declaration order**; `activeSubGoal` is the first group, in
+that order, not yet present in `satisfiedCriteriaIds`. See `docs/n8n-integration.md` §9f for the
+full caller-facing guide to structuring `successCriteria` for this.
+
+Because `RunState.satisfiedCriteriaIds` is (and always was, independent of this section) a
+one-way ratchet — nothing anywhere in the engine ever removes an id from it — an already-completed
+milestone **cannot** be un-satisfied by a later branch's failure. This is the direct fix for the
+regression shape that motivated this work: selecting a required entity is expressed as one
+milestone criterion; a downstream branch explored from the entity's own page is tracked in a
+completely separate structure (Route Memory / `BranchRecord`, below), keyed by decision-point
+fingerprint and candidate identity, never by `SuccessCriterion.id` — there is no code path from a
+branch's `dead_end`/`blocked`/`unsafe` result back into `satisfiedCriteriaIds`. What is **not**
+implemented: a live, page-state sense of "are we still positioned inside the entity's own
+section right now," as distinct from "was the milestone historically satisfied" — deferred as a
+speculative, potentially fragile heuristic (e.g. a URL-prefix comparison) without concrete
+production evidence it's needed; only the unconditional ratchet-based guarantee ships in this
+phase.
+
+`src/reasoning/promptBuilder.ts` includes a compact `milestones` block in the prompt
+(`completedMilestones`/`totalMilestones`/`activeSubGoal`) only once a task declares **two or
+more** milestone groups (`MIN_MILESTONE_GROUPS_FOR_PROMPT`) — the common single-criterion task
+(every pre-existing caller) gets a prompt payload byte-for-byte unaffected by this field's
+existence.
+
+### Branch-entry condition
+
+A branch is only ever entered around a **successfully dispatched, safety-allowed `click`/
+`navigate` candidate** (`computeCandidateIdentity`, PR #42) when all of the following hold
+(`src/core/loop.ts`, using helpers from `src/core/branchExploration.ts`):
+
+- no branch is already active (single active branch only — no nesting, no concurrency);
+- a required milestone remains unsatisfied;
+- `go_back` is one of the task's `allowedActions` (a branch that could never return is never
+  started);
+- the candidate budget at this exact decision-point fingerprint is not yet exhausted
+  (`MAX_CANDIDATE_BUDGET_PER_DECISION_POINT`, 2);
+- this exact candidate has no already-recorded branch result at this decision point (never
+  re-enter a branch already known to be a dead end);
+- `computeEffectiveBranchDepth(...) > 0` given the run's remaining budget (see below);
+- and, the entry condition proper: `isAmbiguousMultiCandidateDecisionPoint` — the pre-dispatch
+  observation offered **at least two distinct candidates**, and **no single one of them uniquely
+  holds the highest `objectiveRelevanceScore`** (`src/discovery/relevance.ts`) among them.
+
+That last condition was deliberately revised from an earlier, narrower "every candidate scores
+zero" check. A candidate whose label shares one *incidental* word with the objective/criteria
+text (without that word actually indicating the right path) could otherwise silence branch
+exploration for the *whole* decision point — including for a genuinely zero-relevance alternative
+that might be the real route. The current condition instead asks "does lexical overlap alone
+clearly decide this?": a single candidate with a uniquely highest score (even a weak, non-zero
+one) is still trusted to the pre-existing, already-validated ranking/selection behaviour — Route
+Memory and bounded journey replanning remain the safety net if that pick is wrong, so no branch
+bookkeeping is layered on top of an otherwise-ordinary decision. Ambiguity is "no candidate's own
+score clearly, uniquely stands out": either every candidate scores zero (no signal at all), or
+two-or-more tie for the top score (a genuine tie lexical overlap cannot resolve). Both are cases
+where nothing but the model's own semantic judgement is actually choosing between them.
+
+Deliberately scoped to `click` candidates surfaced via `Observation.interactiveElements` only — a
+`navigate` action is not something visibly "offered" at a decision point the way an interactive
+element is, so it does not participate in this ambiguity signal (though a `navigate` can still
+separately become a tracked branch once dispatched).
+
+This condition is what keeps an ordinary, unambiguous journey (any page where a candidate's label
+already lexically stands out, or where fewer than two distinct candidates exist at all) entirely
+untouched by this phase — proven by `tests/integration/branchExploration.test.ts`'s own
+backward-compatibility test.
+
+### Branch depth and candidate budget within the run's remaining limits
+
+`computeEffectiveBranchDepth` reduces the fixed default (`DEFAULT_MAX_BRANCH_DEPTH`, 3 — chosen
+to stay comparable to, not dominant over, `MAX_JOURNEY_REPLANNING_ATTEMPTS`'s own existing
+budget of 2, not merely because "two or three" was mentioned in the originating investigation)
+so a branch never promises more of the run's remaining budget than it can actually afford:
+
+```
+totalStepsNeeded(d) = d (downstream) + (d + 1) (worst-case return hops) + 1 (one more candidate)
+effectiveDepth = max(0, min(requestedMaxDepth, floor((stepsRemaining - 2) / 2), backtracksRemaining - 1))
+```
+
+recomputed fresh at *every* branch-entry decision from whatever budget genuinely remains at that
+moment — never a value fixed once per run. Once at least 90% of `maxDurationSeconds` has already
+elapsed, this returns 0 regardless of the step/backtrack numbers (no safe step-to-duration
+conversion exists, so this is treated coarsely and conservatively). An effective depth of 0 means
+branch entry does not happen at all — the candidate simply dispatches as an ordinary action,
+exactly as it would have before this phase.
+
+`MAX_CANDIDATE_BUDGET_PER_DECISION_POINT` (2) bounds how many separate branches may be entered
+at one decision-point fingerprint — a hard, engine-owned ceiling, not an action-denial mechanism:
+once exhausted, a candidate at that fingerprint can still be dispatched as an ordinary action, it
+simply no longer gets multi-step branch tracking. Under tight production limits (e.g. `maxSteps:
+10`, `maxBacktracks: 3`), the depth/budget interaction can reduce a branch to depth 1 or prevent
+entry entirely by the time a decision point is reached several steps into a journey — this is
+intentional graceful degradation (never an unsafe overrun), not a bug; a deployment that wants
+consistent depth-3, two-candidate exploration should budget `maxSteps`/`maxBacktracks`
+accordingly (roughly 25–30 / 8–10 comfortably covers the worst case of two candidates each at
+depth 3 with full-length returns), left as an explicit per-deployment decision rather than
+silently changed by the engine.
+
+### Branch lifecycle and progress assessment
+
+`BranchRecord` (`src/core/branchExploration.ts`, held at `RunState.activeBranch` while active and
+moved into the bounded `RunState.branchHistory` once closed — capped at `MAX_BRANCH_HISTORY`, 20)
+carries: `branchId`, `decisionPointId` (the origin fingerprint), `candidateId`/`candidateLabel`,
+`entryStepIndex`, `depth`/`maxDepth`, `visitedFingerprints` (decision points seen since entry, for
+in-branch loop detection), `satisfiedCriteriaIdsAtEntry`/`newlySatisfiedCriteriaIds`,
+`consecutiveNoProgress`, `result`, and `returnStatus`/`returnHopsAttempted`/`returnHopsBudget`.
+Single active branch only — no nesting, no concurrent branches, matching this phase's explicitly
+narrow scope.
+
+At the top of every step while a branch is active and still exploring (`!branch.result`),
+`src/core/loop.ts` runs `assessBranchProgress` (`src/core/branchExploration.ts`) — **evidence
+only, never a bare model assertion** — using signals the engine already computes every step:
+
+- `depth += 1` after every successful in-branch dispatch (never the entry action itself, and
+  never a return hop);
+- the current decision-point fingerprint is compared against `visitedFingerprints`, but **only
+  when the last action actually produced a page-state change** (`observedProgress !== false`) —
+  a step whose last action never left the current page is not a "revisit" of anything, it simply
+  never went anywhere; conflating the two would let a trivial same-page no-op pre-empt the
+  dedicated no-progress check below before it ever gets a chance to fire;
+- two consecutive in-branch actions with `observedProgress === false` (PR #40, reused unchanged)
+  end the branch early;
+- the branch-depth budget being reached always ends the branch, but distinguishes
+  `plausible_progress` (evidence was gained) from `dead_end` (none was);
+- a newly-satisfied criterion within the branch is `goal_progress`, and continues the branch.
+
+A **failed dispatch** or a **safety-layer rejection** of a decision that would have continued an
+active, still-exploring branch is handled inline, at its own point in `runStep`, rather than
+deferred to the next step's assessment: it closes the branch immediately as `blocked` (a
+non-safety, mechanical obstruction) or `unsafe` (a safety-rule rejection — `classifyClosureFrom
+SafetyFlags` maps `loop_detected` to `dead_end`, `domain_blocked`/`action_not_allowed` to
+`unsafe`, everything else to `blocked`) and begins the return sequence in place of ending the
+whole run. This is the one generic behavioural change worth calling out precisely: a click/
+navigate failure or safety rejection that would, *outside* an active branch, still end the run
+(subject to PR #41's own existing recovery), instead only ends the *branch* while one is active
+— the run itself continues via the return sequence below.
+
+### Fingerprint-verified, bounded multi-hop return
+
+Once a branch closes with anything other than `success`, `src/core/loop.ts` performs a bounded
+return toward `branch.decisionPointId`, reusing the exact same `go_back` execution and
+`RunState.recordAction`/backtrack-accounting path PR #41's own single-hop substitution already
+uses — never a new execution primitive. `returnHopsBudget` is set to `depth + 1` at closure (a
+maximum, never assumed to be the actual count needed): after **every single** `go_back` hop, the
+next `runStep` call's fresh observation is fingerprint-checked against `decisionPointId` *before*
+any further hop is attempted — restoration stops the moment it's verified, never dispatching a
+hop it didn't need. If the hop budget is exhausted without a match, `go_back` isn't an allowed
+action, or a hop itself fails to execute, `returnStatus` becomes `restore_failed` and the run
+stops immediately with terminal `blocked` / `finishReason: "decision_point_restore_failed"` —
+the engine never continues from a position it cannot verify. Browser-history depth is never
+assumed to equal branch depth; this is precisely why the check runs after every hop rather than
+issuing a fixed count up front.
+
+PR #41's own single-hop `stop_blocked` → `go_back` substitution remains **unmodified** as the
+final pre-stop fallback for a `stop_blocked` situation *outside* any active branch — the new
+return sequence only engages, in its place, for a `stop_blocked` that would have closed an
+*active* branch.
+
+### Route Memory extension
+
+`RouteMemoryCandidateSummary`/the internal `RouteMemoryEntry` (`src/types/routeMemory.ts`,
+`src/core/routeMemory.ts`) gain `branchDepthReached`/`branchResult`/`branchAttempts`, written only
+by the new `RouteMemory.recordBranchResult` — **`lastOutcome`/`attempts` keep exactly their PR
+#42 meaning**, a single dispatched action's own mechanical outcome, untouched by branch
+bookkeeping (`record()` is careful to preserve any existing branch fields across a later,
+unrelated call for the same candidate, e.g. if it's later dispatched again as an ordinary
+non-branch action once its own candidate budget is exhausted). `getTriedCandidates` — already
+surfaced to the reasoning prompt as `routeMemory` — carries both fields for a candidate whenever
+present, so a returned-to decision point shows both "the last time this exact click was
+dispatched" and "the last time a branch was explored through it" as distinct, non-conflicting
+evidence. Route Memory remains **advisory** for this purpose — the prompt's own guidance prefers
+an untried candidate or one whose `branchResult`/`lastOutcome` is favourable, but the only *hard*
+engine-enforced rule remains the candidate budget itself (never a general action-denial
+mechanism).
+
+### Diagnostics: no wire-schema change
+
+Every branch-lifecycle event (entry, closure, return hop, restore failure) is recorded through
+existing, already-free-form fields — `captures.errors` (via `recordDiagnosticError`, when the
+`errors` capture module is requested) and `StepLog.safetyFlags`/`decision` — exactly the
+precedent PR #41 established for journey-replanning diagnostics. Return-hop steps carry
+`safetyFlags: ["branch_return_attempted"]` (or `"branch_restore_failed"`) directly, so they are
+identifiable from `TaskResponse.steps` alone without needing to cross-reference `captures.errors`.
+No `TaskResponse.schemaVersion`/`outputSchemaVersion` bump was needed for this phase.
+
+Correlating a specific `cta_clicks`/`journey_path`/`data_layer_evidence`/`ga4_network_events`
+entry with "which branch was this evidence produced during" is possible today via `stepIndex`
+join against the `captures.errors` branch-lifecycle entries and `journey_path`'s own
+`decisionReason` (= `StepLog.decision`, which already contains descriptive branch text) — but
+there is no single structured label field for it yet. A dedicated `StepLog.explorationLabel`
+(`primary_route`/`exploratory_branch`/`branch_return`/`discarded_branch`/`final_success_route`)
+remains explicitly out of scope for this phase, deferred as a follow-up once this phase's
+behaviour has been validated against real runs — the same deliberate-deferral discipline Route
+Memory Phase 1 (§16) itself set.
+
+### Scope
+
+Single active branch (no nesting/concurrency); no task-level branch-depth or candidate-budget
+override (both are fixed, internal constants for this phase, matching `MAX_JOURNEY_REPLANNING_
+ATTEMPTS`'s own precedent); no live (as opposed to ratchet-based) required-entity-context
+tracking; no public analytics exploration labelling; no cross-run memory, RAG, vector storage, or
+persistent experience repository of any kind — `BranchRecord`/`RunState.branchHistory` are
+discarded with the rest of the run's state once `runTask` returns, exactly like `RouteMemory`
+itself.

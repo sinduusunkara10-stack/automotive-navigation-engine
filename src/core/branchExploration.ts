@@ -95,13 +95,25 @@ export function computeEffectiveBranchDepth(params: {
 
 /**
  * A decision point is treated as ambiguous enough to warrant bounded branch exploration
- * only when it offers at least two distinct, plausible route choices (the same candidate
- * identity core/routeMemory.ts already uses -- role+accessibleName for click) and *none* of
- * them shares any vocabulary with the objective/success-criteria text under the existing,
- * fully generic objectiveRelevanceScore (src/discovery/relevance.ts). A decision point with
- * even one lexically-matching candidate does not need branch exploration -- the existing
- * direct-selection behaviour already handles it -- and a decision point with fewer than two
- * distinct candidates has nothing to choose between in the first place.
+ * when it offers at least two distinct, plausible route choices (the same candidate
+ * identity core/routeMemory.ts already uses -- role+accessibleName for click) and no single
+ * one of them *uniquely* holds the highest objectiveRelevanceScore (src/discovery/
+ * relevance.ts) among them.
+ *
+ * Deliberately not "every candidate scores zero" (an earlier, narrower version of this
+ * check): that condition let a single *incidental* token match -- one candidate's label
+ * happening to share one word with the objective/criteria text without that word actually
+ * indicating the right path -- silence branch exploration for the *whole* decision point,
+ * including for a genuinely zero-relevance alternative that might be the real route. A
+ * unique top scorer (even a weak, non-zero one) is still trusted to the existing,
+ * already-validated direct-selection/ranking behaviour -- Route Memory Phase 1 and bounded
+ * journey replanning remain the safety net if that single pick turns out wrong, so no
+ * branch bookkeeping is layered on top of an otherwise-ordinary decision. Ambiguity is
+ * "no single candidate's own score clearly, uniquely stands out from the rest": either
+ * every candidate scores zero (no lexical signal at all -- the original case), or two or
+ * more candidates tie for the highest score (a genuine tie -- lexical overlap alone cannot
+ * decide between them either). Both are cases where nothing but the model's own semantic
+ * judgement is actually choosing, which is exactly what this feature exists for.
  *
  * Deliberately scoped to click candidates only (via Observation.interactiveElements, the
  * same source computeCandidateIdentity's click branch resolves against): a `navigate`
@@ -115,20 +127,31 @@ export function isAmbiguousMultiCandidateDecisionPoint(params: {
   relevanceText: string;
 }): boolean {
   const { observation, relevanceText } = params;
-  const identities = new Set<string>();
-  let anyRelevant = false;
+  // Deduplicated by candidate identity (not per raw element) before comparing scores, so
+  // two elements that are really the *same* candidate (identical role+accessibleName)
+  // never get counted as two independent entries in a tie check.
+  const scoreByIdentity = new Map<string, number>();
 
   for (const el of observation.interactiveElements) {
     if (el.visible === false || el.disabled || el.covered) {
       continue;
     }
-    identities.add(`click::${el.role}::${el.accessibleName}`);
-    if (objectiveRelevanceScore(relevanceText, el.accessibleName) > 0) {
-      anyRelevant = true;
+    const identity = `click::${el.role}::${el.accessibleName}`;
+    const score = objectiveRelevanceScore(relevanceText, el.accessibleName);
+    const existing = scoreByIdentity.get(identity);
+    if (existing === undefined || score > existing) {
+      scoreByIdentity.set(identity, score);
     }
   }
 
-  return identities.size >= 2 && !anyRelevant;
+  if (scoreByIdentity.size < 2) {
+    return false;
+  }
+
+  const scores = [...scoreByIdentity.values()];
+  const maxScore = Math.max(...scores);
+  const topScorerCount = scores.filter((score) => score === maxScore).length;
+  return topScorerCount !== 1;
 }
 
 export interface BranchAssessmentInput {
