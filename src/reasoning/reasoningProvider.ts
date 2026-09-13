@@ -2,6 +2,7 @@ import type { ActionType, RecordedAction, SelectedAction } from "../types/action
 import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
 import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
 import type { RouteMemoryCandidateSummary } from "../types/routeMemory.js";
+import type { BranchPromptContext, MilestoneRollup } from "../types/branch.js";
 
 // Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
 // implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
@@ -43,6 +44,23 @@ export interface ReasoningContext {
    * optional context fields (e.g. Observation.progressIndicatorText).
    */
   routeMemory?: RouteMemoryCandidateSummary[];
+  /**
+   * Goal-Directed Bounded Branch Exploration (see core/successEvaluator.ts's
+   * computeMilestoneRollup): a compact rollup of objective-milestone progress, reusing
+   * existing successCriteria as the source of truth. Omitted (rather than a trivial single-
+   * milestone rollup) when the task declares fewer than two milestone groups -- the common
+   * case, and every pre-existing task -- so an ordinary run's prompt is byte-for-byte
+   * unaffected by this field's existence.
+   */
+  milestones?: MilestoneRollup;
+  /**
+   * Goal-Directed Bounded Branch Exploration (see core/branchExploration.ts): present only
+   * while a bounded branch is actively being explored (never while one is merely returning,
+   * and never for an ordinary, non-branch decision) -- the compact context needed to keep
+   * following or judging the current branch. Omitted entirely otherwise, matching this
+   * repo's existing convention for optional context fields.
+   */
+  branch?: BranchPromptContext;
 }
 
 export interface ReasoningProvider {

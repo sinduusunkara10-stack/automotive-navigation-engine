@@ -769,3 +769,110 @@ test("buildReasoningPrompt bounds routeMemory candidates, keeping the most-attem
     "the heavily-tried candidate must survive truncation",
   );
 });
+
+// ---------------------------------------------------------------------------------------
+// Goal-Directed Bounded Branch Exploration: milestones / branch prompt context. Bounded
+// and omitted whenever trivial, so an ordinary single-criterion task's prompt stays
+// byte-for-byte unaffected by these fields' existence.
+// ---------------------------------------------------------------------------------------
+
+test("buildReasoningPrompt omits 'milestones' entirely for the common single-criterion task (matches buildTestReasoningContext's own default)", () => {
+  const context = buildTestReasoningContext();
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as Record<string, unknown>;
+  assert.ok(!("milestones" in payload));
+});
+
+test("buildReasoningPrompt omits 'milestones' when the context supplies fewer than two milestone groups", () => {
+  const context = buildTestReasoningContext({
+    milestones: { totalMilestones: 1, completedMilestones: 0, completed: [], remaining: [{ id: "only", description: "d" }], activeSubGoal: { id: "only", description: "d" } },
+  });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as Record<string, unknown>;
+  assert.ok(!("milestones" in payload));
+});
+
+test("buildReasoningPrompt includes a compact 'milestones' block once two or more milestone groups are supplied", () => {
+  const context = buildTestReasoningContext({
+    milestones: {
+      totalMilestones: 3,
+      completedMilestones: 2,
+      completed: [
+        { id: "a", description: "Reached the required section." },
+        { id: "b", description: "Selected the required entity." },
+      ],
+      remaining: [{ id: "c", description: "Reach the final destination page." }],
+      activeSubGoal: { id: "c", description: "Reach the final destination page." },
+    },
+  });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    milestones?: { totalMilestones: number; completedMilestones: number; activeSubGoal?: { id: string; description: string } };
+  };
+  assert.ok(payload.milestones);
+  assert.equal(payload.milestones?.totalMilestones, 3);
+  assert.equal(payload.milestones?.completedMilestones, 2);
+  assert.equal(payload.milestones?.activeSubGoal?.id, "c");
+  // Never the full completed/remaining member lists -- only the compact rollup counts and
+  // the active sub-goal, per this phase's own token-bounding requirement.
+  assert.ok(!("completed" in (payload.milestones as object)));
+  assert.ok(!("remaining" in (payload.milestones as object)));
+
+  assert.match(prompt.system, /activeSubGoal/);
+});
+
+test("buildReasoningPrompt omits 'branch' when no branch is supplied", () => {
+  const context = buildTestReasoningContext();
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as Record<string, unknown>;
+  assert.ok(!("branch" in payload));
+});
+
+test("buildReasoningPrompt includes a compact 'branch' block when a branch is being actively explored", () => {
+  const context = buildTestReasoningContext({
+    branch: {
+      candidateLabel: 'a "See details"',
+      depthUsed: 1,
+      depthRemaining: 2,
+      newlySatisfiedCriteriaIds: [],
+      candidateBudgetUsed: 1,
+      candidateBudgetRemaining: 1,
+    },
+  });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { branch?: Record<string, unknown> };
+  assert.ok(payload.branch);
+  assert.equal(payload.branch?.candidateLabel, 'a "See details"');
+  assert.equal(payload.branch?.depthUsed, 1);
+  assert.equal(payload.branch?.depthRemaining, 2);
+
+  assert.match(prompt.system, /"branch"/);
+});
+
+test("buildReasoningPrompt: the milestones/branch context stays compact -- never the whole run history or full route memory dumped into the prompt", () => {
+  const context = buildTestReasoningContext({
+    milestones: {
+      totalMilestones: 2,
+      completedMilestones: 1,
+      completed: [{ id: "a", description: "d" }],
+      remaining: [{ id: "b", description: "d" }],
+      activeSubGoal: { id: "b", description: "d" },
+    },
+    branch: {
+      candidateLabel: 'a "See details"',
+      depthUsed: 1,
+      depthRemaining: 2,
+      newlySatisfiedCriteriaIds: [],
+      candidateBudgetUsed: 1,
+      candidateBudgetRemaining: 1,
+    },
+  });
+  const withoutContext = buildTestReasoningContext();
+  const promptWith = buildReasoningPrompt(context);
+  const promptWithout = buildReasoningPrompt(withoutContext);
+
+  // The added JSON payload size for these two compact blocks together must stay a small,
+  // bounded addition -- not proportional to run length or route-memory size.
+  const addedBytes = promptWith.user.length - promptWithout.user.length;
+  assert.ok(addedBytes < 400, `expected a small bounded addition, got ${addedBytes} bytes`);
+});

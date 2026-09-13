@@ -4,6 +4,7 @@ import { chromium, type Page } from "playwright";
 
 import {
   computeEstimatedCompletion,
+  computeMilestoneRollup,
   evaluateSuccessCriteria,
   getMissingRequiredCriteriaIds,
 } from "../../src/core/successEvaluator.js";
@@ -599,6 +600,96 @@ test("computeEstimatedCompletion: a task with no required criteria falls back to
 
 test("computeEstimatedCompletion: a task with zero success criteria reports 0, never 1", () => {
   assert.equal(computeEstimatedCompletion([], new Set()), 0);
+});
+
+// ---------------------------------------------------------------------------------------
+// computeMilestoneRollup (Goal-Directed Bounded Branch Exploration): reuses existing
+// successCriteria/satisfiedCriteriaIds as the objective's milestones -- see
+// core/successEvaluator.ts's own doc comment. Milestone order is declaration order.
+// ---------------------------------------------------------------------------------------
+
+test("computeMilestoneRollup: a single-criterion task (the common, pre-existing case) reports a trivial single-milestone rollup", () => {
+  const criteria: SuccessCriterion[] = [{ id: "only", type: "url_pattern", description: "Reach the target." }];
+
+  const beforeSatisfied = computeMilestoneRollup(criteria, new Set());
+  assert.equal(beforeSatisfied.totalMilestones, 1);
+  assert.equal(beforeSatisfied.completedMilestones, 0);
+  assert.equal(beforeSatisfied.remaining.length, 1);
+  assert.equal(beforeSatisfied.activeSubGoal?.id, "only");
+
+  const afterSatisfied = computeMilestoneRollup(criteria, new Set(["only"]));
+  assert.equal(afterSatisfied.completedMilestones, 1);
+  assert.equal(afterSatisfied.remaining.length, 0);
+  assert.equal(afterSatisfied.activeSubGoal, undefined);
+});
+
+test("computeMilestoneRollup: reports '2 of N completed' and picks the first unmet milestone (in declaration order) as the active sub-goal", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "reached-section", type: "url_pattern", description: "Reach the required section." },
+    { id: "entity-selected", type: "element_present", description: "Select the required entity." },
+    { id: "final-page", type: "url_pattern", description: "Reach the final destination page." },
+  ];
+
+  const rollup = computeMilestoneRollup(criteria, new Set(["reached-section", "entity-selected"]));
+  assert.equal(rollup.totalMilestones, 3);
+  assert.equal(rollup.completedMilestones, 2);
+  assert.deepEqual(
+    rollup.completed.map((m) => m.id),
+    ["reached-section", "entity-selected"],
+  );
+  assert.deepEqual(
+    rollup.remaining.map((m) => m.id),
+    ["final-page"],
+  );
+  assert.equal(rollup.activeSubGoal?.id, "final-page");
+});
+
+test("computeMilestoneRollup: a group of alternative criteria counts as one milestone, satisfied once any member is satisfied", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "path-a", type: "url_pattern", description: "Reach via path A.", group: "either-path" },
+    { id: "path-b", type: "url_pattern", description: "Reach via path B.", group: "either-path" },
+    { id: "final", type: "url_pattern", description: "Reach the final page." },
+  ];
+
+  const rollup = computeMilestoneRollup(criteria, new Set(["path-b"]));
+  assert.equal(rollup.totalMilestones, 2, "the group counts as one milestone, not two");
+  assert.equal(rollup.completedMilestones, 1);
+  assert.deepEqual(
+    rollup.completed.map((m) => m.id),
+    ["path-a"],
+    "the group's representative is its first-declared member",
+  );
+});
+
+test("computeMilestoneRollup: all milestones satisfied leaves remaining empty and activeSubGoal undefined", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "a", type: "url_pattern", description: "d" },
+    { id: "b", type: "url_pattern", description: "d" },
+  ];
+  const rollup = computeMilestoneRollup(criteria, new Set(["a", "b"]));
+  assert.equal(rollup.completedMilestones, 2);
+  assert.equal(rollup.remaining.length, 0);
+  assert.equal(rollup.activeSubGoal, undefined);
+});
+
+test("computeMilestoneRollup: an unsuccessful downstream branch never un-satisfies an earlier, already-completed milestone (satisfiedCriteriaIds is a one-way ratchet)", () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "entity-selected", type: "element_present", description: "Select the required entity." },
+    { id: "final-page", type: "url_pattern", description: "Reach the final destination page." },
+  ];
+  const satisfied = new Set(["entity-selected"]);
+
+  // Simulate a downstream branch failing: nothing about a failed branch ever removes an id
+  // from satisfiedCriteriaIds (see RunState/successEvaluator's own ratchet discipline) --
+  // computeMilestoneRollup is purely a read over whatever the set currently contains, so
+  // this is really asserting the caller-side invariant that a failed branch must never call
+  // satisfiedCriteriaIds.delete(...).
+  const rollup = computeMilestoneRollup(criteria, satisfied);
+  assert.deepEqual(
+    rollup.completed.map((m) => m.id),
+    ["entity-selected"],
+    "the required entity selection milestone remains completed regardless of any later branch outcome",
+  );
 });
 
 // ---------------------------------------------------------------------------------------

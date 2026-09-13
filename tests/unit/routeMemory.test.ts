@@ -297,3 +297,77 @@ test("RunState.resolveLastActionProgress is a no-op for route memory when no can
   // No recordRouteMemoryPending call -- nothing pending.
   assert.doesNotThrow(() => state.resolveLastActionProgress("https://x.test/b.html", "B"));
 });
+
+// ---------------------------------------------------------------------------------------
+// Goal-Directed Bounded Branch Exploration: recordBranchResult / hasBranchResult. Kept
+// separate from, and never overwriting, lastOutcome/attempts above -- see
+// RouteMemoryCandidateSummary's own doc comment (types/routeMemory.ts).
+// ---------------------------------------------------------------------------------------
+
+test("RouteMemory.recordBranchResult: sets branchDepthReached/branchResult/branchAttempts without touching lastOutcome/attempts", () => {
+  const memory = new RouteMemory();
+  const fp = "fingerprint-1";
+  const candidate = { id: "click::a::Detail", actionType: "click" as const, label: 'a "Detail"' };
+
+  memory.record(fp, candidate, "no_change");
+  memory.recordBranchResult(fp, candidate.id, { depthReached: 2, result: "dead_end" });
+
+  const tried = memory.getTriedCandidates(fp);
+  assert.equal(tried.length, 1);
+  assert.equal(tried[0]?.lastOutcome, "no_change", "the single-dispatch outcome must be untouched");
+  assert.equal(tried[0]?.attempts, 1, "the single-dispatch attempt count must be untouched");
+  assert.equal(tried[0]?.branchDepthReached, 2);
+  assert.equal(tried[0]?.branchResult, "dead_end");
+  assert.equal(tried[0]?.branchAttempts, 1);
+});
+
+test("RouteMemory.recordBranchResult: a repeated record() call for the same candidate (e.g. later dispatched as an ordinary action) preserves the earlier branch fields", () => {
+  const memory = new RouteMemory();
+  const fp = "fingerprint-1";
+  const candidate = { id: "click::a::Detail", actionType: "click" as const, label: 'a "Detail"' };
+
+  memory.record(fp, candidate, "no_change");
+  memory.recordBranchResult(fp, candidate.id, { depthReached: 3, result: "blocked" });
+
+  // Dispatched again later, as an ordinary (non-branch) action.
+  memory.record(fp, candidate, "failed");
+
+  const tried = memory.getTriedCandidates(fp);
+  assert.equal(tried[0]?.lastOutcome, "failed");
+  assert.equal(tried[0]?.attempts, 2);
+  assert.equal(tried[0]?.branchDepthReached, 3, "an unrelated later record() call must not erase branch bookkeeping");
+  assert.equal(tried[0]?.branchResult, "blocked");
+});
+
+test("RouteMemory.recordBranchResult: a second branch through the same candidate increments branchAttempts and overwrites depth/result", () => {
+  const memory = new RouteMemory();
+  const fp = "fingerprint-1";
+  const candidate = { id: "click::a::Detail", actionType: "click" as const, label: 'a "Detail"' };
+
+  memory.record(fp, candidate, "no_change");
+  memory.recordBranchResult(fp, candidate.id, { depthReached: 1, result: "blocked" });
+  memory.recordBranchResult(fp, candidate.id, { depthReached: 3, result: "dead_end" });
+
+  const tried = memory.getTriedCandidates(fp);
+  assert.equal(tried[0]?.branchAttempts, 2);
+  assert.equal(tried[0]?.branchDepthReached, 3);
+  assert.equal(tried[0]?.branchResult, "dead_end");
+});
+
+test("RouteMemory.recordBranchResult: a no-op for a candidate never record()ed in the first place", () => {
+  const memory = new RouteMemory();
+  memory.recordBranchResult("never-seen", "click::a::Detail", { depthReached: 1, result: "dead_end" });
+  assert.deepEqual(memory.getTriedCandidates("never-seen"), []);
+});
+
+test("RouteMemory.hasBranchResult: false until a branch has been recorded, true afterward", () => {
+  const memory = new RouteMemory();
+  const fp = "fingerprint-1";
+  const candidate = { id: "click::a::Detail", actionType: "click" as const, label: 'a "Detail"' };
+
+  memory.record(fp, candidate, "no_change");
+  assert.equal(memory.hasBranchResult(fp, candidate.id), false);
+
+  memory.recordBranchResult(fp, candidate.id, { depthReached: 1, result: "dead_end" });
+  assert.equal(memory.hasBranchResult(fp, candidate.id), true);
+});
