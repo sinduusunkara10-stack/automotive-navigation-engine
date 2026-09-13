@@ -1620,21 +1620,35 @@ A branch is only ever entered around a **successfully dispatched, safety-allowed
   re-enter a branch already known to be a dead end);
 - `computeEffectiveBranchDepth(...) > 0` given the run's remaining budget (see below);
 - and, the entry condition proper: `isAmbiguousMultiCandidateDecisionPoint` — the pre-dispatch
-  observation offered **at least two distinct candidates**, and **no single one of them uniquely
-  holds the highest `objectiveRelevanceScore`** (`src/discovery/relevance.ts`) among them.
+  observation offered **at least two distinct candidates**, and **no candidate's own
+  `objectiveRelevanceScore`** (`src/discovery/relevance.ts`) **clears `MIN_DOMINANT_RELEVANCE_
+  SCORE` (0.5)** — i.e. no candidate's label is a genuinely dominant lexical match.
 
-That last condition was deliberately revised from an earlier, narrower "every candidate scores
-zero" check. A candidate whose label shares one *incidental* word with the objective/criteria
-text (without that word actually indicating the right path) could otherwise silence branch
-exploration for the *whole* decision point — including for a genuinely zero-relevance alternative
-that might be the real route. The current condition instead asks "does lexical overlap alone
-clearly decide this?": a single candidate with a uniquely highest score (even a weak, non-zero
-one) is still trusted to the pre-existing, already-validated ranking/selection behaviour — Route
-Memory and bounded journey replanning remain the safety net if that pick is wrong, so no branch
-bookkeeping is layered on top of an otherwise-ordinary decision. Ambiguity is "no candidate's own
-score clearly, uniquely stands out": either every candidate scores zero (no signal at all), or
-two-or-more tie for the top score (a genuine tie lexical overlap cannot resolve). Both are cases
-where nothing but the model's own semantic judgement is actually choosing between them.
+This condition went through two iterations before landing here, both worth recording since the
+second directly caught a regression against an existing PR #41 test:
+
+1. Originally "every candidate scores zero". A candidate whose label shares one *incidental*
+   word with the objective/criteria text (without that word actually indicating the right path)
+   could silence branch exploration for the *whole* decision point — including for a genuinely
+   zero-relevance alternative that might be the real route.
+2. Revised to "no candidate uniquely holds the top score" (tie-based) to close that gap. This
+   introduced a real regression: `tests/integration/journeyReplanning.test.ts`'s
+   domain-blocked-replanning scenario has one page offering both "Continue" and "Objective
+   control" for an objective that literally names both in sequence — each fully matches its own
+   short label and both tie at the maximum possible score, 1.0. `objectiveRelevanceScore`'s
+   equality alone cannot distinguish "these tie because neither means anything" from "these tie
+   because both are excellent matches" — only the score's own *magnitude* carries that
+   information, so a bare tie check incorrectly triggered branch mode on a page the existing,
+   already-validated direct-selection behaviour already handled correctly.
+
+The magnitude threshold supersedes tie-detection entirely: a candidate whose score is `overlap /
+candidateTokens.size` clears 0.5 when at least half of the candidate's own words are drawn from
+the objective/criteria text — a genuinely dominant match, trusted regardless of whether another
+candidate ties it. Below that bar — a unique-but-weak score, a weak tie, or an all-zero tie alike
+— nothing but the model's own semantic judgement is actually choosing, which is exactly when
+branch bookkeeping earns its cost. `tests/unit/branchExploration.test.ts` carries the regression
+case directly (a strong 1.0/1.0 tie must not be ambiguous) alongside the original gap case (a
+weak, unique, non-dominant score must still be ambiguous).
 
 Deliberately scoped to `click` candidates surfaced via `Observation.interactiveElements` only — a
 `navigate` action is not something visibly "offered" at a decision point the way an interactive

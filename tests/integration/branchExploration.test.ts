@@ -161,16 +161,16 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
       return void page("W6 dead 2", "<p>Nothing here either.</p>");
     }
 
-    // ---- Wing 7: two candidates TIE for the highest (non-zero) relevance score against
-    // the objective -- exercises the revised entry condition ("no unique top-scoring
-    // candidate"), not just the original "every candidate scores zero" case. ----
+    // ---- Wing 7: two candidates TIE for the highest relevance score against the
+    // objective, and that tied score is itself weak/non-dominant -- exercises the revised
+    // entry condition (a magnitude threshold, not "every candidate scores zero"). ----
     if (path === "/w7/start.html") {
       return void page("W7 start", '<a href="/w7/hub.html">Go</a>');
     }
     if (path === "/w7/hub.html") {
       return void page(
         "W7 hub",
-        '<a href="/w7/dead-end.html">Continue to page</a><a href="/w7/target.html">Proceed to page</a>',
+        '<a href="/w7/dead-end.html">Continue over to page</a><a href="/w7/target.html">Proceed over to page</a>',
       );
     }
     if (path === "/w7/dead-end.html") {
@@ -643,7 +643,7 @@ test("the candidate budget at one decision point is never exceeded: once both ca
 // engages even though not every candidate scores zero (the revised entry condition).
 // =========================================================================================
 
-test("branch exploration engages when two candidates TIE for the highest relevance score, not only when every candidate scores zero", async () => {
+test("branch exploration engages when two candidates tie for the highest relevance score and that score is weak, not only when every candidate scores exactly zero", async () => {
   const { baseUrl, close } = await startFixtureServer();
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -661,11 +661,16 @@ test("branch exploration engages when two candidates TIE for the highest relevan
         },
       ],
     });
-    // Both "Continue to page" and "Proceed to page" share exactly one token ("page") with
-    // the objective/criteria text and so score identically under objectiveRelevanceScore --
-    // a genuine tie, not an absence of signal. Under the earlier "every candidate scores
-    // zero" condition this decision point would never have entered branch mode at all.
-    const provider = new RouteMemoryAwareScriptedProvider(["Go", "Continue to page", "Proceed to page"]);
+    // Both "Continue over to page" and "Proceed over to page" share exactly one token
+    // ("page") out of three of their own with the objective/criteria text and so score
+    // identically (0.333) under objectiveRelevanceScore -- a genuine tie, and a weak one,
+    // below the dominance threshold. Under the earlier "every candidate scores zero"
+    // condition this decision point would never have entered branch mode at all (neither
+    // candidate scores exactly zero); under a bare tie-detection rule a *strong* tie (e.g.
+    // two candidates each fully matching their own short label) would incorrectly trigger
+    // branch mode too -- see tests/unit/branchExploration.test.ts's own regression-shaped
+    // coverage for that case.
+    const provider = new RouteMemoryAwareScriptedProvider(["Go", "Continue over to page", "Proceed over to page"]);
     const response = await runTask({ page, task, reasoning: provider });
 
     assert.equal(response.status, "success", `expected success, got ${response.status}/${response.statusReason}`);
@@ -674,12 +679,12 @@ test("branch exploration engages when two candidates TIE for the highest relevan
       .map((e) => e.message)
       .filter((m) => m.includes("Entering bounded branch"));
     assert.ok(
-      entryMessages.some((m) => m.includes("Continue to page")),
+      entryMessages.some((m) => m.includes("Continue over to page")),
       "expected branch mode to engage for the tied, dead-end candidate",
     );
 
     const afterReturn = provider.contextsSeen.find(
-      (ctx) => routeMemoryFor(ctx.routeMemory, 'a "Continue to page"')?.branchResult === "dead_end",
+      (ctx) => routeMemoryFor(ctx.routeMemory, 'a "Continue over to page"')?.branchResult === "dead_end",
     );
     assert.ok(afterReturn, "the tied dead-end candidate's branch result must be surfaced before the other tied candidate is tried");
 

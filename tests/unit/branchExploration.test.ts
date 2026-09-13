@@ -118,27 +118,47 @@ test("isAmbiguousMultiCandidateDecisionPoint: false when one candidate already l
   assert.equal(result, false);
 });
 
-test("isAmbiguousMultiCandidateDecisionPoint: false when one candidate has a weak but UNIQUE top score -- an incidental single-word match still trusts direct selection", () => {
+test("isAmbiguousMultiCandidateDecisionPoint: true when one candidate has a weak, non-dominant UNIQUE top score -- a single incidental word match must not silence exploration of a zero-scoring alternative", () => {
   const obs = observation([
     { role: "link", accessibleName: "See more" },
     { role: "link", accessibleName: "Continue reading this page" },
   ]);
-  // "Continue reading this page" shares only "page" with the objective -- a weak, non-zero
-  // score, but still the *unique* top scorer among the two candidates.
+  // "Continue reading this page" shares only "page" out of 3 of its own tokens with the
+  // objective -- a weak (1/3), unique-top, but non-dominant score (below
+  // MIN_DOMINANT_RELEVANCE_SCORE). Being the unique top scorer is not enough on its own to
+  // be trusted; the match itself must also be strong.
   const result = isAmbiguousMultiCandidateDecisionPoint({
     observation: obs,
     relevanceText: "Reach the designated target page.",
   });
+  assert.equal(result, true);
+});
+
+test("isAmbiguousMultiCandidateDecisionPoint: false when two candidates TIE, but the tie is at a DOMINANT score -- two genuinely strong matches are left to existing selection behaviour", () => {
+  const obs = observation([
+    { role: "link", accessibleName: "Continue" },
+    { role: "link", accessibleName: "Objective control" },
+  ]);
+  // Regression case (see tests/integration/journeyReplanning.test.ts's domain-blocked
+  // replanning scenario): both candidates fully match their own (short) label against the
+  // objective and tie at the maximum score, 1.0 -- a *tie*, but not remotely an absence of
+  // signal. Branch mode must not engage here; the existing, already-validated
+  // direct-selection/ranking behaviour is trusted for a dominant match, tied or not.
+  const result = isAmbiguousMultiCandidateDecisionPoint({
+    observation: obs,
+    relevanceText: "Continue, then activate the objective control.",
+  });
   assert.equal(result, false);
 });
 
-test("isAmbiguousMultiCandidateDecisionPoint: true when two candidates TIE for the highest (non-zero) relevance score -- a genuine tie, not just an absence of signal", () => {
+test("isAmbiguousMultiCandidateDecisionPoint: true when two candidates tie for the highest score, and that tied score is itself weak/non-dominant", () => {
   const obs = observation([
-    { role: "link", accessibleName: "Continue to the page" },
-    { role: "link", accessibleName: "Proceed to the page" },
+    { role: "link", accessibleName: "Continue further to the page" },
+    { role: "link", accessibleName: "Proceed further to the page" },
   ]);
-  // Both candidates share exactly the same token ("page") with the objective and score
-  // identically -- lexical overlap alone cannot decide between them.
+  // Both candidates share exactly one token ("page") out of 3 of their own with the
+  // objective and score identically (1/3 each) -- a genuine tie, and a weak one: lexical
+  // overlap alone cannot decide between them, and neither match is strong enough to trust.
   const result = isAmbiguousMultiCandidateDecisionPoint({
     observation: obs,
     relevanceText: "Reach the designated target page.",

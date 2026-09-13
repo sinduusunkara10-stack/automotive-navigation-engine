@@ -93,27 +93,52 @@ export function computeEffectiveBranchDepth(params: {
   return Math.max(0, Math.min(requestedMaxDepth, stepBound, backtrackBound));
 }
 
+// A candidate's objectiveRelevanceScore (src/discovery/relevance.ts) is
+// overlap / candidateTokens.size -- for a short label (the common case for a button/link:
+// one or two meaningful words), this means "at least half of the candidate's own words are
+// drawn from the objective/criteria text" is a genuine, dominant lexical match, not an
+// incidental one. Reused the same way DEFAULT_SEMANTIC_MIN_SCORE (core/successEvaluator.ts)
+// draws its own conservative "is this signal strong enough to trust" line for a different
+// scorer -- same judgement-call reasoning, an independently-derived value for this scorer's
+// own overlap-ratio semantics, not the same literal constant.
+const MIN_DOMINANT_RELEVANCE_SCORE = 0.5;
+
 /**
  * A decision point is treated as ambiguous enough to warrant bounded branch exploration
  * when it offers at least two distinct, plausible route choices (the same candidate
- * identity core/routeMemory.ts already uses -- role+accessibleName for click) and no single
- * one of them *uniquely* holds the highest objectiveRelevanceScore (src/discovery/
- * relevance.ts) among them.
+ * identity core/routeMemory.ts already uses -- role+accessibleName for click) and no
+ * candidate's own objectiveRelevanceScore (src/discovery/relevance.ts) clears
+ * MIN_DOMINANT_RELEVANCE_SCORE -- i.e. no candidate's label is a genuinely dominant lexical
+ * match for the objective/criteria text.
  *
- * Deliberately not "every candidate scores zero" (an earlier, narrower version of this
- * check): that condition let a single *incidental* token match -- one candidate's label
- * happening to share one word with the objective/criteria text without that word actually
- * indicating the right path -- silence branch exploration for the *whole* decision point,
- * including for a genuinely zero-relevance alternative that might be the real route. A
- * unique top scorer (even a weak, non-zero one) is still trusted to the existing,
+ * This underwent two design iterations before landing here, both worth recording:
+ *
+ * 1. Originally "every candidate scores zero". That let a single *incidental* token match
+ *    -- one candidate's label happening to share one word with the objective/criteria text
+ *    without that word actually indicating the right path -- silence branch exploration for
+ *    the *whole* decision point, including for a genuinely zero-relevance alternative that
+ *    might be the real route.
+ * 2. Revised to "no candidate uniquely holds the top score" (a tie-based check) to close
+ *    that gap. This introduced a real regression: two candidates that are each a *strong*,
+ *    legitimate match (e.g. a page offering both "Continue" and "Objective control" for an
+ *    objective literally naming both, in sequence) trivially tie at the maximum possible
+ *    score for short labels -- objectiveRelevanceScore has no way to distinguish "these tie
+ *    because neither means anything" from "these tie because both are excellent matches"
+ *    from equality alone; only the score's own *magnitude* carries that information.
+ *    (`tests/integration/journeyReplanning.test.ts`'s own domain-blocked-replanning test
+ *    caught this directly -- two candidates on one page both scoring a full 1.0 incorrectly
+ *    triggered branch mode instead of leaving that page's decision to the existing,
+ *    already-validated direct-selection behaviour PR #41 relies on.)
+ *
+ * The magnitude threshold here supersedes tie-detection entirely: a *unique* top scorer
+ * below the threshold is still ambiguous (closing gap 1 above -- a weak, non-dominant match
+ * doesn't get to silence exploration of a zero-scoring alternative), and a *tied* top score
+ * at or above the threshold is not ambiguous (closing the regression from iteration 2 --
+ * two dominant matches are left to existing selection behaviour, tie or not). Both a
+ * dominant unique winner and a dominant tie are trusted to the existing,
  * already-validated direct-selection/ranking behaviour -- Route Memory Phase 1 and bounded
- * journey replanning remain the safety net if that single pick turns out wrong, so no
- * branch bookkeeping is layered on top of an otherwise-ordinary decision. Ambiguity is
- * "no single candidate's own score clearly, uniquely stands out from the rest": either
- * every candidate scores zero (no lexical signal at all -- the original case), or two or
- * more candidates tie for the highest score (a genuine tie -- lexical overlap alone cannot
- * decide between them either). Both are cases where nothing but the model's own semantic
- * judgement is actually choosing, which is exactly what this feature exists for.
+ * journey replanning remain the safety net if that pick turns out wrong, so no branch
+ * bookkeeping is layered on top of an otherwise-ordinary decision.
  *
  * Deliberately scoped to click candidates only (via Observation.interactiveElements, the
  * same source computeCandidateIdentity's click branch resolves against): a `navigate`
@@ -129,7 +154,7 @@ export function isAmbiguousMultiCandidateDecisionPoint(params: {
   const { observation, relevanceText } = params;
   // Deduplicated by candidate identity (not per raw element) before comparing scores, so
   // two elements that are really the *same* candidate (identical role+accessibleName)
-  // never get counted as two independent entries in a tie check.
+  // never get counted as two independent entries.
   const scoreByIdentity = new Map<string, number>();
 
   for (const el of observation.interactiveElements) {
@@ -148,10 +173,8 @@ export function isAmbiguousMultiCandidateDecisionPoint(params: {
     return false;
   }
 
-  const scores = [...scoreByIdentity.values()];
-  const maxScore = Math.max(...scores);
-  const topScorerCount = scores.filter((score) => score === maxScore).length;
-  return topScorerCount !== 1;
+  const maxScore = Math.max(...scoreByIdentity.values());
+  return maxScore < MIN_DOMINANT_RELEVANCE_SCORE;
 }
 
 export interface BranchAssessmentInput {
