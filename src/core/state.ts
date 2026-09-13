@@ -49,6 +49,18 @@ export class RunState {
   lastObservedHostname: string | undefined;
 
   /**
+   * How many times this run has substituted the existing go_back action for a stop_blocked
+   * action (whether proposed directly by the reasoning layer, or substituted by the safety
+   * layer for a decision it rejected) in order to back up onto an already-seen page and give
+   * the reasoning layer a further chance to find an alternate route, before the engine
+   * finally honours stop_blocked -- see MAX_JOURNEY_REPLANNING_ATTEMPTS in core/loop.ts.
+   * Bounded independently of, and well below, the existing maxSteps/maxBacktracks ceilings:
+   * every substituted go_back is still recorded through the same recordAction path as any
+   * other go_back, so those ceilings remain the actual hard stop regardless of this count.
+   */
+  journeyReplanningAttempts = 0;
+
+  /**
    * url/title of the observation the most recently recorded action was actually decided
    * and dispatched against (i.e. the page state immediately *before* that action ran) --
    * compared, at the top of the next step, against the fresh observation then taken, to

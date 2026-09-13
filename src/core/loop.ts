@@ -41,6 +41,19 @@ export type TerminalStatus =
 // express any policy about what the reasoning layer should do.
 const MAX_STALE_TARGET_RECOVERY_ATTEMPTS = 3;
 
+// Bounded journey replanning (see docs/architecture.md "Bounded journey replanning"): how
+// many times one run may substitute the existing go_back action for a stop_blocked action
+// -- proposed directly by the reasoning layer, or substituted by the safety layer for a
+// decision it rejected (domain_blocked, action_not_allowed, repeated_action, loop_detected)
+// -- before the engine finally honours stop_blocked and ends the run. Fixed and generic --
+// not consent-specific, not task-configurable, and not a confidence threshold -- exists
+// purely to give the reasoning layer a small number of chances to back up onto an
+// already-seen page and try a different route before giving up. Never a way to relax the
+// existing maxSteps/maxBacktracks hard ceilings: every substituted go_back is still recorded
+// through the normal state.recordAction path any other go_back uses, so those ceilings
+// (checked again at the very top of the next runStep call regardless) remain the actual stop.
+const MAX_JOURNEY_REPLANNING_ATTEMPTS = 2;
+
 export interface LoopStepOutcome {
   stepLog: StepLog;
   terminal?: TerminalStatus;
@@ -314,6 +327,25 @@ export async function runStep(params: {
     effectiveAction = retry.effectiveAction;
   }
 
+  // Bounded journey replanning (see MAX_JOURNEY_REPLANNING_ATTEMPTS above): decided here,
+  // before the safety-guard diagnostic immediately below is written, so that diagnostic
+  // accurately reflects whether the run is actually about to stop or is instead being given
+  // one more bounded chance. Applies identically whether stop_blocked was proposed directly
+  // by the reasoning layer or substituted by the safety layer for a rejected decision -- the
+  // engine never inspects which. Only engaged when go_back is itself one of this task's
+  // allowedActions (never a way around that restriction), when there is a previous page to
+  // actually go back to (visitedUrls only exceeds 1 once at least one prior step has already
+  // run), and when one more go_back would not itself already exceed maxBacktracks/maxSteps
+  // -- those hard ceilings are re-checked independently at the top of the next runStep call
+  // regardless, so this is a conservative early check, never the sole enforcement of either.
+  const journeyReplanningEligible =
+    effectiveAction.type === "stop_blocked" &&
+    state.journeyReplanningAttempts < MAX_JOURNEY_REPLANNING_ATTEMPTS &&
+    task.safety.allowedActions.includes("go_back") &&
+    state.visitedUrls.length > 1 &&
+    state.backtrackCount < task.limits.maxBacktracks &&
+    state.stepCount + 1 < task.limits.maxSteps;
+
   if (!safetyResult.allowed && task.captureModules.includes("errors")) {
     const limitFlags = new Set(["max_steps", "max_backtracks", "max_duration", "loop_detected"]);
     const category: ErrorCategory = safetyResult.flags.some((flag) => limitFlags.has(flag))
@@ -322,14 +354,27 @@ export async function runStep(params: {
     recordDiagnosticError(captures, {
       stepIndex,
       category,
-      severity: "critical",
+      severity: journeyReplanningEligible ? "warning" : "critical",
       pageUrl: observation.url,
       actionType: decision.action.type,
       ...(decision.action.target ? { targetElementId: decision.action.target } : {}),
-      message: `Run stopped by guardrail(s): ${safetyResult.flags.join(", ")}.`,
-      recoverable: false,
-      stoppedRun: true,
+      message: journeyReplanningEligible
+        ? `Guardrail(s) rejected this decision: ${safetyResult.flags.join(", ")}. Attempting bounded journey replanning (go_back) before giving up.`
+        : `Run stopped by guardrail(s): ${safetyResult.flags.join(", ")}.`,
+      recoverable: journeyReplanningEligible,
+      stoppedRun: !journeyReplanningEligible,
     });
+  }
+
+  // The proposed/substituted stop_blocked action itself is recorded below (buildStepLog's
+  // `decision` text and safetyFlags) purely for diagnostics -- captured here, before a
+  // successful override replaces effectiveAction, so those diagnostics can still say what
+  // was actually blocked.
+  const journeyReplanningAttempted = journeyReplanningEligible;
+  const blockedDecisionWasProposedDirectly = decision.action.type === "stop_blocked";
+  if (journeyReplanningAttempted) {
+    state.journeyReplanningAttempts += 1;
+    effectiveAction = { type: "go_back" };
   }
 
   // Element attributes must be read before the click executes: a click can navigate
@@ -552,22 +597,41 @@ export async function runStep(params: {
   const stepLog = buildStepLog({
     stepIndex,
     observation,
-    decision: decision.rationale,
+    decision: journeyReplanningAttempted
+      ? `Bounded journey replanning (attempt ${state.journeyReplanningAttempts}/${MAX_JOURNEY_REPLANNING_ATTEMPTS}): substituting go_back for a stop_blocked action ${
+          blockedDecisionWasProposedDirectly ? "proposed by the reasoning layer" : "substituted by the safety layer for a rejected decision"
+        }, to try an alternate path before giving up. Original rationale: ${decision.rationale}`
+      : decision.rationale,
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     successCriteria: task.successCriteria,
-    safetyFlags: stopSuccessRejected
-      ? [
-          ...safetyResult.flags,
-          "required_criteria_unsatisfied",
-          ...(noProgressDetected ? ["no_progress_detected"] : []),
-        ]
-      : safetyResult.flags,
+    safetyFlags: journeyReplanningAttempted
+      ? [...safetyResult.flags, "journey_replanning_attempted"]
+      : stopSuccessRejected
+        ? [
+            ...safetyResult.flags,
+            "required_criteria_unsatisfied",
+            ...(noProgressDetected ? ["no_progress_detected"] : []),
+          ]
+        : safetyResult.flags,
     reObservationAttempted,
     recoveryAttempts,
   });
   recordJourneyPathEntry(captures, task.captureModules, stepLog);
+
+  if (journeyReplanningAttempted && !actionResult.success) {
+    // The substituted go_back itself failed to execute (e.g. no browser history entry was
+    // actually available despite visitedUrls suggesting one) -- fall through to the same
+    // blocked outcome the original stop_blocked action would have produced, rather than the
+    // unrelated action_execution_error the generic action-failure handling below would
+    // otherwise report for a failed go_back.
+    return {
+      stepLog,
+      terminal: "blocked",
+      finishReason: safetyResult.flags[0] ?? "stop_blocked_action",
+    };
+  }
 
   if (effectiveAction.type === "stop_success") {
     if (!stopSuccessRejected) {

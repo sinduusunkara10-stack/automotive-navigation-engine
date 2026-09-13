@@ -340,6 +340,55 @@ control is preferred over a manage/settings control even when both are visible -
 plain-language instruction to the model, not a keyword-matched or enforced choice, consistent with
 this mechanism's existing design.
 
+### Bounded journey replanning
+
+A `stop_blocked` action -- proposed directly by the reasoning layer, or substituted by the
+safety layer (`src/safety`) for a decision it rejected (`domain_blocked`, `action_not_allowed`,
+`repeated_action`, `loop_detected`) -- used to end the run immediately with `status: "blocked"`.
+That is often too eager: the obstruction is frequently local to the *current* page (a dead-end
+control, a rejected navigation target, a detected loop), and the existing `go_back` action
+already gives the reasoning layer a way to retreat onto a page it has already seen and try a
+different route, exactly as it would for any other action.
+
+`src/core/loop.ts` now gives a run a small, fixed number of chances to do exactly that before
+honouring `stop_blocked`: `MAX_JOURNEY_REPLANNING_ATTEMPTS` (currently 2, tracked per run via
+`RunState.journeyReplanningAttempts`). When a `stop_blocked` action is about to be dispatched,
+the engine substitutes the existing `go_back` action for it instead, provided:
+
+- `go_back` is itself one of the task's `safety.allowedActions` (this is never a way around
+  that restriction);
+- there is a previous page to actually go back to (at least one prior step has already run);
+- and one more `go_back` would not, by itself, already exceed `maxBacktracks` or `maxSteps`.
+
+This is a conservative pre-check, never the sole enforcement of either ceiling: every
+substituted `go_back` is recorded through the exact same `RunState.recordAction` path (and
+therefore the exact same `backtrackCount`/`stepCount` accounting) as a `go_back` the reasoning
+layer chooses on its own, so `checkLimitsBreach` -- evaluated independently at the top of the
+next `runStep` call regardless -- remains the actual hard stop the moment either ceiling is
+reached. Nothing about this mechanism inspects *why* the action was blocked, alters
+`CLAUDE_MIN_CONFIDENCE` or any other confidence threshold, adds a new action to the vocabulary,
+or touches either JSON schema: it is a bounded, generic substitution of one already-existing
+action for another, entirely internal to the core loop.
+
+If the substituted `go_back` itself fails to execute (e.g. no browser history entry was actually
+available), the run falls through to the same `"blocked"` outcome the original `stop_blocked`
+action would have produced, rather than the unrelated `action_execution_error` a failed action
+normally reports. If it succeeds, the step is not terminal: the outer loop calls `runStep` again
+with a fresh observation, exactly as after any other successful action, giving the reasoning
+layer a genuine further attempt at the objective from the earlier page. Once
+`MAX_JOURNEY_REPLANNING_ATTEMPTS` is exhausted, a further `stop_blocked` is honoured immediately,
+exactly as before this mechanism existed.
+
+Every attempt is visible directly on the relevant `StepLog` without any schema change, since
+`safetyFlags` and `decision` are already free-form: `safetyFlags` gains
+`"journey_replanning_attempted"`, and `decision` records which attempt this is (out of
+`MAX_JOURNEY_REPLANNING_ATTEMPTS`), whether the original `stop_blocked` was proposed directly by
+the reasoning layer or substituted by the safety layer, and the original decision's own
+rationale. The safety-guard diagnostic error already recorded for a rejected decision
+(`captures.errors`, category `safety_guard_stop`/`limit_stop`) reflects this too: `severity`/
+`recoverable`/`stoppedRun` and the message text describe a bounded replanning attempt rather than
+claiming the run stopped when it did not.
+
 ## 6. Reasoning layer
 
 `src/reasoning` is a pluggable client boundary behind one interface, `ReasoningProvider`
