@@ -697,3 +697,75 @@ test("REGRESSION: the system prompt never mentions accepting/granting consent as
   const defaultPrompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" }));
   assert.doesNotMatch(defaultPrompt.system, /prefer.{0,40}accept/i);
 });
+
+// ---------------------------------------------------------------------------------------
+// Route Memory (Phase 1, see core/routeMemory.ts): ReasoningContext.routeMemory carries
+// whichever candidate route choices (click/navigate) were already tried at the current
+// decision point in an earlier attempt. These tests prove that field actually reaches the
+// prompt payload once buildReasoningPrompt maps it through -- mirroring exactly how the
+// recentActions[].observedProgress tests above prove that flag reaches the prompt -- and
+// that it is omitted entirely (never a stray empty array) when nothing has been tried yet.
+// ---------------------------------------------------------------------------------------
+
+test("buildReasoningPrompt omits routeMemory entirely when the context field is absent or empty", () => {
+  const withoutField = buildReasoningPrompt(buildTestReasoningContext());
+  assert.ok(!("routeMemory" in (JSON.parse(withoutField.user) as Record<string, unknown>)));
+
+  const withEmptyArray = buildReasoningPrompt(buildTestReasoningContext({ routeMemory: [] }));
+  assert.ok(!("routeMemory" in (JSON.parse(withEmptyArray.user) as Record<string, unknown>)));
+});
+
+test("buildReasoningPrompt forwards routeMemory candidates (type/label/attempts/lastOutcome) to the prompt payload", () => {
+  const context = buildTestReasoningContext({
+    routeMemory: [
+      { actionType: "click", label: 'button "Stay"', attempts: 2, lastOutcome: "no_change" },
+      { actionType: "navigate", label: "https://example-fictional-oem.test/off-domain", attempts: 1, lastOutcome: "blocked" },
+    ],
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    routeMemory: Array<{ type: string; label: string; attempts: number; lastOutcome: string }>;
+  };
+
+  assert.equal(payload.routeMemory.length, 2);
+  assert.deepEqual(payload.routeMemory[0], {
+    type: "click",
+    label: 'button "Stay"',
+    attempts: 2,
+    lastOutcome: "no_change",
+  });
+  assert.deepEqual(payload.routeMemory[1], {
+    type: "navigate",
+    label: "https://example-fictional-oem.test/off-domain",
+    attempts: 1,
+    lastOutcome: "blocked",
+  });
+
+  // The system prompt must explain the field generically -- no brand/CTA/URL wording.
+  assert.match(prompt.system, /routeMemory/);
+  assert.match(prompt.system, /"advanced"/);
+  assert.match(prompt.system, /"blocked"/);
+});
+
+test("buildReasoningPrompt bounds routeMemory candidates, keeping the most-attempted ones when truncating", () => {
+  const manyCandidates = Array.from({ length: 20 }, (_, i) => ({
+    actionType: "click" as const,
+    label: `button "Option ${i}"`,
+    attempts: 1,
+    lastOutcome: "no_change" as const,
+  }));
+  // The single most-attempted candidate, appended last -- getTriedCandidates in real usage
+  // already sorts most-attempted-first, so this fixture mirrors that pre-sorted order.
+  const heavilyTried = { actionType: "click" as const, label: 'button "Dead end"', attempts: 9, lastOutcome: "failed" as const };
+
+  const context = buildTestReasoningContext({ routeMemory: [heavilyTried, ...manyCandidates] });
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { routeMemory: Array<{ label: string }> };
+
+  assert.ok(payload.routeMemory.length < manyCandidates.length + 1);
+  assert.ok(
+    payload.routeMemory.some((c) => c.label === 'button "Dead end"'),
+    "the heavily-tried candidate must survive truncation",
+  );
+});

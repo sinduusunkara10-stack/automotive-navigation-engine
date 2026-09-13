@@ -1,4 +1,6 @@
 import type { RecordedAction, SelectedAction } from "../types/actions.js";
+import type { RouteMemoryCandidate, RouteMemoryOutcome } from "../types/routeMemory.js";
+import { RouteMemory } from "./routeMemory.js";
 
 export class RunState {
   stepCount = 0;
@@ -69,6 +71,26 @@ export class RunState {
    */
   private lastActionObservationBefore: { url: string; title: string } | undefined;
 
+  /**
+   * Route Memory (see core/routeMemory.ts): remembers, per decision-point fingerprint,
+   * which candidate route choices (click/navigate) have already been tried and what
+   * happened, so a repeated dead end is visible to the reasoning layer even across
+   * non-adjacent steps (e.g. after a go_back, or a fresh page load that reassigns every
+   * element's own ephemeral id) -- something the existing repeated-action guard, keyed on
+   * exact linear-history repetition, cannot see. Never persisted beyond this run, never
+   * surfaced on TaskResponse (Phase 1 scope).
+   */
+  readonly routeMemory = new RouteMemory();
+
+  /**
+   * The (fingerprint, candidateId) of the most recently dispatched route-memory candidate
+   * whose outcome is still provisional ("no_change", recorded optimistically at dispatch
+   * time) -- resolved to "advanced" by resolveLastActionProgress below, the moment the next
+   * observation confirms the page actually moved on. Undefined once resolved, and whenever
+   * the most recently dispatched action wasn't a tracked route-memory candidate at all.
+   */
+  private pendingRouteMemory: { fingerprint: string; candidateId: string } | undefined;
+
   recordVisit(url: string): void {
     this.visitedUrls.push(url);
   }
@@ -80,6 +102,35 @@ export class RunState {
       this.backtrackCount += 1;
     }
     this.lastActionObservationBefore = observationBefore;
+  }
+
+  /**
+   * Records a route-memory candidate's outcome immediately, for the two cases already
+   * known without waiting for a further observation: "blocked" (the safety layer rejected
+   * the decision before it was ever dispatched) and "failed" (the action was dispatched but
+   * did not execute successfully). See RunState.recordRouteMemoryPending for the third,
+   * deferred case ("advanced"/"no_change").
+   */
+  recordRouteMemoryOutcome(
+    fingerprint: string,
+    candidate: RouteMemoryCandidate,
+    outcome: Exclude<RouteMemoryOutcome, "advanced" | "no_change">,
+  ): void {
+    this.routeMemory.record(fingerprint, candidate, outcome);
+  }
+
+  /**
+   * Records a route-memory candidate whose action was dispatched successfully but whose
+   * true effect on the page ("advanced" vs "no_change") isn't known yet -- recorded
+   * provisionally as "no_change" (the conservative default: no observable progress),
+   * upgraded to "advanced" by resolveLastActionProgress below the moment the next
+   * observation confirms the page actually moved on. Mirrors RecordedAction.observedProgress
+   * exactly: a plain url/title diff, computed generically, never specific to any action
+   * type, capture module, brand, or URL pattern.
+   */
+  recordRouteMemoryPending(fingerprint: string, candidate: RouteMemoryCandidate): void {
+    this.routeMemory.record(fingerprint, candidate, "no_change");
+    this.pendingRouteMemory = { fingerprint, candidateId: candidate.id };
   }
 
   /**
@@ -103,6 +154,12 @@ export class RunState {
     if (!last || last.observedProgress !== undefined) {
       return;
     }
-    last.observedProgress = url !== before.url || title !== before.title;
+    const progressed = url !== before.url || title !== before.title;
+    last.observedProgress = progressed;
+
+    if (this.pendingRouteMemory && progressed) {
+      this.routeMemory.updateLastOutcome(this.pendingRouteMemory.fingerprint, this.pendingRouteMemory.candidateId, "advanced");
+    }
+    this.pendingRouteMemory = undefined;
   }
 }

@@ -1,6 +1,7 @@
 import type { ActionType, RecordedAction, SelectedAction } from "../types/actions.js";
 import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
 import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
+import type { RouteMemoryCandidateSummary } from "../types/routeMemory.js";
 
 // Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
 // implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
@@ -33,6 +34,15 @@ export interface ReasoningContext {
   satisfiedCriteriaIds: string[];
   /** See ConsentInteractionPolicy (types/task-request.ts). Always present -- core/loop.ts resolves the task's omitted-field default ("reject_optional") before building this context, so a provider never has to know the default itself. */
   consentInteractionPolicy: ConsentInteractionPolicy;
+  /**
+   * Route Memory (see core/routeMemory.ts): candidate route choices (click/navigate)
+   * already tried at this exact decision point -- the current page state identified by its
+   * own content, not merely its URL -- in an earlier attempt, however many steps ago
+   * (including after a go_back that returned here). Omitted (rather than an empty array)
+   * when nothing has been tried here yet, matching this repo's existing convention for
+   * optional context fields (e.g. Observation.progressIndicatorText).
+   */
+  routeMemory?: RouteMemoryCandidateSummary[];
 }
 
 export interface ReasoningProvider {

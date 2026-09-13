@@ -676,6 +676,8 @@ as not-yet-built rather than removed from the plan — see §11.
     engine.ts             # top-level runTask(taskRequest) -> taskResponse
     loop.ts               # navigate -> observe -> decide -> act -> check-success iteration
     state.ts              # run state: step count, backtrack count, visited-state history
+    routeMemory.ts         # Route Memory (see §16): decision-point fingerprinting,
+                            # candidate identity, and the per-run RouteMemory store
     successEvaluator.ts    # evaluates successCriteria against the live page
     semanticPageMatch.ts    # generic objective-vocabulary-overlap scoring for the
                             # semantic_page_match criterion type, used only by successEvaluator.ts
@@ -772,6 +774,9 @@ as not-yet-built rather than removed from the plan — see §11.
     captureModule.ts
     task-request.ts
     task-response.ts
+    routeMemory.ts          # Route Memory (see §16) shared type shapes -- kept here (not in
+                            # core/routeMemory.ts) so src/reasoning can depend on the type
+                            # shapes without depending on src/core's implementation module
 
   index.ts
 
@@ -1410,3 +1415,143 @@ change, or Redis-persistence-shape change is required to toggle it either way. R
 by unsetting `MEMORY_CIRCUIT_BREAKER_ENABLED` (or setting it to anything other than
 `"true"`) and redeploying — the same unset-to-disable pattern already established for
 `TASK_STORE` (§13) and `LOW_MEMORY_BROWSER_MODE` (§14).
+
+## 16. Route Memory (Phase 1)
+
+A real journey frequently revisits the same page more than once within a single run —
+after a `go_back`, or after a dead-end `navigate`/`click` that leads somewhere unhelpful and
+the reasoning layer retreats. Before this change, nothing in the engine recognised "I have
+been at this exact decision point before, and I already tried this" once even one other step
+intervened: `RecordedAction.observedProgress` (§6's `recentActions`) is a plain, linear,
+adjacent-history signal — it tells the reasoning layer "the last action you took didn't
+change anything," but says nothing once a run has moved on to a different page and later
+returns. A reasoning provider could therefore re-select an already-failed or already-inert
+candidate at a revisited page, burning a step (and, for a real Claude-backed run, a model
+call) rediscovering something the run already knew.
+
+Route Memory (`src/core/routeMemory.ts`, shared type shapes in `src/types/routeMemory.ts`)
+is a small, generic, engine-internal memory that closes this gap for Phase 1: it remembers,
+per **decision point**, which candidate route choices have already been tried and what
+happened, and surfaces that as extra context to the reasoning layer's own prompt. It is
+**observe-and-inform only** — it never blocks, vetoes, or overrides a decision itself; that
+remains a candidate for a later phase, once this phase's evidence-gathering value has been
+validated against real runs.
+
+### Decision-point fingerprint
+
+`computeDecisionPointFingerprint(observation)` identifies "where" a decision is being made
+by the page's own content, not merely its URL: the page `url` plus the deduplicated, sorted
+set of every visible interactive element's `role`+`accessibleName`. Two independently-taken
+observations of the genuinely same decision point — e.g. before and after a `go_back` that
+triggers a fresh page load — fingerprint identically even though every element's own
+ephemeral `data-nav-engine-id` (§5) has been reassigned by that fresh scan, because the
+fingerprint never reads the id. Sorting and deduplicating also makes the fingerprint
+insensitive to DOM reordering and to repeated identical controls. This is deliberately
+narrower than a full-page fingerprint (e.g. hashing all of `notableText` or every attribute)
+— the goal is only "would the same set of candidate actions be available here again," not
+"is the page byte-for-byte identical."
+
+### Candidate identity
+
+`computeCandidateIdentity(action, observation)` resolves a stable identity for a candidate
+**route choice** — deliberately narrower than the full action vocabulary, since Route Memory
+is only about which path through the site was chosen, not every action:
+
+- `click` — identified by the target element's own `role`+`accessibleName` (resolved against
+  the observation the decision was made from), never its `id` — the same reasoning as the
+  fingerprint above: an id is only stable for the lifetime of one page instance, not across a
+  fresh load of the same page.
+- `navigate` — identified by the target URL itself (`SelectedAction.target`, the same field
+  `validateClaudeDecision.ts` already populates from Claude's `navigateUrl`).
+- Every other action (`scroll`, `wait`, `go_back`, `capture`, `stop_success`, `stop_blocked`,
+  `stop_failure`) returns no identity at all — nothing to choose *between* at a decision
+  point for these; Route Memory only ever tracks alternatives being weighed against each
+  other, not the full action vocabulary.
+
+A `click` whose target can no longer be resolved against the given observation (e.g. a
+disallowed/malformed decision) also yields no identity — there is nothing stable to identify
+it by, and it is not a real candidate the reasoning layer could have meaningfully chosen.
+
+### Candidate outcome tracking
+
+`RouteMemory` (the per-run store, held on `RunState.routeMemory`) keys records by
+`(decisionPointFingerprint, candidateId)` and tracks `attempts` (an incrementing count) and
+`lastOutcome`, one of:
+
+- **`blocked`** — the safety layer rejected the candidate before it was ever dispatched.
+  Recorded immediately in `src/core/loop.ts`, from `decision.action` (the reasoning layer's
+  original proposal) whenever `safetyResult.allowed` is false — independent of whatever the
+  engine substitutes in its place (a forced `stop_blocked`, or a further-substituted
+  `go_back` via bounded journey replanning, §5's "Bounded journey replanning"), since that
+  substituted action was never the candidate actually chosen.
+- **`failed`** — the candidate was dispatched but did not execute successfully
+  (`ActionResult.success: false`), covering a genuine failure and a still-unresolved
+  `staleTarget` recovery attempt alike; the *next* real attempt (if any) can still upgrade
+  `lastOutcome` away from `failed` later.
+- **`advanced`** / **`no_change`** — a successful dispatch is recorded provisionally as
+  `no_change` (the conservative default: no observable progress) at the moment it is
+  recorded, then upgraded to `advanced` by `RunState.resolveLastActionProgress` — the exact
+  same generic, deferred url/title-diff mechanism `RecordedAction.observedProgress` already
+  uses — the moment the *next* observation confirms the page actually moved on. This mirrors
+  `observedProgress` deliberately: no second Playwright read, no action-type-specific logic,
+  and identical semantics for what counts as "progress."
+
+Every outcome is generic and mechanical — nothing here inspects control text, purpose, or
+brand, and nothing here is specific to any capture module or success-criteria type.
+
+### Prompt context: tried candidates at the current decision point
+
+Before asking the reasoning layer for a decision, `src/core/loop.ts`'s `obtainDecision`
+computes the current observation's decision-point fingerprint and looks up
+`RunState.routeMemory.getTriedCandidates(fingerprint)`. When non-empty, this is passed as the
+new, optional `ReasoningContext.routeMemory` field (`src/reasoning/reasoningProvider.ts`) —
+omitted entirely (never an empty array) when nothing has been tried at this decision point
+yet, matching this repo's existing convention for optional context fields (e.g.
+`Observation.progressIndicatorText`).
+
+`src/reasoning/promptBuilder.ts` renders it into the prompt payload as `routeMemory`: each
+entry's `type`/`label`/`attempts`/`lastOutcome`, capped at `MAX_ROUTE_MEMORY_CANDIDATES` (10)
+— `getTriedCandidates` already sorts most-attempted-first, so a truncation always keeps
+whichever dead ends have been repeated the most (the strongest "don't choose this again"
+signal) ahead of a once-tried candidate. A short, generic system-prompt clause explains the
+field and its four outcome values in plain language, and instructs the model to prefer a
+control not listed in `routeMemory` at all, or one whose `lastOutcome` is `advanced`, over
+repeating one whose `lastOutcome` is `no_change`, `failed`, or `blocked` — advisory, exactly
+like the `observedProgress` guidance already in this same prompt, not an enforced rule.
+
+### Why `src/types/routeMemory.ts`, not only `src/core/routeMemory.ts`
+
+The shared type shapes (`RouteMemoryOutcome`, `RouteMemoryCandidate`,
+`RouteMemoryCandidateSummary`) live in `src/types/routeMemory.ts`, alongside
+`actions.ts`/`captureModule.ts`, rather than only in `src/core/routeMemory.ts`. `src/core`
+already depends on `src/reasoning`'s types (`loop.ts` imports `Decision`/`ReasoningProvider`);
+if `src/reasoning/reasoningProvider.ts` imported `RouteMemoryCandidateSummary` directly from
+`src/core/routeMemory.ts`, the two directories would depend on each other's implementation
+modules in both directions. Keeping the shared shapes in `src/types` (the layer both already
+depend on for cross-cutting types) avoids that, matching the precedent `types/actions.ts`
+already sets for `RecordedAction`/`SelectedAction`.
+
+### Scope and what Phase 1 deliberately does not do
+
+Per this phase's own scope (see `docs/v1-scope.md`):
+
+- **No wire-schema change.** `ReasoningContext` is an internal type at the pluggable
+  `ReasoningProvider` boundary (§6), never part of `schemas/task-request.schema.json` or
+  `schemas/task-response.schema.json` — adding a field to it is not a contract change, needs
+  no `schemaVersion`/`outputSchemaVersion` bump, and every existing example/task/response
+  stays byte-for-byte valid and unchanged.
+- **No brand/automotive-specific logic.** Every identifier Route Memory uses
+  (`role`, `accessibleName`, `url`) is already generic observation data; nothing here reads
+  CTA wording, a vendor/CMP attribute, or any site-specific selector.
+- **Not enforced, not surfaced on `TaskResponse`.** Route Memory never overrides a decision,
+  never appears in `captures.*` or `engineAssessment`, and never appears in the response at
+  all — it is purely an addition to the reasoning layer's own prompt context. A later phase
+  could add response-level diagnostics (mirroring `diagnostics.reasoningProvider`) or an
+  enforcement mechanism (e.g. refusing to re-propose an exhausted candidate, the way the
+  existing repeated-action guard already refuses an exact linear repeat) once this
+  observe-and-inform phase has been validated against real runs — deliberately deferred
+  rather than spun up speculatively ahead of that evidence.
+- **Never persisted, never shared across runs.** `RouteMemory` is a plain in-memory map
+  scoped to one `RunState`, discarded with the rest of the run's state once `runTask`
+  returns — matching every other per-run mechanism in this file (e.g. `lastBlockerSignature`,
+  `journeyReplanningAttempts`).
