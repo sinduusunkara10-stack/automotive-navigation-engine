@@ -57,6 +57,10 @@ export type { PromptElementSelectionDiagnostic } from "../types/task-response.js
 const MAX_RECENT_ACTIONS = 5;
 const MAX_NOTABLE_TEXT = 8;
 const MAX_INTERACTIVE_ELEMENTS = 40;
+// Route Memory (see core/routeMemory.ts): candidates are already sorted most-tried-first,
+// so a truncation here always keeps whichever dead ends have been repeated the most --
+// the strongest signal for "don't choose this again" -- ahead of a once-tried candidate.
+const MAX_ROUTE_MEMORY_CANDIDATES = 10;
 
 // At least this fraction of the cap is always reserved for structural/positional coverage
 // (see selectPromptInteractiveElements below), even when lexical relevance alone could
@@ -361,6 +365,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     recentActions,
     satisfiedCriteriaIds,
     consentInteractionPolicy,
+    routeMemory,
   } = context;
 
   const system =
@@ -383,7 +388,16 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "\"observedProgress\": false means that when that exact action last ran, the page's URL " +
     "and title were unchanged the next time it was observed -- treat that as evidence the " +
     "same action is unlikely to help if chosen again, and prefer a different action instead " +
-    "of repeating it verbatim. An interactiveElements entry marked " +
+    "of repeating it verbatim. When present, \"routeMemory\" lists candidate actions " +
+    "(click/navigate) already tried earlier at this exact decision point -- the same page " +
+    "location and set of available controls, however many steps ago, including after going " +
+    "back and returning here -- with how many times each was tried and its most recent " +
+    "outcome: \"advanced\" (the page moved forward), \"no_change\" (nothing observably " +
+    "changed), \"failed\" (the action could not be executed), or \"blocked\" (a safety rule " +
+    "rejected it). Prefer a control not listed in \"routeMemory\" at all, or one whose " +
+    "lastOutcome is \"advanced\", over repeating one whose lastOutcome is \"no_change\", " +
+    "\"failed\", or \"blocked\" -- unless every other option has already been exhausted too. " +
+    "An interactiveElements entry marked " +
     "\"covered\": true currently has some other element sitting on top of it and cannot " +
     "actually be clicked -- when an uncovered control also matches the objective, prefer " +
     "that uncovered control over a covered one. Only choose a covered control when clearing " +
@@ -442,6 +456,16 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     recentActions: recentActions
       .slice(-MAX_RECENT_ACTIONS)
       .map((a) => ({ type: a.type, target: a.target, observedProgress: a.observedProgress })),
+    ...(routeMemory && routeMemory.length > 0
+      ? {
+          routeMemory: routeMemory.slice(0, MAX_ROUTE_MEMORY_CANDIDATES).map((c) => ({
+            type: c.actionType,
+            label: c.label,
+            attempts: c.attempts,
+            lastOutcome: c.lastOutcome,
+          })),
+        }
+      : {}),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };

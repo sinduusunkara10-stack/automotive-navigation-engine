@@ -15,6 +15,7 @@ import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
+import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import {
   computeEstimatedCompletion,
   evaluateSuccessCriteria,
@@ -510,6 +511,32 @@ export async function runStep(params: {
 
   state.recordAction(effectiveAction, { url: observation.url, title: observation.title });
 
+  // Route Memory (Phase 1, see core/routeMemory.ts): records what happened to whichever
+  // candidate the reasoning layer actually chose (decision.action) at this decision point,
+  // identified by its stable role+accessibleName/URL identity rather than the ephemeral
+  // per-observation element id -- so the same choice is still recognisable if this exact
+  // decision point recurs later (e.g. after a go_back). Only click/navigate are tracked
+  // (computeCandidateIdentity returns undefined for every other action type -- nothing to
+  // choose between at a decision point for those). Three outcomes are known immediately:
+  // "blocked" (the safety layer rejected decision.action before it was ever dispatched --
+  // effectiveAction differs from decision.action in this case, so actionResult below
+  // reflects a substituted action, not this candidate) and "failed" (dispatched but did not
+  // execute successfully); a successful dispatch is recorded provisionally as "no_change"
+  // and upgraded to "advanced" by state.resolveLastActionProgress, once the next
+  // observation confirms the page actually moved on -- mirroring
+  // RecordedAction.observedProgress's own generic, deferred url/title-diff evidence exactly.
+  const routeCandidate = computeCandidateIdentity(decision.action, observation);
+  if (routeCandidate) {
+    const decisionPointFingerprint = computeDecisionPointFingerprint(observation);
+    if (!safetyResult.allowed) {
+      state.recordRouteMemoryOutcome(decisionPointFingerprint, routeCandidate, "blocked");
+    } else if (!actionResult.success) {
+      state.recordRouteMemoryOutcome(decisionPointFingerprint, routeCandidate, "failed");
+    } else {
+      state.recordRouteMemoryPending(decisionPointFingerprint, routeCandidate);
+    }
+  }
+
   const satisfiedCountBeforeThisAction = state.satisfiedCriteriaIds.size;
   const verifierDecisionCountBefore = semanticVerifier?.getUsageDiagnostics?.()?.decisions?.length ?? 0;
   const newlySatisfied = await evaluateSuccessCriteria(
@@ -761,6 +788,15 @@ async function obtainDecision(params: {
 }): Promise<{ decision: Decision; safetyResult: SafetyCheckResult; effectiveAction: SelectedAction }> {
   const { task, state, observation, reasoning } = params;
 
+  // Route Memory (Phase 1, see core/routeMemory.ts): before asking for a decision, surface
+  // whichever candidates have already been tried at this exact decision point -- possibly
+  // several steps ago, or after a go_back returned here -- so a repeated dead end is
+  // visible to the reasoning layer as evidence, not just silently re-offered. Omitted
+  // entirely when nothing has been tried here yet, matching this repo's existing
+  // optional-context-field convention.
+  const decisionPointFingerprint = computeDecisionPointFingerprint(observation);
+  const triedCandidates = state.routeMemory.getTriedCandidates(decisionPointFingerprint);
+
   const decision = await reasoning.decide({
     objective: task.objective,
     successCriteria: task.successCriteria,
@@ -776,6 +812,7 @@ async function obtainDecision(params: {
     recentActions: state.actionHistory,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     consentInteractionPolicy: task.safety.consentInteractionPolicy ?? "reject_optional",
+    ...(triedCandidates.length > 0 ? { routeMemory: triedCandidates } : {}),
   });
 
   const safetyResult = validateDecision({
