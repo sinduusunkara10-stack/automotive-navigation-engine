@@ -394,7 +394,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.9.0",
+    schemaVersion: "1.10.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -414,6 +414,7 @@ function buildTerminalResponse(params: {
       ...(domainDiscoveryDiagnostics ? { domainDiscovery: domainDiscoveryDiagnostics } : {}),
       ...(semanticVerifierDiagnostics ? { semanticVerifier: semanticVerifierDiagnostics } : {}),
       ...(memorySamples.length > 0 ? { memory: memorySamples } : {}),
+      ...(state.milestoneEvidence.length > 0 ? { milestoneEvidence: state.milestoneEvidence } : {}),
     },
   };
 }

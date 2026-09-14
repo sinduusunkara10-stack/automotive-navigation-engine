@@ -580,6 +580,43 @@ export interface ContainerMemoryDiagnostics {
   breached: boolean;
 }
 
+/**
+ * Recorded once per success criterion, at the moment it first becomes satisfied -- never
+ * re-recorded (satisfiedCriteriaIds is a one-way ratchet, see src/core/state.ts, so a
+ * criterion contributes at most one record for the life of a run). Exists so a caller can
+ * see *why* the engine judged each milestone satisfied -- which page, which phase of the
+ * step, and what evidence actually satisfied it (a matched URL pattern, a matched selector,
+ * a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) --
+ * without reconstructing it from steps[]/captures. This is engine classification (the
+ * "why"), deliberately kept in diagnostics rather than captures, which stays raw,
+ * website-derived evidence only -- see CLAUDE.md's non-negotiable design rule.
+ */
+export interface MilestoneEvidenceRecord {
+  criterionId: string;
+  /** The criterion's own successCriteria[].type value, e.g. "semantic_page_match". */
+  criterionType: string;
+  /** The criterion's own description text, echoed for readability. */
+  description: string;
+  stepIndex: number;
+  /** Whether this criterion was evaluated before this step's own action was dispatched, or immediately after it. */
+  phase: "pre_action" | "post_action";
+  /** Page URL at the moment this criterion was judged satisfied. */
+  pageUrl: string;
+  pageTitle: string;
+  /**
+   * Which mechanism actually satisfied the criterion, e.g. "url_pattern",
+   * "element_present", "semantic_page_match:deterministic", "semantic_page_match:verifier",
+   * "data_layer_event", "network_event".
+   */
+  evidenceSource: string;
+  /** Deterministic vocabulary-overlap score or semanticVerifier confidence, when applicable (semantic_page_match only). */
+  score?: number;
+  /** The literal pattern/selector/match object that satisfied this criterion, when applicable. */
+  matchedValue?: string;
+  /** Short human-readable explanation of why the criterion was judged satisfied. */
+  reason: string;
+}
+
 export interface Diagnostics {
   stepCount: number;
   backtrackCount: number;
@@ -620,10 +657,16 @@ export interface Diagnostics {
    * set for this run (the default).
    */
   containerMemory?: ContainerMemoryDiagnostics;
+  /**
+   * One record per success criterion the moment it first becomes satisfied -- see
+   * MilestoneEvidenceRecord above. Present only when at least one criterion was satisfied
+   * during the run (bounded implicitly by successCriteria.length).
+   */
+  milestoneEvidence?: MilestoneEvidenceRecord[];
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.9.0";
+  schemaVersion: "1.10.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

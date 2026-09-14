@@ -104,7 +104,7 @@ class ScriptedRecordingProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; successUrlPattern: string }): TaskRequest {
   return {
-    schemaVersion: "1.10.0",
+    schemaVersion: "1.11.0",
     taskId: "action-progress-tracking",
     objective: "Reach the fixture's target page via the configured controls.",
     startUrl: params.startUrl,
@@ -120,7 +120,7 @@ function buildTask(params: { startUrl: string; successUrlPattern: string }): Tas
     captureModules: ["errors"],
     limits: { maxSteps: 6, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.9.0",
+    outputSchemaVersion: "1.10.0",
   };
 }
 

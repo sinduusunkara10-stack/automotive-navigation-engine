@@ -1604,6 +1604,32 @@ more** milestone groups (`MIN_MILESTONE_GROUPS_FOR_PROMPT`) — the common singl
 (every pre-existing caller) gets a prompt payload byte-for-byte unaffected by this field's
 existence.
 
+**Ordering is now an enforced evaluation constraint, not only a prompt hint (regression fix).**
+`activeSubGoal` above was, until this fix, purely advisory: `evaluateSuccessCriteria` itself
+evaluated every not-yet-satisfied criterion every call, independent of declaration order, so a
+later milestone's own `semantic_page_match` criterion could be satisfied by the *current* page
+even while an earlier milestone remained outstanding — exactly what let a homepage's own
+persistent navigation (which happened to name every downstream destination of a five-milestone
+journey) satisfy all five milestones on the very first step. `evaluateSuccessCriteria`
+(`src/core/successEvaluator.ts`) now computes, on every call, the first not-yet-satisfied
+`required` group in declaration order (`computeEligibleCriteriaIds`, using
+`alreadySatisfiedCriteriaIds` as it stood when the call began — never updated mid-call) and only
+evaluates that group's members and every non-required group; a later required group is not
+evaluated at all until every earlier one is satisfied, and at most one required group can newly
+satisfy per call. Optional (`required: false`) groups remain entirely unaffected — still
+evaluated unconditionally, exactly as before. This pairs with a second, independent change to
+`src/core/semanticPageMatch.ts`: persistent site-wide navigation/menu/header/footer chrome
+(`<nav>`, `<header>`, `<footer>`, or the equivalent ARIA landmark roles) is excluded from the
+`"interactiveElements"` signal, so a link that merely advertises a destination elsewhere on the
+site is never itself counted as evidence that destination was reached. Neither change alone was
+sufficient: ordering stops several milestones from satisfying off one unchanged, un-navigated-past
+observation; the chrome exclusion stops that same observation's own persistent nav from
+masquerading as page content once a later milestone does become active. See
+`docs/n8n-integration.md` §9f/§9 for the full caller-facing explanation, and
+`diagnostics.milestoneEvidence` (§9g there, `MilestoneEvidenceRecord` in
+`src/types/task-response.ts`) for the per-criterion evidence record this fix also added, so a
+run's `TaskResponse` can explain exactly which page and mechanism satisfied each milestone.
+
 ### Branch-entry condition
 
 A branch is only ever entered around a **successfully dispatched, safety-allowed `click`/

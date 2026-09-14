@@ -358,6 +358,21 @@ clears `config.minScore` (default `0.4`; override per criterion, `0`–`1`). `co
 optionally restricts which of `"title"`, `"headings"`, `"interactiveElements"` are scored
 (default: all three).
 
+**`"interactiveElements"` excludes persistent navigation/menu/header/footer chrome.** An
+element inside `<nav>`, `<header>`, `<footer>`, or `[role="navigation"/"banner"/"contentinfo"/
+"menu"/"menubar"]` is never counted toward this signal (`src/core/semanticPageMatch.ts`'s
+`NAVIGATION_CHROME_SELECTOR`) — purely structural (standard HTML5 landmark elements/ARIA
+landmark roles), never brand/site/vocabulary-specific. A site's global nav bar or footer renders
+identically on every page, so a link or CTA living there is evidence that a destination *exists
+somewhere on the site*, never evidence that the current page *is* that destination — e.g. a
+homepage's own top-nav listing "Offers" must never by itself satisfy a criterion describing the
+Offers page having been reached. The same text living in ordinary page content (a heading, a
+paragraph, a content-area link or button) is unaffected and still counts as evidence. This is
+one half of the fix for a reported false-success regression — see §9f below for the other half
+(ordered-milestone evaluation), which is the half that actually enforces ordering; this
+exclusion only stops chrome from masquerading as content, and works together with §9f's
+enforcement rather than replacing it.
+
 ```json
 {
   "id": "objective-state-reached",
@@ -816,7 +831,7 @@ group members are alternatives — purely to help the model propose `stop_succes
 engine's own independent re-check (§9's `required` section) is what actually enforces OR
 semantics regardless of what the model proposes.
 
-## 9f. Milestone-ordered successCriteria for objective progress tracking (Goal-Directed Bounded Branch Exploration)
+## 9f. Milestone-ordered successCriteria for objective progress tracking, and enforced ordering (Goal-Directed Bounded Branch Exploration)
 
 **What this is for.** `src/core/successEvaluator.ts`'s `computeMilestoneRollup` and the bounded
 branch-exploration mechanism it feeds (`src/core/branchExploration.ts`, `src/core/loop.ts`) let
@@ -827,34 +842,77 @@ downstream steps before judging it — see `docs/architecture.md` §17. Both reu
 section is the authoritative guide for what a caller (the n8n "Build Navigation Engine Task"
 node, §11 below) should send to get useful milestone tracking.
 
-**Activation is automatic and threshold-gated.** `computeMilestoneRollup` runs unconditionally
-over whatever `successCriteria` a task supplies, but `src/reasoning/promptBuilder.ts` only
-includes the resulting `milestones` block in the reasoning prompt once there are **two or more**
-milestone groups (`MIN_MILESTONE_GROUPS_FOR_PROMPT`). A task with the one required criterion
-every pre-existing task already sends produces a trivial one-milestone rollup that is silently
-omitted from the prompt — **zero behavioural or token-cost change** for any caller that doesn't
-adopt the pattern below.
+**Ordering is now enforced at runtime, not just reported (fix for a reported false-success
+regression).** Before this fix, everything below this paragraph was true, but declaration order
+was consumed *only* by `computeMilestoneRollup`'s `activeSubGoal` — a hint surfaced to the
+reasoning layer's prompt, never a constraint on `src/core/successEvaluator.ts`'s own
+`evaluateSuccessCriteria`. Every criterion was evaluated (and could be satisfied) independently,
+every step, regardless of position. A production run submitted five `semantic_page_match`
+milestones (start on the homepage; navigate to an Offers page; select a specific offer; find its
+Request-a-Quote action; open the resulting form) and had all five satisfied on the very first
+step, from the homepage alone: its own persistent site-wide navigation happened to name every
+downstream destination ("Offers", the model, "Request a Quote"), and nothing stopped a later
+milestone from being evaluated — and satisfied — against that same, unchanged, un-navigated page.
+`evaluateSuccessCriteria` now enforces two rules for every criterion with `required !== false`:
+
+1. **Only the first not-yet-satisfied required milestone (in `successCriteria` declaration
+   order) is evaluated at all** in any single call. A later required milestone is never even
+   checked — let alone satisfied — while an earlier one remains outstanding, however strongly its
+   own vocabulary happens to match the current page.
+2. **At most one required milestone can newly satisfy per call.** The "first unsatisfied
+   milestone" is computed once, from `satisfiedCriteriaIds` as it stood when the call began, and
+   is never recomputed mid-call — so a single page observation can never cascade through several
+   milestones at once just because that page's vocabulary happens to overlap with more than one
+   of them.
+
+Concretely: milestone 2 is only ever evaluated once milestone 1 is already satisfied, and only
+against whatever page the run has reached *by the time milestone 2 becomes the active one* — the
+call in which milestone 1 was satisfied never also evaluates milestone 2. A milestone that is
+structurally unsatisfiable (a `minScore` above the maximum possible deterministic score with no
+`semanticVerifier` configured, a `url_pattern`/`selector` that can never match) now permanently
+blocks every *later* required milestone from being evaluated at all, not just from gating
+`stop_success` — a deliberate consequence of ordering enforcement, not a bug: a caller relying on
+several independent/parallel required signals rather than a genuine sequential journey should
+express them as an OR `group` (§9e) or otherwise ensure each declared milestone is independently
+reachable.
+
+**Optional (`required: false`) criteria are entirely unaffected** — always eligible for
+evaluation regardless of declared position relative to an outstanding required milestone, exactly
+as before this fix, since they are purely informational and never gate `stop_success` (§9c's
+"configurator entered" pattern continues to work exactly as documented).
+
+**This complements, and does not replace, the semantic-evidence fix in §9** (persistent
+site-wide navigation/menu/header/footer chrome is now excluded from `semantic_page_match`'s own
+vocabulary signal) — both changes shipped together because ordering alone is not sufficient: once
+a later milestone becomes the active one, it is still evaluated against whatever page the run is
+currently on, and if that page's own *content* (not chrome) happens to share vocabulary with the
+milestone's description, evaluating it there is entirely legitimate. Ordering stops several
+milestones from being satisfied by one *unchanged, un-navigated-past* observation; the chrome
+exclusion stops a homepage's own permanent navigation from masquerading as page content in the
+first place. A caller should still prefer `url_pattern`/`element_present` for any milestone that
+can be pinned to a URL or a selector (the recommended shape below) — `semantic_page_match` remains
+the right choice only for milestones that genuinely can't be.
 
 **How a "milestone" is defined.** Every distinct criterion **group** in `successCriteria` is one
 milestone — a criterion with no `group` is its own implicit singleton group (§9e), and two-or-more
 criteria sharing a `group` value count as *one* milestone, satisfied once any member is (the
-alternative-criteria mechanism, unchanged). This applies uniformly to `required: true` and
-`required: false` groups alike: **`computeMilestoneRollup` does not filter by `required`** — an
-optional (`required: false`) milestone, such as §9c's "configurator entered" pattern, still counts
-toward `totalMilestones`/`completedMilestones` and can still be the `activeSubGoal` while
-unsatisfied. This is a deliberate, simple definition ("a milestone is a group, in order") rather
-than a second, required-only notion of progress — keep it in mind if you mix optional milestones
-into a criteria list: an unsatisfied optional milestone is still reported as the active sub-goal
-until it (or something later) is satisfied, even though it will never by itself block
-`stop_success`.
+alternative-criteria mechanism, unchanged). `computeMilestoneRollup`'s own reporting (`totalMilestones`/
+`completedMilestones`/`activeSubGoal`) still does not filter by `required` — an optional
+(`required: false`) milestone still counts toward the rollup and can still be `activeSubGoal` while
+unsatisfied — but the new *evaluation* gate above applies only to `required !== false` groups:
+optional groups are reported the same way as before, but were never subject to ordering at
+evaluation time either before or after this fix.
 
 **Ordering: declaration order, no explicit sequence field.** Milestones are read off
 `successCriteria` in **array order** — the smallest additive change available, deliberately
-chosen over adding a `milestoneOrder`/`sequence` field. `activeSubGoal` is simply the first group,
-in that order, not yet present in the run's `satisfiedCriteriaIds`. **The caller is responsible
-for emitting the array in the sequence the journey is actually expected to proceed through** —
-the engine has no other way to know intended order, and does not attempt to infer it from
-`description` text or criterion `type`.
+chosen over adding a `milestoneOrder`/`sequence` field, and unchanged by the enforcement fix
+above: no new request field was needed to make ordering an enforced constraint, since the engine
+already had everything it needed (the array's own declaration order) to do so. `activeSubGoal` is
+simply the first group, in that order, not yet present in the run's `satisfiedCriteriaIds`, and is
+now also exactly the group `evaluateSuccessCriteria` treats as eligible for required groups.
+**The caller is responsible for emitting the array in the sequence the journey is actually
+expected to proceed through** — the engine has no other way to know intended order, and does not
+attempt to infer it from `description` text or criterion `type`.
 
 **Recommended shape**, one criterion per real journey milestone:
 
@@ -924,6 +982,25 @@ the *recommended* granularity, not a required minimum.
 **This is optional.** Nothing in the engine requires multiple criteria, and no existing task needs
 to change — see the "one required criterion" backward-compatibility guarantee at the top of this
 section.
+
+## 9g. `diagnostics.milestoneEvidence`: why each criterion was judged satisfied
+
+Added alongside the ordering-enforcement fix above (response `schemaVersion` `"1.10.0"`,
+`outputSchemaVersion` `"1.10.0"`): one record per success criterion, appended the moment it first
+becomes satisfied (`satisfiedCriteriaIds` is a one-way ratchet, so a criterion contributes at most
+one record for the life of a run). Each record carries `criterionId`, `criterionType`,
+`description`, `stepIndex`, `phase` (`"pre_action"` — evaluated before that step's own action was
+dispatched — or `"post_action"`), `pageUrl`, `pageTitle`, `evidenceSource` (e.g. `"url_pattern"`,
+`"element_present"`, `"semantic_page_match:deterministic"`, `"semantic_page_match:verifier"`,
+`"data_layer_event"`, `"network_event"`), and a short human-readable `reason`; `score` and
+`matchedValue` are present when applicable (a deterministic vocabulary-overlap score or
+`semanticVerifier` confidence for `semantic_page_match`; the literal pattern/selector/match object
+for every other type). This is engine classification (the "why"), not raw evidence, so it lives in
+`diagnostics`, not `captures` — per `CLAUDE.md`'s rule keeping the two strictly separate. Present
+only when at least one criterion was satisfied during the run; absent otherwise, matching every
+other opt-in diagnostics structure in this response. Exists so an operator debugging a run (or an
+n8n workflow surfacing an explanation to a reviewer) can see exactly which page and which
+mechanism satisfied each milestone, without reconstructing it from `steps[]`.
 
 ## 10. taskId, and brand/market/language as reporting metadata only
 

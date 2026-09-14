@@ -60,7 +60,7 @@ class ClickTwiceThenStopSuccessProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.10.0",
+    schemaVersion: "1.11.0",
     taskId: "alternative-success-criteria-groups",
     objective:
       "Complete the fixture journey: reach the destination page, or click its completion control, or have its " +
@@ -74,7 +74,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.9.0",
+    outputSchemaVersion: "1.10.0",
     ...overrides,
   };
 }
@@ -164,7 +164,7 @@ test("REGRESSION: an OR-group of alternatives is satisfied by network_event alon
   }
 });
 
-test("REGRESSION (documents the exact reported failure mode): the SAME three criteria WITHOUT `group` are AND-ed, not OR-ed -- two unsatisfiable required criteria block stop_success forever even though the working data_layer_event criterion is satisfied on every step from the destination page onward", async () => {
+test("REGRESSION (documents the exact reported failure mode, updated for ordered-milestone enforcement): the SAME three criteria WITHOUT `group` are AND-ed, not OR-ed -- two unsatisfiable required criteria block stop_success forever, and the ordered-milestone gate (docs/n8n-integration.md §9f) now also stops the working, later-declared data_layer_event criterion from ever being evaluated at all while the first, structurally-unsatisfiable criterion remains the active milestone", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -180,14 +180,22 @@ test("REGRESSION (documents the exact reported failure mode): the SAME three cri
     assert.equal(response.status, "failure");
     assert.equal(response.statusReason, "no_progress_required_criteria_unmet");
     assert.equal(response.engineAssessment.objectiveAchieved, false);
-    // The working criterion genuinely did fire and is recorded as satisfied -- this is not
-    // a navigation failure or a data_layer_event regression, it is specifically the missing
-    // OR semantics: satisfiedSuccessCriteriaIds is non-empty, but two required criteria the
-    // task can structurally never satisfy still block stop_success under plain AND.
-    assert.ok(response.engineAssessment.satisfiedSuccessCriteriaIds?.includes("journey-complete-event"));
+    // Before ordered-milestone enforcement existed, the working data_layer_event criterion
+    // (declared last) was evaluated and satisfied independently of the other two, regardless
+    // of their own status -- this section's comment used to make that point explicitly. Now
+    // that required successCriteria are treated as ordered milestones in declaration order
+    // (docs/n8n-integration.md §9f), the first, structurally-unsatisfiable criterion
+    // ("wrong-control-clicked") is permanently the active milestone: the later criteria are
+    // never even eligible for evaluation, let alone satisfaction, so satisfiedSuccessCriteriaIds
+    // stays empty and every required id -- not just the two unsatisfiable ones -- is reported
+    // missing. This is the deliberate, specified consequence of ordered-milestone gating (a
+    // caller relying on independent/parallel required signals rather than a sequential journey
+    // should express them as an OR `group`, per the tests above, or ensure each milestone is
+    // independently reachable), not an unrelated regression.
+    assert.deepEqual(response.engineAssessment.satisfiedSuccessCriteriaIds, []);
     assert.deepEqual(
       response.diagnostics.missingRequiredCriteriaIds?.sort(),
-      ["malformed-destination-pattern", "wrong-control-clicked"],
+      ["journey-complete-event", "malformed-destination-pattern", "wrong-control-clicked"],
     );
   } finally {
     await page.close();
