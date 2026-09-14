@@ -1,6 +1,7 @@
 import type { Observation } from "../types/task-response.js";
 import type { BranchResult } from "../types/branch.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
+import { buildClickIdentityKey } from "./routeMemory.js";
 
 /**
  * Goal-Directed Bounded Branch Exploration (behavioural phase). This module holds the
@@ -161,7 +162,7 @@ export function isAmbiguousMultiCandidateDecisionPoint(params: {
     if (el.visible === false || el.disabled || el.covered) {
       continue;
     }
-    const identity = `click::${el.role}::${el.accessibleName}`;
+    const identity = `click::${buildClickIdentityKey(el)}`;
     const score = objectiveRelevanceScore(relevanceText, el.accessibleName);
     const existing = scoreByIdentity.get(identity);
     if (existing === undefined || score > existing) {

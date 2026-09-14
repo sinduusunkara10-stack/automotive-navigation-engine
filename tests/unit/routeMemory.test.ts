@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildClickIdentityKey,
   computeCandidateIdentity,
   computeDecisionPointFingerprint,
   RouteMemory,
@@ -145,6 +146,94 @@ test("computeCandidateIdentity: returns undefined for actions that are not route
 });
 
 // ---------------------------------------------------------------------------------------
+// Repeated-card candidate identity fix (see CLAUDE.md and docs/architecture.md §18):
+// buildClickIdentityKey / computeCandidateIdentity must not collapse two structurally
+// distinct controls (e.g. the same-labelled action button under two different listing
+// cards) into one identity just because their role+accessibleName happen to match.
+// ---------------------------------------------------------------------------------------
+
+test("buildClickIdentityKey: two identically-labelled elements with different destinationUrl values produce distinct identities", () => {
+  const cardA = { role: "button", accessibleName: "View Details", destinationUrl: "https://example-fictional-oem.test/offers.html#id=alpha" };
+  const cardB = { role: "button", accessibleName: "View Details", destinationUrl: "https://example-fictional-oem.test/offers.html#id=beta" };
+  assert.notEqual(buildClickIdentityKey(cardA), buildClickIdentityKey(cardB));
+});
+
+test("buildClickIdentityKey: the same physical control (same destinationUrl) produces the same identity across two separately-taken observations", () => {
+  const before = { role: "button", accessibleName: "View Details", destinationUrl: "https://example-fictional-oem.test/offers.html#id=alpha" };
+  const after = { role: "button", accessibleName: "View Details", destinationUrl: "https://example-fictional-oem.test/offers.html#id=alpha" };
+  assert.equal(buildClickIdentityKey(before), buildClickIdentityKey(after));
+});
+
+test("buildClickIdentityKey: with no destinationUrl (a plain <button>), falls back to nearestHeadingText to distinguish two repeated cards", () => {
+  const cardA = { role: "button", accessibleName: "View Details", nearestHeadingText: "Fictional Model Alpha" };
+  const cardB = { role: "button", accessibleName: "View Details", nearestHeadingText: "Fictional Model Beta" };
+  assert.notEqual(buildClickIdentityKey(cardA), buildClickIdentityKey(cardB));
+});
+
+test("buildClickIdentityKey: destinationUrl takes priority over nearestHeadingText when both are present", () => {
+  const withBoth = {
+    role: "button",
+    accessibleName: "View Details",
+    destinationUrl: "https://example-fictional-oem.test/offers.html#id=alpha",
+    nearestHeadingText: "Fictional Model Alpha",
+  };
+  assert.equal(buildClickIdentityKey(withBoth), "button::View Details::url:https://example-fictional-oem.test/offers.html#id=alpha");
+});
+
+test("buildClickIdentityKey: falls back to the bare role+accessibleName identity, unchanged, when neither destinationUrl nor nearestHeadingText is available", () => {
+  const el = { role: "a", accessibleName: "Continue" };
+  assert.equal(buildClickIdentityKey(el), "a::Continue");
+});
+
+test("computeCandidateIdentity: two repeated-card CTAs sharing a role+accessibleName but distinct destinationUrl values yield distinct route-memory candidates", () => {
+  const obs = observation({
+    interactiveElements: [
+      {
+        id: "el-a",
+        role: "button",
+        accessibleName: "View Details",
+        visible: true,
+        destinationUrl: "https://example-fictional-oem.test/offers.html#id=alpha",
+      },
+      {
+        id: "el-b",
+        role: "button",
+        accessibleName: "View Details",
+        visible: true,
+        destinationUrl: "https://example-fictional-oem.test/offers.html#id=beta",
+      },
+    ],
+  });
+  const alpha = computeCandidateIdentity({ type: "click", target: "el-a" }, obs);
+  const beta = computeCandidateIdentity({ type: "click", target: "el-b" }, obs);
+  assert.ok(alpha);
+  assert.ok(beta);
+  assert.notEqual(alpha?.id, beta?.id);
+});
+
+test("RouteMemory: a dead-end recorded against one repeated-card candidate does not affect a different card's otherwise-identically-labelled candidate", () => {
+  const memory = new RouteMemory();
+  const fp = "fingerprint-listing-page";
+  const alpha = {
+    id: "click::button::View Details::url:https://example-fictional-oem.test/offers.html#id=alpha",
+    actionType: "click" as const,
+    label: 'button "View Details"',
+  };
+  const beta = {
+    id: "click::button::View Details::url:https://example-fictional-oem.test/offers.html#id=beta",
+    actionType: "click" as const,
+    label: 'button "View Details"',
+  };
+
+  memory.record(fp, alpha, "no_change");
+  memory.recordBranchResult(fp, alpha.id, { depthReached: 2, result: "dead_end" });
+
+  assert.equal(memory.hasBranchResult(fp, alpha.id), true);
+  assert.equal(memory.hasBranchResult(fp, beta.id), false, "a different card's candidate must not inherit the other card's dead-end result");
+  assert.deepEqual(memory.getTriedCandidates(fp).map((c) => c.label).length, 1, "beta was never tried at all yet");
+});
+
+// ---------------------------------------------------------------------------------------
 // RouteMemory
 // ---------------------------------------------------------------------------------------
 
@@ -237,8 +326,20 @@ test("RouteMemory: getTriedCandidates sorts most-attempted-first, then alphabeti
 });
 
 // ---------------------------------------------------------------------------------------
-// RunState wiring: recordRouteMemoryOutcome / recordRouteMemoryPending / the deferred
-// "no_change" -> "advanced" upgrade driven by resolveLastActionProgress.
+// RunState wiring: recordRouteMemoryOutcome (immediate blocked/failed recording).
+//
+// A successful candidate's own "advanced" vs "no_change" outcome is no longer classified
+// here via a deferred, URL/title-diff-only upgrade path (the RunState.recordRouteMemoryPending
+// / resolveLastActionProgress mechanism this replaced). See the route-progress
+// classification fix (CLAUDE.md and docs/architecture.md "Route progress classification"):
+// a URL/title change alone is no longer sufficient evidence of "advanced" -- a same-document
+// destinationUrl fallback can produce exactly that without ever running the site's own click
+// handler (see actions/click.ts's fallback-verification fix). That classification is now
+// computed synchronously in core/loop.ts, right after each step's own success-criteria
+// evaluation, from milestone progress, generic post-click interaction-state evidence
+// (actionResult.clickSideEffectDetected), and verified navigation (actionResult.fallbackVerified)
+// together -- see tests/integration/routeProgressClassification.test.ts for full end-to-end
+// coverage of that behaviour.
 // ---------------------------------------------------------------------------------------
 
 test("RunState.recordRouteMemoryOutcome records blocked/failed outcomes immediately", () => {
@@ -255,47 +356,6 @@ test("RunState.recordRouteMemoryOutcome records blocked/failed outcomes immediat
   const byLabel = Object.fromEntries(tried.map((c) => [c.label, c]));
   assert.equal(byLabel['a "Detour"']?.lastOutcome, "failed");
   assert.equal(byLabel["https://x.test/y"]?.lastOutcome, "blocked");
-});
-
-test("RunState.recordRouteMemoryPending is provisionally 'no_change' and is upgraded to 'advanced' once the next observation shows the page moved on", () => {
-  const state = new RunState();
-  const fp = "fingerprint-1";
-  const candidate = { id: "click::a::Continue", actionType: "click" as const, label: 'a "Continue"' };
-
-  state.recordAction({ type: "click", target: "el-0" }, { url: "https://x.test/a.html", title: "A" });
-  state.recordRouteMemoryPending(fp, candidate);
-
-  assert.equal(state.routeMemory.getTriedCandidates(fp)[0]?.lastOutcome, "no_change");
-
-  // Next step's observation shows the URL changed -- resolveLastActionProgress both fills
-  // in RecordedAction.observedProgress (existing behaviour) and upgrades the pending route
-  // memory entry to "advanced".
-  state.resolveLastActionProgress("https://x.test/b.html", "B");
-
-  const tried = state.routeMemory.getTriedCandidates(fp);
-  assert.equal(tried[0]?.lastOutcome, "advanced");
-  assert.equal(tried[0]?.attempts, 1, "the upgrade must not double-count as a second attempt");
-});
-
-test("RunState.recordRouteMemoryPending stays 'no_change' when the next observation shows no url/title change", () => {
-  const state = new RunState();
-  const fp = "fingerprint-1";
-  const candidate = { id: "click::button::Stay", actionType: "click" as const, label: 'button "Stay"' };
-
-  state.recordAction({ type: "click", target: "el-0" }, { url: "https://x.test/a.html", title: "A" });
-  state.recordRouteMemoryPending(fp, candidate);
-
-  state.resolveLastActionProgress("https://x.test/a.html", "A");
-
-  const tried = state.routeMemory.getTriedCandidates(fp);
-  assert.equal(tried[0]?.lastOutcome, "no_change");
-});
-
-test("RunState.resolveLastActionProgress is a no-op for route memory when no candidate is pending (e.g. after a scroll/wait, which computeCandidateIdentity never tracks)", () => {
-  const state = new RunState();
-  state.recordAction({ type: "scroll" }, { url: "https://x.test/a.html", title: "A" });
-  // No recordRouteMemoryPending call -- nothing pending.
-  assert.doesNotThrow(() => state.resolveLastActionProgress("https://x.test/b.html", "B"));
 });
 
 // ---------------------------------------------------------------------------------------

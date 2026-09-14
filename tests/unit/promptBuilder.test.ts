@@ -876,3 +876,89 @@ test("buildReasoningPrompt: the milestones/branch context stays compact -- never
   const addedBytes = promptWith.user.length - promptWithout.user.length;
   assert.ok(addedBytes < 400, `expected a small bounded addition, got ${addedBytes} bytes`);
 });
+
+// ---------------------------------------------------------------------------------------
+// Modal-aware observation and prompt prioritisation (see CLAUDE.md and
+// docs/architecture.md §18): when Observation.activeDialog is present, a zero-relevance
+// *covered* background element must not consume the fixed structural prompt-selection
+// budget that a genuinely reachable control (inside the dialog, or simply not covered)
+// needs.
+// ---------------------------------------------------------------------------------------
+
+test("activeDialog present: covered zero-relevance background controls are excluded from the structural prompt budget, leaving room for the dialog's own controls", () => {
+  const coveredBackgroundFillers = buildManyElements(60).map((el) => ({ ...el, covered: true as const }));
+  const dialogControls = [
+    { id: "dialog-cta", role: "button", accessibleName: "New goal-directed action", visible: true },
+    { id: "dialog-close", role: "button", accessibleName: "Close", visible: true },
+  ];
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      interactiveElements: [...coveredBackgroundFillers, ...dialogControls],
+      activeDialog: { role: "dialog", accessibleName: "Details" },
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { activeDialog?: unknown; interactiveElements: Array<{ id: string }> };
+  };
+
+  assert.ok(payload.currentPage.activeDialog, "expected activeDialog to be forwarded to the prompt payload");
+  const selectedIds = new Set(payload.currentPage.interactiveElements.map((el) => el.id));
+  assert.ok(selectedIds.has("dialog-cta"), "the dialog's own goal-directed control must survive selection");
+  assert.ok(selectedIds.has("dialog-close"), "the dialog's own close control must survive selection");
+});
+
+test("activeDialog present: a covered background control that still scores positively on lexical relevance remains reachable (never fully excluded, only deprioritised out of the structural budget)", () => {
+  const coveredBackgroundFillers = buildManyElements(60).map((el) => ({ ...el, covered: true as const }));
+  // Shares vocabulary with ENGLISH_OBJECTIVE ("reach", "success") so it scores positively
+  // on lexical relevance despite being covered.
+  const relevantCoveredControl = {
+    id: "covered-relevant",
+    role: "a",
+    accessibleName: "Reach the success page directly",
+    visible: true,
+    covered: true as const,
+  };
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      interactiveElements: [...coveredBackgroundFillers, relevantCoveredControl],
+      activeDialog: { role: "dialog", accessibleName: "Details" },
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: Array<{ id: string }> } };
+  const selectedIds = new Set(payload.currentPage.interactiveElements.map((el) => el.id));
+  assert.ok(
+    selectedIds.has("covered-relevant"),
+    "a covered element scoring positively on lexical relevance must remain reachable, not blanket-excluded",
+  );
+});
+
+test("no activeDialog: covered background controls compete for the structural budget exactly as before this fix (no behaviour change for the common, no-modal case)", () => {
+  const coveredBackgroundFillers = buildManyElements(60).map((el) => ({ ...el, covered: true as const }));
+
+  const context = buildTestReasoningContext({
+    objective: ENGLISH_OBJECTIVE,
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      interactiveElements: coveredBackgroundFillers,
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { interactiveElements: unknown[] } };
+  // Unaffected by the modal-aware fix: still selects up to the ordinary cap from the
+  // covered filler pool, since no activeDialog is present to trigger exclusion.
+  assert.ok(payload.currentPage.interactiveElements.length > 0);
+});

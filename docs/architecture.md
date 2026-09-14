@@ -91,10 +91,12 @@ produces an `Observation`:
 - page `url` and `title`
 - a condensed list of `interactiveElements` (role, accessible name, a stable `id` the engine
   can resolve back to a Playwright locator, visibility, and optionally `disabled`, `ariaState`,
-  `covered`, and `frameOrigin`) — sourced from the accessibility tree and visible DOM, not a
-  full serialization
+  `covered`, `frameOrigin`, and `nearestHeadingText`) — sourced from the accessibility tree and
+  visible DOM, not a full serialization
 - a short list of `notableText` snippets (headings, banners, prices) when relevant
 - an optional `progressIndicatorText` list, when the page marks up a progress/step indicator
+- an optional `activeDialog` (role + short accessible-name excerpt), when a visible
+  `role="dialog"`/`aria-modal="true"`/native `<dialog>` surface is open — see §18
 
 This keeps prompts small, keeps decisions auditable, and avoids leaking arbitrary page markup
 into the reasoning layer or the logs. The observation builder (`src/observation`) is generic;
@@ -1823,3 +1825,133 @@ tracking; no public analytics exploration labelling; no cross-run memory, RAG, v
 persistent experience repository of any kind — `BranchRecord`/`RunState.branchHistory` are
 discarded with the rest of the run's state once `runTask` returns, exactly like `RouteMemory`
 itself.
+
+## 18. Overlay-click detection, fallback verification, and modal-aware observation
+
+Production incident: a CTA click handler successfully began opening an overlay (a same-document
+modal identified only by `role="dialog"`/`aria-modal="true"`, backed by a hash-only URL change
+the handler itself set as a side effect). Playwright's own actionability retry loop reported the
+click as failed (`intercepted`) because the overlay's own backdrop came to cover the trigger
+element mid-click. The engine discarded that state and fell back to `actions/click.ts`'s generic
+`destinationUrl` navigation fallback — a raw `page.goto()` to the same hash URL. Since that
+fallback never runs the site's click handler at all (a fragment-only navigation only fires
+`hashchange`, never `click`), it changed the URL without ever opening the overlay. Every
+subsequent observation then correctly, freshly reported the unchanged underlying page — not a
+staleness/caching bug, but an accurate scan of a page state the fallback never actually reached.
+Compounding this, Route Memory classified the fallback's URL change alone as `"advanced"`
+(misleading the reasoning layer into retrying), and a repeated-card listing page (every card
+sharing an identically-labelled CTA) meant the retried candidate's own identity was
+indistinguishable from any other card's CTA of the same name.
+
+Four independent, brand-agnostic fixes address this, all scoped to already-generic engine
+mechanisms — nothing here is specific to any one site, brand, or CTA label.
+
+### Overlay-click side effect detection (`src/actions/click.ts`, `src/observation/observationBuilder.ts`)
+
+`observationBuilder.ts` exposes a lightweight `InteractionSnapshot` (whether a visible dialog
+exists and a compact identity for it, plus a sorted set of visible interactive elements' own
+`role::accessibleName` identities — never raw HTML) and a pure `detectClickSideEffect(before,
+after)` comparison: a newly-appeared or changed dialog is treated as strong evidence on its own;
+otherwise, at least `MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE` (2) newly-appeared visible
+interactive elements are required, so a single incidentally-injected ad/analytics/font-loading
+element is never mistaken for a real overlay (a genuine modal/drawer almost always introduces
+several controls — heading, close control, its own actions — at once).
+
+`actions/click.ts` captures a pre-click `InteractionSnapshot` unconditionally, before anything
+else touches the page. When a direct click throws a Playwright interception timeout
+specifically classified as `"intercepted"` (never the broader `"timeout"` catch-all, and never
+`"disabled"`), a bounded, mutation-aware settle wait (`waitForInteractionSideEffect`, polling
+every 100ms up to `CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS` = 1000ms, exiting as soon as a side effect
+is recognised rather than always waiting out the full budget) re-captures the snapshot and
+compares it. If evidence is found, the click is reported as a success
+(`ActionResult.clickSideEffectDetected: true`) and the `destinationUrl` fallback is never
+invoked at all — the overlay's own DOM state is preserved exactly as the browser rendered it, so
+the next observation exposes its controls normally. A single additional lightweight snapshot
+(no extra wait budget) is also taken after an ordinary, non-intercepted non-navigating click
+success, so a click that opens a same-document modal *without* ever looking intercepted is
+equally recognised — this feeds §18's route-progress classification below as much as the
+recovery path does.
+
+### Fallback verification (`src/actions/click.ts`)
+
+`verifyFallbackNavigation` treats a `destinationUrl` fallback that reaches a materially
+different origin/path/query as inherently verified (an ordinary GET navigation is exactly what
+the fallback exists for — see the original design note in §5's "Action-execution consistency").
+A fallback that only changes the URL's fragment or query on the *same* path is not assumed
+equivalent to a real click: the same bounded `InteractionSnapshot` comparison used for
+side-effect detection is applied against the pre-click baseline, and `ActionResult.
+fallbackVerified` is set accordingly (`true`/`false`, always present when a fallback was used).
+An unverified fallback is still reported as a successful *action* (the dispatch itself
+mechanically succeeded — the run is not blocked on it), but it is never trusted as evidence of
+real progress by the route-progress classification below.
+
+### Modal-aware observation and prompt prioritisation (`src/observation/observationBuilder.ts`, `src/reasoning/promptBuilder.ts`, `src/actions/scroll.ts`)
+
+`buildObservation` additionally scans for the first visible `role="dialog"`/`aria-modal="true"`/
+native `<dialog>` surface and, when present, reports it as `Observation.activeDialog` (role plus
+a short accessible-name excerpt — never full content, which is still carried element by element
+in `interactiveElements` as before). Descendant controls of an open dialog need no separate
+scan change: they are ordinary light-DOM elements already covered by the existing
+`interactiveElements` scan. Background controls sitting underneath the dialog are, in the common
+case (a full-viewport backdrop), already reported `covered: true` by the pre-existing
+`elementFromPoint` hit-test — reused here rather than duplicated. `promptBuilder.ts`'s prompt-
+element-selection budget excludes zero-relevance `covered` elements from its structural
+(non-lexical) pools whenever `activeDialog` is present, so background chrome can never squat on
+the fixed structural budget a genuinely reachable control needs; a covered element that still
+scores positively on lexical relevance remains reachable exactly as before. The system prompt
+also gains one sentence: when `activeDialog` is present, prefer its own controls over background
+page controls. `scroll.ts` looks for the first visible, genuinely scrollable dialog surface
+(`scrollHeight > clientHeight`) and moves the mouse into it before wheeling, so a scroll issued
+while a modal is open moves inside the modal; with no such surface, scrolling behaves exactly as
+before this fix (a plain `page.mouse.wheel` at the current cursor position). Shadow DOM and
+cross-origin frames remain out of scope for this fix — see "Known limitations" below.
+
+### Repeated-card candidate identity (`src/core/routeMemory.ts`, `src/core/branchExploration.ts`)
+
+A candidate's identity is now built by the shared `buildClickIdentityKey` helper (used by both
+`computeCandidateIdentity` and `isAmbiguousMultiCandidateDecisionPoint`, so Route Memory and
+branch-entry ambiguity detection stay consistent): a click element's own `destinationUrl` is
+used when present (the strongest, most stable per-card signal — a repeated-card CTA's own href
+routinely differs per card, e.g. a distinct product/offer id), falling back to the element's
+`nearestHeadingText` — a short, bounded ancestor-walk-derived string naming the nearest
+enclosing heading, a generic proxy for "which card/section this control belongs to" — for a
+plain `<button>` with no href. Falls back to the bare `role::accessibleName` identity, unchanged
+from before this fix, only when neither signal is available (genuinely indistinguishable from
+this engine's own generically-captured evidence).
+
+### Route progress classification (`src/core/loop.ts`, `src/core/state.ts`)
+
+A successful click/navigate candidate's Route Memory outcome (`"advanced"` vs `"no_change"`) is
+computed synchronously, immediately after each step's own success-criteria evaluation, rather
+than deferred to the next step's URL/title diff (the previous `RunState.recordRouteMemoryPending`
+/ `resolveLastActionProgress` mechanism this replaces — `RunState.resolveLastActionProgress`
+itself is unchanged for its other purpose, filling in `RecordedAction.observedProgress`).
+`"advanced"` now requires at least one of: a milestone/success criterion newly satisfied by this
+action; `ActionResult.clickSideEffectDetected`; or a URL change that was not itself an unverified
+fallback (`ActionResult.fallbackVerified !== false`). An ordinary direct click or `navigate`
+action's URL/title change — the overwhelming common case — is classified exactly as before,
+since `fallbackVerified` is only ever present when a fallback was actually used.
+
+### Schema impact
+
+Additive only (`schemaVersion`/`outputSchemaVersion` "1.10.0" → "1.11.0"): `Observation.
+activeDialog`, `InteractiveElement.nearestHeadingText`, `ActionResult.clickSideEffectDetected`,
+`ActionResult.fallbackVerified`. No existing field was removed, renamed, or had its meaning
+changed.
+
+### Known limitations
+
+- Dialog/overlay detection (`activeDialog`, `InteractionSnapshot.hasDialog`) is standards-based
+  (`role="dialog"`, `aria-modal="true"`, native `<dialog>`) and main-document only — it does not
+  reach into shadow DOM or into a same-origin child frame's own dialog. Widening either is
+  deferred as a follow-up, matching this repo's existing deliberate-deferral discipline (§16,
+  §17) rather than being bundled into this fix.
+- `MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE` (2) is a fixed, generic heuristic, not a
+  guarantee: a modal that introduces exactly one new interactive control and does not use
+  `role="dialog"`/`aria-modal` would not be recognised by the fallback signal alone (the
+  dialog-based signal remains the primary, highest-confidence path).
+- Route Memory remains observe-and-inform only (§16) — a candidate correctly classified as
+  `"no_change"`/`"blocked"`/`"dead_end"` is surfaced strongly in the reasoning prompt (existing
+  guidance, reinforced by more accurate classification and per-card identity from this fix) but
+  is never mechanically blocked from being re-selected. Broadening Route Memory into an
+  enforcing mechanism was deliberately left out of this fix's scope.

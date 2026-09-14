@@ -40,6 +40,16 @@ export interface InteractiveElement {
    * overwhelming common case.
    */
   frameOrigin?: string;
+  /**
+   * Short (<=80 char) text of the nearest enclosing heading (h1-h4), found via a bounded
+   * ancestor walk -- a cheap, markup-agnostic proxy for "which repeated card/list-item is
+   * this control part of" (e.g. a listing of cards each with its own product heading and an
+   * identically-labelled action button). Used by src/core/routeMemory.ts to disambiguate
+   * route-memory candidate identity for controls that would otherwise collapse to the same
+   * role+accessibleName identity across multiple repeated cards. Absent when no heading was
+   * found within the bounded walk.
+   */
+  nearestHeadingText?: string;
 }
 
 export interface Observation {
@@ -69,6 +79,17 @@ export interface Observation {
    * cross-frame list.
    */
   elementDiscoveryDiagnostics?: ElementDiscoveryDiagnostics;
+  /**
+   * Modal-aware observation (see CLAUDE.md and docs/architecture.md "Modal-aware
+   * observation"): present when a visible dialog/modal surface (role="dialog",
+   * aria-modal="true", or a native <dialog>) exists in the main document at the time of
+   * this observation. A compact, generic identity only -- role and a short accessible-name
+   * excerpt -- never the dialog's full content (that's still carried, element by element,
+   * in interactiveElements as usual). Lets the reasoning layer and prompt builder
+   * distinguish "no modal is open" from "a modal is open" without inferring it indirectly
+   * from interactiveElements[].covered alone.
+   */
+  activeDialog?: { role: string; accessibleName: string };
 }
 
 /**
@@ -115,6 +136,29 @@ export interface ActionResult {
    * not applicable, consistent with every other boolean evidence flag in this schema.
    */
   staleTarget?: boolean;
+  /**
+   * Overlay-click-detection fix (see actions/click.ts): true only when a bounded post-click
+   * check found generic evidence (a newly-appeared dialog/modal surface, or a materially
+   * different set of visible interactive controls) that this click produced a real
+   * interaction-state change -- including the case where the direct dispatch appeared to
+   * fail as intercepted/timed-out because the overlay it opened came to cover the trigger
+   * itself, so the click is reported as a success on that basis instead of falling through
+   * to the destinationUrl fallback. Absent (never false), consistent with every other
+   * boolean evidence flag in this schema, whenever no such evidence was found or no check
+   * applied.
+   */
+  clickSideEffectDetected?: boolean;
+  /**
+   * Overlay-click-detection / fallback-verification fix (see actions/click.ts): present
+   * only when a generic destinationUrl navigation fallback was actually used to recover an
+   * unactionable click. True means the fallback's resulting page state was verified as a
+   * genuine, meaningful change (a different page path/origin, or generic evidence of a new
+   * interactive surface) rather than assumed equivalent to a real click; false means the
+   * fallback only changed the URL (e.g. a same-document hash-only navigation) with no
+   * verified further evidence -- core/loop.ts's route-memory classification never records
+   * such an unverified fallback as "advanced" on the strength of the URL change alone.
+   */
+  fallbackVerified?: boolean;
 }
 
 export interface Progress {
@@ -666,7 +710,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.10.0";
+  schemaVersion: "1.11.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

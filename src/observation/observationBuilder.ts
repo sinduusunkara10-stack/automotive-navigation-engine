@@ -20,6 +20,18 @@ const INTERACTIVE_SELECTOR =
 // under a page-level h1/h2, and a generic "what state is this page in" signal should not
 // be blind to it.
 const HEADING_SELECTOR = "h1, h2, h3, h4";
+// Standards-based, brand-agnostic modal/dialog surface detection (overlay-click-detection
+// fix -- see CLAUDE.md and docs/architecture.md "Modal-aware observation"). Native <dialog>
+// is included alongside the two ARIA signals since a page can mark up a modal either way.
+// Deliberately never widened to a heuristic "looks like an overlay" selector (fixed/absolute
+// positioning, high z-index, etc.) -- that would be far more prone to false positives from
+// cookie banners, sticky headers, or ads than the two explicit, standards-based signals a
+// page author chooses deliberately when marking up a real dialog.
+export const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
+// Bounded ancestor walk used to find a repeated card/list-item's own nearby heading (see
+// nearestHeadingText below) -- kept small so this never approaches an unbounded scan of a
+// large page for an element with no nearby heading at all.
+const MAX_HEADING_ANCESTOR_HOPS = 5;
 // Generic, brand-agnostic progress-indicator evidence: any element a page marks up as a
 // progress/step indicator via role or common ARIA attributes, read as plain visible text
 // (e.g. "Step 2 of 4"). Never a hardcoded class name, selector, or brand-specific marker.
@@ -39,6 +51,7 @@ interface RawScannedElement {
   disabled?: boolean;
   ariaState?: Record<string, string>;
   covered?: boolean;
+  nearestHeadingText?: string;
 }
 
 interface FrameScanResult {
@@ -74,10 +87,24 @@ interface FrameScanResult {
 function scanInteractiveElements({
   attr,
   selector,
+  headingSelector,
+  maxHeadingAncestorHops,
 }: {
   attr: string;
   selector: string;
+  headingSelector: string;
+  maxHeadingAncestorHops: number;
 }): FrameScanResult {
+  // Bounded, generic ancestor walk: finds the nearest enclosing container that itself
+  // contains a heading (h1-h4), and returns that heading's own text -- a cheap,
+  // markup-agnostic proxy for "which repeated card/list-item is this control part of"
+  // (e.g. a listing of cards each with its own "<h3>Product Name</h3>...<button>View
+  // Details</button>"). Used only to disambiguate route-memory candidate identity for
+  // controls that share an identical role+accessibleName across multiple repeated cards
+  // (see core/routeMemory.ts) -- never a selector, never brand/site-specific. Stops at the
+  // first ancestor level with a match (the *closest* enclosing heading), and gives up after
+  // maxHeadingAncestorHops levels so an element with no nearby heading never triggers an
+  // unbounded walk up a large page.
   const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
   let buttonLikeCount = 0;
   let linkLikeCount = 0;
@@ -144,6 +171,25 @@ function scanInteractiveElements({
       if (visibilityHidden) excludedVisibilityHiddenCount += 1;
     }
 
+    // Bounded ancestor walk for the nearest enclosing heading's text (see the doc comment
+    // above) -- inlined directly rather than factored into a separately-named local
+    // function/const: Playwright's evaluate() serializes only this outer function's own
+    // source text and runs it standalone in the browser, detached from the rest of this
+    // module/bundle, and a nested named function binding can carry a bundler-injected
+    // helper reference (esbuild's "__name", used for debug-friendly function naming) that
+    // does not exist once evaluated in isolation.
+    let headingText: string | undefined;
+    let headingWalkNode: HTMLElement = el;
+    for (let hops = 0; hops < maxHeadingAncestorHops && headingWalkNode.parentElement; hops += 1) {
+      headingWalkNode = headingWalkNode.parentElement;
+      const heading = headingWalkNode.querySelector(headingSelector);
+      const headingCandidateText = heading?.textContent?.trim();
+      if (headingCandidateText) {
+        headingText = headingCandidateText.slice(0, 80);
+        break;
+      }
+    }
+
     return {
       id,
       role,
@@ -153,6 +199,7 @@ function scanInteractiveElements({
       ...(disabled ? { disabled } : {}),
       ...(Object.keys(ariaState).length > 0 ? { ariaState } : {}),
       ...(covered ? { covered } : {}),
+      ...(headingText ? { nearestHeadingText: headingText } : {}),
     };
   });
 
@@ -183,7 +230,36 @@ function scanInteractiveElements({
 }
 
 async function scanFrame(target: FrameActionTarget): Promise<FrameScanResult> {
-  return target.evaluate(scanInteractiveElements, { attr: ELEMENT_ID_ATTR, selector: INTERACTIVE_SELECTOR });
+  return target.evaluate(scanInteractiveElements, {
+    attr: ELEMENT_ID_ATTR,
+    selector: INTERACTIVE_SELECTOR,
+    headingSelector: HEADING_SELECTOR,
+    maxHeadingAncestorHops: MAX_HEADING_ANCESTOR_HOPS,
+  });
+}
+
+/**
+ * Runs inside the browser to find the first visible dialog/modal surface (see
+ * DIALOG_SELECTOR above), returning a small, generic identity for it (role + a short
+ * accessible-name/text excerpt) -- never its full content. Used both for
+ * Observation.activeDialog (buildObservation below) and for the pre/post-click
+ * InteractionSnapshot comparison (captureInteractionSnapshot below) so both share the exact
+ * same detection rule.
+ */
+function scanActiveDialog(selector: string): { role: string; accessibleName: string } | undefined {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    const visible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    if (!visible) {
+      continue;
+    }
+    const role = el.getAttribute("role") ?? (el.tagName.toLowerCase() === "dialog" ? "dialog" : el.tagName.toLowerCase());
+    const accessibleName = (el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "").slice(0, 120);
+    return { role, accessibleName };
+  }
+  return undefined;
 }
 
 function mergeDiscoveryDiagnostics(
@@ -258,6 +334,14 @@ export async function buildObservation(page: Page): Promise<Observation> {
     MAX_REPORTED_INACCESSIBLE_FRAME_ORIGINS,
   );
 
+  // Modal-aware observation (see CLAUDE.md and docs/architecture.md "Modal-aware
+  // observation"): a page-level signal that a dialog/modal surface is currently open, so
+  // the reasoning prompt (src/reasoning/promptBuilder.ts) can prioritise its descendant
+  // controls over background page chrome without needing a new per-element field. Detected
+  // only in the main document -- see the "known limitations" note in
+  // docs/architecture.md for why this deliberately does not reach into child frames yet.
+  const activeDialog = await page.evaluate(scanActiveDialog, DIALOG_SELECTOR);
+
   return {
     url: page.url(),
     title: await page.title(),
@@ -266,6 +350,7 @@ export async function buildObservation(page: Page): Promise<Observation> {
     ...(progressIndicatorText.length > 0 ? { progressIndicatorText } : {}),
     ...(inaccessibleFrameOrigins.length > 0 ? { inaccessibleFrameOrigins } : {}),
     elementDiscoveryDiagnostics,
+    ...(activeDialog ? { activeDialog } : {}),
   };
 }
 
@@ -386,4 +471,138 @@ export async function resolveElementActionTarget(page: Page, elementId: string):
     return undefined;
   }
   return resolution.status === "resolved" ? resolution.frame : page;
+}
+
+/**
+ * Overlay-click-detection fix (see CLAUDE.md and docs/architecture.md "Overlay-click side
+ * effect detection"): a small, lightweight, main-document-only fingerprint of "what
+ * interactive surface is currently on screen", taken immediately before a click and
+ * compared against one taken shortly after. Deliberately narrow -- never raw HTML, never
+ * full element content -- just enough to answer "did a genuinely new interactive surface
+ * (a dialog, or a meaningfully different set of controls) appear" generically, for any
+ * site. Main-document only, matching "do not capture excessive page content" -- a click
+ * that opens a same-origin-iframe-scoped or shadow-DOM-scoped modal is outside this
+ * specific check's scope (see docs/architecture.md's limitations note).
+ */
+export interface InteractionSnapshot {
+  hasDialog: boolean;
+  /** Present only when hasDialog is true -- a compact identity for the dialog(s) currently on screen, so a *different* dialog appearing (not just "a dialog exists, still") can be told apart from one that was already open before the click. */
+  dialogSignature?: string;
+  /** Sorted, deduplicated role::accessibleName identities of every currently visible interactive element (same vocabulary as core/routeMemory.ts's own candidate identity) -- never raw text beyond what accessibleName already carries. */
+  interactiveIdentities: string[];
+}
+
+// Deliberately duplicated inline in scanInteractionSnapshot below (once per .filter() call)
+// rather than factored into one shared, separately-named local helper: see
+// scanInteractiveElements's own doc comment on why a nested named function/const binding
+// inside a function passed to Playwright's evaluate() is unsafe (esbuild's dev "__name"
+// helper, undefined once evaluated standalone in the browser).
+function scanInteractionSnapshot(args: { dialogSelector: string; interactiveSelector: string }): InteractionSnapshot {
+  const dialogEls = Array.from(document.querySelectorAll<HTMLElement>(args.dialogSelector)).filter((el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  });
+  const hasDialog = dialogEls.length > 0;
+  const dialogSignature = hasDialog
+    ? dialogEls
+        .map((el) => {
+          const role = el.getAttribute("role") ?? (el.tagName.toLowerCase() === "dialog" ? "dialog" : el.tagName.toLowerCase());
+          const text = (el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "").slice(0, 80);
+          return `${role}|${text}`;
+        })
+        .sort()
+        .join("~")
+    : undefined;
+
+  const interactiveEls = Array.from(document.querySelectorAll<HTMLElement>(args.interactiveSelector)).filter((el) => {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  });
+  const interactiveIdentities = [
+    ...new Set(
+      interactiveEls.map((el) => {
+        const role = el.getAttribute("role") ?? el.tagName.toLowerCase();
+        const accessibleName = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "";
+        return `${role}::${accessibleName}`;
+      }),
+    ),
+  ].sort();
+
+  return { hasDialog, ...(dialogSignature ? { dialogSignature } : {}), interactiveIdentities };
+}
+
+export async function captureInteractionSnapshot(page: Page): Promise<InteractionSnapshot> {
+  return page.evaluate(scanInteractionSnapshot, { dialogSelector: DIALOG_SELECTOR, interactiveSelector: INTERACTIVE_SELECTOR });
+}
+
+export type ClickSideEffectType = "dialog_appeared" | "dialog_changed" | "interactive_surface_changed";
+
+// A single newly-appeared interactive element is not treated as evidence on its own -- an
+// injected ad, a lazy-loaded font-triggered reflow, or an analytics-driven DOM tweak can
+// each incidentally add one interactive-looking node without representing a real click
+// side effect (requirement: "do not treat every DOM mutation as successful evidence"). A
+// genuine modal/drawer opening from a click almost always introduces *several* new controls
+// at once (a heading/close control plus its own actions), so requiring at least two is a
+// simple, generic way to bias strongly against that class of false positive while still
+// catching the common real case. The dialog-based signals above remain the primary,
+// highest-confidence evidence; this is only the fallback for a modal-like surface that
+// doesn't happen to use role="dialog"/aria-modal.
+const MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE = 2;
+
+/**
+ * Pure, deterministic comparison of two InteractionSnapshots -- no Playwright/browser
+ * involvement, so this is directly unit-testable. Used both by actions/click.ts (to decide
+ * whether an apparently-failed/intercepted click actually succeeded, and whether a
+ * destinationUrl fallback navigation produced a verified, meaningful state change) and by
+ * core/loop.ts (to classify a route-memory candidate's outcome -- see requirement E).
+ */
+export function detectClickSideEffect(params: {
+  before: InteractionSnapshot;
+  after: InteractionSnapshot;
+}): { detected: boolean; type?: ClickSideEffectType } {
+  const { before, after } = params;
+
+  if (after.hasDialog && !before.hasDialog) {
+    return { detected: true, type: "dialog_appeared" };
+  }
+  if (after.hasDialog && before.hasDialog && after.dialogSignature !== before.dialogSignature) {
+    return { detected: true, type: "dialog_changed" };
+  }
+
+  const beforeIdentities = new Set(before.interactiveIdentities);
+  const newCount = after.interactiveIdentities.filter((id) => !beforeIdentities.has(id)).length;
+  if (newCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE) {
+    return { detected: true, type: "interactive_surface_changed" };
+  }
+
+  return { detected: false };
+}
+
+// Bounded budget for the post-click side-effect settle check (see
+// waitForInteractionSideEffect below) -- mirrors this repo's existing fixed, non-configurable
+// settle-delay convention (PAGE_SETTLE_DELAY_MS, core/robustNavigation.ts) rather than
+// introducing a new tunable. Polling (not a single fixed sleep) so a fast-rendering overlay
+// is recognised well before the budget is exhausted, while a page with no side effect at all
+// still only ever costs this one bounded budget.
+export const CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS = 1000;
+const CLICK_SIDE_EFFECT_POLL_INTERVAL_MS = 100;
+
+/**
+ * Bounded, mutation-aware settle wait (requirement A.7: "use bounded, event- or
+ * mutation-aware settling ... rather than only increasing the fixed delay globally"):
+ * repeatedly re-captures the interaction snapshot and stops as soon as
+ * detectClickSideEffect recognises a side effect against `before`, instead of always
+ * waiting out a single fixed delay. Still bounded to CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS in
+ * the worst case (nothing ever changes), so this can never become an unbounded wait.
+ */
+export async function waitForInteractionSideEffect(page: Page, before: InteractionSnapshot): Promise<InteractionSnapshot> {
+  const deadline = Date.now() + CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS;
+  let latest = await captureInteractionSnapshot(page);
+  while (!detectClickSideEffect({ before, after: latest }).detected && Date.now() < deadline) {
+    await page.waitForTimeout(CLICK_SIDE_EFFECT_POLL_INTERVAL_MS).catch(() => {});
+    latest = await captureInteractionSnapshot(page);
+  }
+  return latest;
 }
