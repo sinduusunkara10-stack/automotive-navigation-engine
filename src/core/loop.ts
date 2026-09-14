@@ -790,9 +790,13 @@ export async function runStep(params: {
       state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "blocked");
     } else if (!actionResult.success) {
       state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "failed");
-    } else {
-      state.recordRouteMemoryPending(preDispatchDecisionPointFingerprint, routeCandidate);
     }
+    // A successful dispatch's own outcome ("advanced" vs "no_change") is classified
+    // synchronously further below, once newlySatisfied (milestone progress) and this
+    // action's own side-effect/fallback-verification evidence are both known -- see the
+    // route-progress classification fix after evaluateSuccessCriteria. Never classified
+    // here purely from dispatch success, and never deferred to the *next* step's
+    // observation (the previous, URL/title-diff-only mechanism this replaces).
   }
 
   // Goal-Directed Bounded Branch Exploration: entry detection. Deliberately conservative
@@ -873,6 +877,31 @@ export async function runStep(params: {
     { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
+
+  // Route-progress classification fix (see CLAUDE.md and docs/architecture.md "Route
+  // progress classification", requirement E): a successful click/navigate candidate's
+  // Route Memory outcome is never classified as "advanced" purely because the URL or title
+  // changed -- that alone is exactly the signal a same-document destinationUrl fallback can
+  // produce without ever running the site's own click handler (see actions/click.ts's
+  // fallback-verification fix), which is precisely what misled the reasoning layer in the
+  // reported production incident (a route that never reached the objective kept looking
+  // like real progress). Advancement now requires at least one of: a milestone/success
+  // criterion newly satisfied by this action; generic post-click evidence that a real
+  // interaction-state change happened (a new/changed dialog, or a materially different set
+  // of visible controls -- actionResult.clickSideEffectDetected, populated by
+  // actions/click.ts for both a direct click and the interception-recovery path); or a URL
+  // change that was not itself an unverified fallback (actionResult.fallbackVerified, when
+  // present, must not be false). A URL/title change from an ordinary direct click or
+  // navigate action -- the overwhelming common case -- still counts exactly as before,
+  // since fallbackVerified is only ever present at all when a fallback was actually used.
+  if (routeCandidate && preDispatchDecisionPointFingerprint && safetyResult.allowed && actionResult.success) {
+    const urlChanged = Boolean(actionResult.resultingUrl && actionResult.resultingUrl !== observation.url);
+    const milestoneProgress = newlySatisfied.length > 0;
+    const clickSideEffect = actionResult.clickSideEffectDetected === true;
+    const fallbackUnverified = actionResult.fallbackVerified === false;
+    const advanced = milestoneProgress || clickSideEffect || (urlChanged && !fallbackUnverified);
+    state.routeMemory.record(preDispatchDecisionPointFingerprint, routeCandidate, advanced ? "advanced" : "no_change");
+  }
 
   if (wantsCtaClickCapture && isClick) {
     const advancedJourney =

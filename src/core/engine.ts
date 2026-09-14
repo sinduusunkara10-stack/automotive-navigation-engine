@@ -394,7 +394,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.10.0",
+    schemaVersion: "1.11.0",
     taskId: task.taskId,
     status,
     statusReason,

@@ -267,6 +267,7 @@ function selectPromptInteractiveElements(
   elements: readonly InteractiveElement[],
   relevanceText: string,
   limit: number,
+  hasActiveDialog: boolean,
 ): { selected: readonly InteractiveElement[]; diagnostic: PromptElementSelectionDiagnostic } {
   if (elements.length <= limit) {
     return {
@@ -292,7 +293,18 @@ function selectPromptInteractiveElements(
   const relevantTaken = relevant.slice(0, Math.max(0, limit - structuralBudget));
   const takenIndices = new Set(relevantTaken.map((s) => s.index));
 
-  const zeroScorePool = scored.filter((s) => s.score === 0 && !takenIndices.has(s.index));
+  // Modal-aware prompt-selection fix (see CLAUDE.md and docs/architecture.md "Modal-aware
+  // observation"): while a dialog/modal is active, a zero-relevance *covered* element is
+  // background page chrome the user cannot currently interact with at all -- excluded from
+  // the structural (non-lexical) pools entirely so it can never consume the fixed
+  // STRUCTURAL_RESERVE_FRACTION budget a genuinely reachable control (inside the dialog, or
+  // simply not covered) needs. A covered element that still scores positively on lexical
+  // relevance is unaffected -- it remains reachable via relevantTaken above, matching the
+  // existing "prefer an uncovered control, but a covered one can still matter" prompt
+  // guidance below.
+  const zeroScorePool = scored.filter(
+    (s) => s.score === 0 && !takenIndices.has(s.index) && !(hasActiveDialog && s.el.covered),
+  );
   const remainingBudget = limit - relevantTaken.length;
   const tailAnchors = zeroScorePool.slice(-TAIL_ANCHOR_COUNT).slice(0, remainingBudget);
   const anchoredIndices = new Set(tailAnchors.map((s) => s.index));
@@ -416,7 +428,12 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "that uncovered control over a covered one. Only choose a covered control when clearing " +
     "whatever is covering the page is itself a necessary step before the objective can be " +
     "reached, and remember that dismissing or clearing a covering element is never itself " +
-    "the objective -- it only clears the way for a later action that is. " +
+    "the objective -- it only clears the way for a later action that is. When \"currentPage\" " +
+    "includes \"activeDialog\", a dialog/modal surface is currently open on top of the page " +
+    "-- prefer its own controls (they appear in \"interactiveElements\" like any other " +
+    "control) over background page controls, which are frequently covered and unreachable " +
+    "while it stays open; close or dismiss it only when doing so is itself necessary to " +
+    "reach the objective. " +
     consentInteractionPolicyClause(consentInteractionPolicy) +
     " When more than one visible control could " +
     "plausibly apply, choose the one whose semantic purpose most specifically matches the " +
@@ -449,6 +466,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     observation.interactiveElements,
     [objective, ...successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
     MAX_INTERACTIVE_ELEMENTS,
+    Boolean(observation.activeDialog),
   );
 
   const payload = {
@@ -471,6 +489,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
       title: observation.title,
       notableText: (observation.notableText ?? []).slice(0, MAX_NOTABLE_TEXT),
       ...(observation.progressIndicatorText ? { progressIndicatorText: observation.progressIndicatorText } : {}),
+      ...(observation.activeDialog ? { activeDialog: observation.activeDialog } : {}),
       interactiveElements: interactiveElements.map((el) => ({
         id: el.id,
         type: el.role,

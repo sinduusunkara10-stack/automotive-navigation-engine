@@ -91,15 +91,6 @@ export class RunState {
    */
   readonly routeMemory = new RouteMemory();
 
-  /**
-   * The (fingerprint, candidateId) of the most recently dispatched route-memory candidate
-   * whose outcome is still provisional ("no_change", recorded optimistically at dispatch
-   * time) -- resolved to "advanced" by resolveLastActionProgress below, the moment the next
-   * observation confirms the page actually moved on. Undefined once resolved, and whenever
-   * the most recently dispatched action wasn't a tracked route-memory candidate at all.
-   */
-  private pendingRouteMemory: { fingerprint: string; candidateId: string } | undefined;
-
   recordVisit(url: string): void {
     this.visitedUrls.push(url);
   }
@@ -129,20 +120,6 @@ export class RunState {
   }
 
   /**
-   * Records a route-memory candidate whose action was dispatched successfully but whose
-   * true effect on the page ("advanced" vs "no_change") isn't known yet -- recorded
-   * provisionally as "no_change" (the conservative default: no observable progress),
-   * upgraded to "advanced" by resolveLastActionProgress below the moment the next
-   * observation confirms the page actually moved on. Mirrors RecordedAction.observedProgress
-   * exactly: a plain url/title diff, computed generically, never specific to any action
-   * type, capture module, brand, or URL pattern.
-   */
-  recordRouteMemoryPending(fingerprint: string, candidate: RouteMemoryCandidate): void {
-    this.routeMemory.record(fingerprint, candidate, "no_change");
-    this.pendingRouteMemory = { fingerprint, candidateId: candidate.id };
-  }
-
-  /**
    * Fills in observedProgress on the most recently recorded action by comparing the page
    * state immediately before it was dispatched (lastActionObservationBefore) against
    * `url`/`title` from the next observation actually taken (see core/loop.ts, called once
@@ -165,11 +142,6 @@ export class RunState {
     }
     const progressed = url !== before.url || title !== before.title;
     last.observedProgress = progressed;
-
-    if (this.pendingRouteMemory && progressed) {
-      this.routeMemory.updateLastOutcome(this.pendingRouteMemory.fingerprint, this.pendingRouteMemory.candidateId, "advanced");
-    }
-    this.pendingRouteMemory = undefined;
   }
 
   /**

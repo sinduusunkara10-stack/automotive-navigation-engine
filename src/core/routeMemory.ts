@@ -56,6 +56,47 @@ export function computeDecisionPointFingerprint(observation: Observation): strin
 }
 
 /**
+ * Repeated-card candidate identity fix (see CLAUDE.md and docs/architecture.md
+ * "Repeated-card candidate identity"): a plain role+accessibleName identity collapses two
+ * structurally distinct controls into the same candidate whenever a page repeats an
+ * identically-labelled action across several cards/list items (e.g. the same "View
+ * Details"-style button under every item of a product listing) -- with no per-card
+ * distinguishing context, Route Memory and branch exploration (core/branchExploration.ts's
+ * isAmbiguousMultiCandidateDecisionPoint) cannot tell "the same button, tried again" apart
+ * from "a different card's otherwise-identical button, tried for the first time". Both this
+ * module and core/branchExploration.ts build a click candidate's identity through this one
+ * shared helper so the two stay consistent.
+ *
+ * Disambiguating context is added in priority order, using only fields
+ * observation/observationBuilder.ts already captures generically (no new DOM scan is
+ * introduced by this function itself):
+ *   1. destinationUrl -- when the element is a real <a href>, its own destination (e.g. a
+ *      distinct product/offer id in the URL or its hash) is the strongest, most stable
+ *      per-card signal available, and is already present on Observation today.
+ *   2. nearestHeadingText -- for a control with no destinationUrl (a plain <button> driven
+ *      entirely by a click handler), the nearest enclosing heading's text is a generic,
+ *      markup-agnostic proxy for "which card/section this control belongs to".
+ * Falls back to the bare role+accessibleName identity (unchanged, pre-existing behaviour)
+ * when neither is available -- genuinely indistinguishable from the data this engine
+ * generically captures, same as before this fix.
+ */
+export function buildClickIdentityKey(element: {
+  role: string;
+  accessibleName: string;
+  destinationUrl?: string;
+  nearestHeadingText?: string;
+}): string {
+  const base = `${element.role}::${element.accessibleName}`;
+  if (element.destinationUrl) {
+    return `${base}::url:${element.destinationUrl}`;
+  }
+  if (element.nearestHeadingText) {
+    return `${base}::ctx:${element.nearestHeadingText}`;
+  }
+  return base;
+}
+
+/**
  * Resolves a candidate's stable identity for route-memory purposes, or undefined when the
  * action isn't a route "choice" Route Memory tracks (Phase 1 scope: click and navigate only
  * -- scroll/wait/go_back/capture/stop_* are not alternatives being chosen between at a
@@ -75,7 +116,7 @@ export function computeCandidateIdentity(
       return undefined;
     }
     return {
-      id: `click::${element.role}::${element.accessibleName}`,
+      id: `click::${buildClickIdentityKey(element)}`,
       actionType: "click",
       label: `${element.role} "${element.accessibleName}"`,
     };
