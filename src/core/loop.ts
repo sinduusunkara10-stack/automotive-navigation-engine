@@ -128,6 +128,7 @@ export async function runStep(params: {
       state.satisfiedCriteriaIds,
       undefined,
       buildCriteriaEvidence(captures),
+      { sink: state.milestoneEvidence, stepIndex, phase: "pre_action" },
     )
   ).forEach((id) => state.satisfiedCriteriaIds.add(id));
 
@@ -869,6 +870,7 @@ export async function runStep(params: {
     state.satisfiedCriteriaIds,
     wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
     buildCriteriaEvidence(captures),
+    { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
 

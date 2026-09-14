@@ -198,13 +198,13 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.10.0",
+    schemaVersion: "1.11.0",
     taskId: "branch-exploration",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.9.0",
+    outputSchemaVersion: "1.10.0",
     ...overrides,
   };
 }
@@ -358,6 +358,20 @@ test("a weakly-labelled candidate is followed through several intermediate state
         step.progress.satisfiedCriteriaIds.includes("entity-selected"),
         `entity-selected must remain satisfied at step ${step.stepIndex}, even during/after the failed branch`,
       );
+    }
+
+    // Ordered-milestone enforcement (docs/n8n-integration.md §9f): "reached-target" is
+    // declared after "entity-selected" and must never appear in satisfiedCriteriaIds at a
+    // step where "entity-selected" is not also already present -- including every step
+    // spent inside and returning from the dead-end branch, which produces several steps
+    // with no criteria satisfied at all yet.
+    for (const step of response.steps) {
+      if (step.progress.satisfiedCriteriaIds.includes("reached-target")) {
+        assert.ok(
+          step.progress.satisfiedCriteriaIds.includes("entity-selected"),
+          `step ${step.stepIndex} satisfied "reached-target" without "entity-selected" already satisfied`,
+        );
+      }
     }
 
     // Branch entry/closure diagnostics are present (errors capture, generic free-text).

@@ -7,7 +7,9 @@ import {
   computeMilestoneRollup,
   evaluateSuccessCriteria,
   getMissingRequiredCriteriaIds,
+  type MilestoneEvidenceContext,
 } from "../../src/core/successEvaluator.js";
+import type { MilestoneEvidenceRecord } from "../../src/types/task-response.js";
 import { gatherSemanticPageSignals, scoreSemanticPageMatch } from "../../src/core/semanticPageMatch.js";
 import type {
   SemanticCriterionVerifier,
@@ -1196,4 +1198,226 @@ test("a rejecting semanticVerifier that finds lastActionEvidence names the wrong
     });
     assert.ok(!satisfied.includes("configuration-finished"));
   });
+});
+
+// ---------------------------------------------------------------------------------------
+// Ordered required-milestone enforcement (docs/n8n-integration.md §9f): converts
+// declaration-order milestones from a reporting-only convention (Goal-Directed Bounded
+// Branch Exploration's activeSubGoal) into an enforced runtime constraint -- the fix for the
+// reported false-success regression where all five milestones of a five-step journey were
+// satisfied on the very first step, from the homepage alone, because every criterion was
+// evaluated (and satisfiable) independently of declaration order.
+// ---------------------------------------------------------------------------------------
+
+test("only the first unsatisfied required milestone is eligible for evaluation -- a later required criterion never satisfies from the same call, even when the same page would trivially satisfy it too", async () => {
+  const html = page_("<h1>Step One Complete</h1><h2>Step Two Complete</h2>", "Both Steps");
+  const criteria: SuccessCriterion[] = [
+    { id: "step-1", type: "semantic_page_match", description: "Step one is complete.", required: true },
+    { id: "step-2", type: "semantic_page_match", description: "Step two is complete.", required: true },
+  ];
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set());
+    assert.deepEqual(
+      satisfied,
+      ["step-1"],
+      "only the active milestone (step-1) may satisfy from this call, even though step-2's own vocabulary is also present on this exact page",
+    );
+  });
+});
+
+test("completing the active milestone activates the next one, satisfied on a later call against a page that genuinely represents it", async () => {
+  const criteria: SuccessCriterion[] = [
+    { id: "step-1", type: "semantic_page_match", description: "Step one is complete.", required: true },
+    { id: "step-2", type: "semantic_page_match", description: "Step two is complete.", required: true },
+  ];
+  const stepOneHtml = page_("<h1>Step One Complete</h1>", "Step One");
+  const stepTwoHtml = page_("<h1>Step Two Complete</h1>", "Step Two");
+
+  await withPage(stepOneHtml, async (page) => {
+    const firstCall = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set());
+    assert.deepEqual(firstCall, ["step-1"]);
+  });
+  await withPage(stepTwoHtml, async (page) => {
+    const secondCall = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set(["step-1"]));
+    assert.deepEqual(secondCall, ["step-2"], "step-2 becomes eligible, and satisfiable, once step-1 is already satisfied");
+  });
+});
+
+test("no required milestone can be satisfied before every earlier required milestone, however many times the same unchanged page is evaluated", async () => {
+  const html = page_(
+    "<h1>Step One</h1><h2>Step Two</h2><h3>Step Three</h3><h4>Step Four</h4>",
+    "All Steps Visible At Once",
+  );
+  const criteria: SuccessCriterion[] = [
+    { id: "step-1", type: "semantic_page_match", description: "Step one reached.", required: true },
+    { id: "step-2", type: "semantic_page_match", description: "Step two reached.", required: true },
+    { id: "step-3", type: "semantic_page_match", description: "Step three reached.", required: true },
+    { id: "step-4", type: "semantic_page_match", description: "Step four reached.", required: true },
+  ];
+  await withPage(html, async (page) => {
+    const satisfiedIds = new Set<string>();
+    for (let call = 0; call < 5; call += 1) {
+      const newlySatisfied = await evaluateSuccessCriteria(page, criteria, "", undefined, satisfiedIds);
+      newlySatisfied.forEach((id) => satisfiedIds.add(id));
+      assert.ok(newlySatisfied.length <= 1, `call ${call} satisfied ${newlySatisfied.length} new criteria at once`);
+    }
+    assert.deepEqual([...satisfiedIds].sort(), ["step-1", "step-2", "step-3", "step-4"]);
+  });
+});
+
+test("step-3 cannot become satisfied before step-2, and step-5 cannot become satisfied before steps 1-4, even against a single page carrying evidence for all five simultaneously", async () => {
+  const html = page_(
+    "<h1>Milestone One</h1><h2>Milestone Two</h2><h3>Milestone Three</h3><h4>Milestone Four</h4>" +
+      '<p data-testid="milestone-five">Milestone Five</p>',
+    "All Milestones",
+  );
+  const criteria: SuccessCriterion[] = [
+    { id: "step-1", type: "semantic_page_match", description: "Milestone one reached.", required: true },
+    { id: "step-2", type: "semantic_page_match", description: "Milestone two reached.", required: true },
+    { id: "step-3", type: "semantic_page_match", description: "Milestone three reached.", required: true },
+    { id: "step-4", type: "semantic_page_match", description: "Milestone four reached.", required: true },
+    {
+      id: "step-5",
+      type: "element_present",
+      description: "Milestone five marker present.",
+      config: { selector: '[data-testid="milestone-five"]' },
+      required: true,
+    },
+  ];
+  await withPage(html, async (page) => {
+    // Only step-1 satisfied so far -- step-3 and step-5 must not appear, despite the page
+    // carrying evidence for every milestone at once.
+    const fromOnlyStep1 = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set(["step-1"]));
+    assert.deepEqual(fromOnlyStep1, ["step-2"]);
+    assert.ok(!fromOnlyStep1.includes("step-3"));
+    assert.ok(!fromOnlyStep1.includes("step-5"));
+
+    // Steps 1-3 satisfied, step-4 still outstanding -- step-5 must not satisfy even though
+    // its own marker element is already present on the page.
+    const fromSteps1to3 = await evaluateSuccessCriteria(
+      page,
+      criteria,
+      "",
+      undefined,
+      new Set(["step-1", "step-2", "step-3"]),
+    );
+    assert.deepEqual(fromSteps1to3, ["step-4"]);
+    assert.ok(!fromSteps1to3.includes("step-5"));
+
+    // All of steps 1-4 satisfied: step-5 is now the active milestone and may satisfy.
+    const fromSteps1to4 = await evaluateSuccessCriteria(
+      page,
+      criteria,
+      "",
+      undefined,
+      new Set(["step-1", "step-2", "step-3", "step-4"]),
+    );
+    assert.deepEqual(fromSteps1to4, ["step-5"]);
+  });
+});
+
+test("an optional (required: false) criterion is always eligible, regardless of its declared position relative to an outstanding required milestone", async () => {
+  const html = page_(
+    "<h1>Required Milestone One</h1><h2>Optional Signal Present</h2><h3>Required Milestone Two</h3>",
+    "Mixed",
+  );
+  const criteria: SuccessCriterion[] = [
+    { id: "required-1", type: "semantic_page_match", description: "Required milestone one reached.", required: true },
+    { id: "optional-signal", type: "semantic_page_match", description: "Optional signal present.", required: false },
+    { id: "required-2", type: "semantic_page_match", description: "Required milestone two reached.", required: true },
+  ];
+  await withPage(html, async (page) => {
+    // required-2 is gated behind required-1 (still unsatisfied), but optional-signal --
+    // declared between them -- is unaffected and satisfies immediately, exactly as before
+    // ordered-milestone enforcement existed.
+    const satisfied = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set());
+    assert.deepEqual(satisfied.sort(), ["optional-signal", "required-1"]);
+    assert.ok(!satisfied.includes("required-2"));
+  });
+});
+
+test("milestoneEvidenceContext records one evidence entry per newly satisfied criterion, and none for a criterion the ordering gate skipped", async () => {
+  const html = page_("<h1>Milestone One</h1><h2>Milestone Two</h2>", "Two Milestones");
+  const criteria: SuccessCriterion[] = [
+    { id: "step-1", type: "semantic_page_match", description: "Milestone one reached.", required: true },
+    { id: "step-2", type: "semantic_page_match", description: "Milestone two reached.", required: true },
+  ];
+  await withPage(html, async (page) => {
+    const sink: MilestoneEvidenceRecord[] = [];
+    const context: MilestoneEvidenceContext = { sink, stepIndex: 3, phase: "post_action" };
+    const satisfied = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set(), undefined, undefined, context);
+    assert.deepEqual(satisfied, ["step-1"]);
+    assert.equal(sink.length, 1, "step-2 was gated and must never receive an evidence record");
+    assert.equal(sink[0]?.criterionId, "step-1");
+    assert.equal(sink[0]?.criterionType, "semantic_page_match");
+    assert.equal(sink[0]?.stepIndex, 3);
+    assert.equal(sink[0]?.phase, "post_action");
+    assert.equal(sink[0]?.evidenceSource, "semantic_page_match:deterministic");
+    assert.equal(typeof sink[0]?.score, "number");
+    assert.ok((sink[0]?.reason.length ?? 0) > 0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Navigational-chrome exclusion (docs/n8n-integration.md §9, the other half of the fix): a
+// link/CTA/menu item living in persistent site-wide navigation/header/footer chrome renders
+// identically on every page of a site, so it must never by itself prove a destination
+// described elsewhere was actually reached -- purely structural (standard HTML5 landmark
+// elements/ARIA landmark roles), never brand/site/vocabulary-specific.
+// ---------------------------------------------------------------------------------------
+
+test("a homepage whose own <nav> lists downstream destinations does not satisfy criteria describing those destinations (REGRESSION: reproduces the reported false-success bug's shape)", async () => {
+  const html = page_(
+    '<nav><a href="/offers">Offers</a><a href="/model">The Voyager Crossover</a><a href="/quote">Request a Quote</a></nav>' +
+      "<h1>Welcome Home</h1>",
+    "Home",
+  );
+  const offersCriterion: SuccessCriterion = {
+    id: "reached-offers",
+    type: "semantic_page_match",
+    description: "Current offers are shown.",
+  };
+  const modelCriterion: SuccessCriterion = {
+    id: "selected-model",
+    type: "semantic_page_match",
+    description: "The Voyager Crossover offer is selected.",
+  };
+  const quoteCriterion: SuccessCriterion = {
+    id: "opened-quote-form",
+    type: "semantic_page_match",
+    description: "The Request a Quote form is displayed.",
+  };
+  assert.equal(await isSatisfied(html, "", offersCriterion), false, "a homepage Offers nav link must not satisfy 'Navigate to the Offers page'");
+  assert.equal(await isSatisfied(html, "", modelCriterion), false, "a homepage model nav link must not satisfy 'Select the offer'");
+  assert.equal(await isSatisfied(html, "", quoteCriterion), false, "a homepage Request a Quote nav link must not satisfy 'Open the Request a Quote form'");
+});
+
+test("identical link text satisfies the criterion in ordinary page content but not inside <nav>", async () => {
+  const criterion: SuccessCriterion = {
+    id: "selected-model",
+    type: "semantic_page_match",
+    description: "The Voyager Crossover offer is selected.",
+  };
+  const inNav = page_('<nav><a href="/model">Voyager Crossover Offer</a></nav><h1>Home</h1>', "Home");
+  const inContent = page_('<h1>Offer Details</h1><a href="/model">Voyager Crossover Offer</a>', "Details");
+  assert.equal(await isSatisfied(inNav, "", criterion), false);
+  assert.equal(await isSatisfied(inContent, "", criterion), true);
+});
+
+test('a link inside <header>, <footer>, or [role="navigation"] is excluded identically to <nav>', async () => {
+  const criterion: SuccessCriterion = {
+    id: "selected-model",
+    type: "semantic_page_match",
+    description: "The Voyager Crossover offer is selected.",
+    config: { signals: ["interactiveElements"] },
+  };
+  const inHeader = page_('<header><a href="/model">Voyager Crossover Offer</a></header><h1>Home</h1>', "Home");
+  const inFooter = page_('<footer><a href="/model">Voyager Crossover Offer</a></footer><h1>Home</h1>', "Home");
+  const inAriaNav = page_(
+    '<div role="navigation"><a href="/model">Voyager Crossover Offer</a></div><h1>Home</h1>',
+    "Home",
+  );
+  assert.equal(await isSatisfied(inHeader, "", criterion), false);
+  assert.equal(await isSatisfied(inFooter, "", criterion), false);
+  assert.equal(await isSatisfied(inAriaNav, "", criterion), false);
 });

@@ -1,5 +1,6 @@
 import type { RecordedAction, SelectedAction } from "../types/actions.js";
 import type { RouteMemoryCandidate, RouteMemoryOutcome } from "../types/routeMemory.js";
+import type { MilestoneEvidenceRecord } from "../types/task-response.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 
@@ -10,6 +11,13 @@ export class RunState {
   readonly actionHistory: RecordedAction[] = [];
   readonly visitedUrls: string[] = [];
   readonly satisfiedCriteriaIds = new Set<string>();
+  /**
+   * One record per success criterion, appended the moment it first becomes satisfied -- see
+   * core/successEvaluator.ts's MilestoneEvidenceContext. Bounded implicitly by
+   * successCriteria.length: satisfiedCriteriaIds is a one-way ratchet, so a criterion
+   * contributes at most one record for the life of a run; no separate cap is needed.
+   */
+  readonly milestoneEvidence: MilestoneEvidenceRecord[] = [];
   /**
    * Fingerprint (url + sorted satisfied/missing required criteria ids) of the most
    * recently rejected stop_success decision, or undefined if none has been rejected yet.

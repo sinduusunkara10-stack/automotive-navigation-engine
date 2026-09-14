@@ -2,6 +2,7 @@ import type { Page } from "playwright";
 import type { SuccessCriterion } from "../types/task-request.js";
 import type { LastActionEvidence, SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import type { MilestoneRollup } from "../types/branch.js";
+import type { MilestoneEvidenceRecord } from "../types/task-response.js";
 import { readDataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
 import {
   ALL_SEMANTIC_SIGNALS,
@@ -74,6 +75,30 @@ const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
  * were requested), it is the evidence source data_layer_event/network_event criteria are
  * checked against -- see SuccessCriteriaEvidence and evaluateDataLayerEvent/
  * evaluateNetworkEvent below. It never affects any other criterion type.
+ *
+ * `milestoneEvidenceContext` is optional and off by default: when supplied (src/core/loop.ts
+ * passes state.milestoneEvidence as the sink, alongside the current stepIndex/phase), a
+ * MilestoneEvidenceRecord documenting *why* is appended for every criterion this call
+ * satisfies -- see MilestoneEvidenceContext and docs/n8n-integration.md §9f. Purely additive
+ * diagnostics: omitting it reproduces the exact prior return value/behaviour.
+ *
+ * Ordered-milestone gate (docs/n8n-integration.md §9f, the fix for the reported false-
+ * success regression): every distinct criterion **group** with `required !== false` on any
+ * member is one required milestone, milestones are read off `criteria` in declaration order
+ * (the same order groupCriteria's Map preserves), and only the *first* required milestone
+ * not yet satisfied -- per `alreadySatisfiedCriteriaIds` as it stood when this function was
+ * called, a snapshot never updated as criteria are satisfied within this same call -- is
+ * eligible to be evaluated at all this call. A later required milestone is not evaluated,
+ * let alone satisfied, until every earlier required milestone already is; at most one
+ * required milestone can newly satisfy per call, so a single, unchanged page observation can
+ * never satisfy more than one required milestone in one pass, however much of its vocabulary
+ * happens to overlap with later milestones' descriptions (e.g. a homepage's own nav bar
+ * advertising "Offers"/"Juke"/"Request a quote" must never itself satisfy the criteria for
+ * having reached those destinations). See computeEligibleCriteriaIds below. Optional
+ * (`required: false`) criteria are entirely unaffected -- always eligible, exactly as before
+ * this gate existed -- since they never gate `stop_success` and are purely informational
+ * (see getMissingRequiredCriteriaIds and docs/n8n-integration.md §9c's
+ * "configurator-entered" pattern).
  */
 export async function evaluateSuccessCriteria(
   page: Page,
@@ -83,17 +108,48 @@ export async function evaluateSuccessCriteria(
   alreadySatisfiedCriteriaIds?: ReadonlySet<string>,
   lastActionEvidence?: LastActionEvidence,
   criteriaEvidence?: SuccessCriteriaEvidence,
+  milestoneEvidenceContext?: MilestoneEvidenceContext,
 ): Promise<string[]> {
+  const satisfiedAtCallStart = alreadySatisfiedCriteriaIds ?? new Set<string>();
+  const eligibleCriteriaIds = computeEligibleCriteriaIds(criteria, satisfiedAtCallStart);
+
   const satisfied: string[] = [];
   for (const criterion of criteria) {
-    if (alreadySatisfiedCriteriaIds?.has(criterion.id)) {
+    if (satisfiedAtCallStart.has(criterion.id)) {
       continue;
     }
-    if (await evaluateSingle(page, criterion, objective, semanticVerifier, lastActionEvidence, criteriaEvidence)) {
+    if (!eligibleCriteriaIds.has(criterion.id)) {
+      continue;
+    }
+    const result = await evaluateSingle(page, criterion, objective, semanticVerifier, lastActionEvidence, criteriaEvidence);
+    if (result.satisfied) {
       satisfied.push(criterion.id);
+      if (milestoneEvidenceContext) {
+        milestoneEvidenceContext.sink.push({
+          criterionId: criterion.id,
+          criterionType: criterion.type,
+          description: criterion.description,
+          stepIndex: milestoneEvidenceContext.stepIndex,
+          phase: milestoneEvidenceContext.phase,
+          pageUrl: page.url(),
+          pageTitle: await page.title().catch(() => ""),
+          evidenceSource: result.evidenceSource,
+          ...(result.score !== undefined ? { score: result.score } : {}),
+          ...(result.matchedValue !== undefined ? { matchedValue: result.matchedValue } : {}),
+          reason: result.reason,
+        });
+      }
     }
   }
   return satisfied;
+}
+
+/** See evaluateSuccessCriteria's own doc comment on `milestoneEvidenceContext`. */
+export interface MilestoneEvidenceContext {
+  /** Mutated in place: one record is pushed per criterion this call newly satisfies. */
+  sink: MilestoneEvidenceRecord[];
+  stepIndex: number;
+  phase: "pre_action" | "post_action";
 }
 
 /**
@@ -146,6 +202,50 @@ function groupCriteria(criteria: readonly SuccessCriterion[]): CriterionGroup[] 
     members,
     required: members.some((member) => member.required !== false),
   }));
+}
+
+/**
+ * Which criteria are eligible to be evaluated (and thus newly satisfied) by one call to
+ * evaluateSuccessCriteria -- see that function's own doc comment for the full rationale.
+ * Every non-required group's members are always eligible (unordered, unaffected by this
+ * gate). For required groups: a group that is already satisfied (per
+ * `satisfiedCriteriaIdsAtCallStart`) stays eligible too, but harmlessly so -- an
+ * already-satisfied criterion is never actually re-evaluated regardless (see the
+ * `satisfiedAtCallStart.has(criterion.id)` short-circuit in evaluateSuccessCriteria). The
+ * *first* required group not yet satisfied, in declaration order, is this call's one active
+ * milestone and is eligible; every required group after it is not eligible at all this
+ * call.
+ */
+function computeEligibleCriteriaIds(
+  criteria: readonly SuccessCriterion[],
+  satisfiedCriteriaIdsAtCallStart: ReadonlySet<string>,
+): Set<string> {
+  const eligible = new Set<string>();
+  let activeRequiredMilestoneClaimed = false;
+  for (const group of groupCriteria(criteria)) {
+    if (!group.required) {
+      for (const member of group.members) {
+        eligible.add(member.id);
+      }
+      continue;
+    }
+    const groupAlreadySatisfied = group.members.some((member) => satisfiedCriteriaIdsAtCallStart.has(member.id));
+    if (groupAlreadySatisfied) {
+      for (const member of group.members) {
+        eligible.add(member.id);
+      }
+      continue;
+    }
+    if (activeRequiredMilestoneClaimed) {
+      // A later, still-unsatisfied required milestone -- not eligible this call.
+      continue;
+    }
+    for (const member of group.members) {
+      eligible.add(member.id);
+    }
+    activeRequiredMilestoneClaimed = true;
+  }
+  return eligible;
 }
 
 export function getMissingRequiredCriteriaIds(
@@ -246,6 +346,23 @@ export function computeMilestoneRollup(
   };
 }
 
+/**
+ * Result of evaluating one criterion, carrying enough evidence detail for a
+ * MilestoneEvidenceRecord (see evaluateSuccessCriteria) without changing
+ * evaluateSuccessCriteria's own public string[]-of-satisfied-ids return shape. Purely
+ * internal -- never exported, never constructed or inspected by a test directly.
+ */
+interface SingleCriterionResult {
+  satisfied: boolean;
+  /** Which mechanism produced this verdict, e.g. "url_pattern", "semantic_page_match:deterministic". */
+  evidenceSource: string;
+  /** The literal pattern/selector/match object involved, when applicable. */
+  matchedValue?: string;
+  /** Deterministic score or verifier confidence, when applicable (semantic_page_match only). */
+  score?: number;
+  reason: string;
+}
+
 async function evaluateSingle(
   page: Page,
   criterion: SuccessCriterion,
@@ -253,18 +370,39 @@ async function evaluateSingle(
   semanticVerifier?: SemanticCriterionVerifier,
   lastActionEvidence?: LastActionEvidence,
   criteriaEvidence?: SuccessCriteriaEvidence,
-): Promise<boolean> {
+): Promise<SingleCriterionResult> {
   switch (criterion.type) {
     case "url_pattern": {
       const pattern = typeof criterion.config?.pattern === "string" ? criterion.config.pattern : undefined;
-      return pattern !== undefined && matchesUrlPattern(page.url(), pattern);
+      if (pattern === undefined) {
+        return { satisfied: false, evidenceSource: "url_pattern", reason: "No config.pattern configured." };
+      }
+      const url = page.url();
+      const satisfied = matchesUrlPattern(url, pattern);
+      return {
+        satisfied,
+        evidenceSource: "url_pattern",
+        matchedValue: pattern,
+        reason: satisfied
+          ? `Current URL matched pattern "${pattern}".`
+          : `Current URL did not match pattern "${pattern}".`,
+      };
     }
     case "element_present": {
       const selector = typeof criterion.config?.selector === "string" ? criterion.config.selector : undefined;
       if (!selector) {
-        return false;
+        return { satisfied: false, evidenceSource: "element_present", reason: "No config.selector configured." };
       }
-      return (await page.locator(selector).count()) > 0;
+      const count = await page.locator(selector).count();
+      return {
+        satisfied: count > 0,
+        evidenceSource: "element_present",
+        matchedValue: selector,
+        reason:
+          count > 0
+            ? `Selector "${selector}" matched ${count} element(s).`
+            : `Selector "${selector}" matched no elements.`,
+      };
     }
     case "semantic_page_match": {
       return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier, lastActionEvidence);
@@ -278,7 +416,11 @@ async function evaluateSingle(
     // element_text_match / custom are not evaluated by this generic core evaluator; a
     // capture module or a future criterion handler owns them.
     default:
-      return false;
+      return {
+        satisfied: false,
+        evidenceSource: criterion.type,
+        reason: `Criterion type "${criterion.type}" is not evaluated by the core engine.`,
+      };
   }
 }
 
@@ -321,17 +463,26 @@ async function evaluateDataLayerEvent(
   page: Page,
   criterion: SuccessCriterion,
   criteriaEvidence?: SuccessCriteriaEvidence,
-): Promise<boolean> {
+): Promise<SingleCriterionResult> {
   const match = parseMatchConfig(criterion.config);
   if (!match) {
-    return false;
+    return { satisfied: false, evidenceSource: "data_layer_event", reason: "No config.match configured." };
   }
   const live = await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] as Record<string, unknown>[] }));
   const candidates: readonly Record<string, unknown>[] = [
     ...(live.available ? live.raw : []),
     ...(criteriaEvidence?.dataLayerEntries ?? []),
   ];
-  return candidates.some((entry) => matchesEventFields(entry, match));
+  const matched = candidates.some((entry) => matchesEventFields(entry, match));
+  const matchText = JSON.stringify(match);
+  return {
+    satisfied: matched,
+    evidenceSource: "data_layer_event",
+    matchedValue: matchText,
+    reason: matched
+      ? `A dataLayer entry matched config.match ${matchText}.`
+      : `No dataLayer entry matched config.match ${matchText}.`,
+  };
 }
 
 /**
@@ -348,18 +499,27 @@ async function evaluateDataLayerEvent(
  * criterion can never be satisfied, exactly like element_present with no matching
  * selector.
  */
-function evaluateNetworkEvent(criterion: SuccessCriterion, criteriaEvidence?: SuccessCriteriaEvidence): boolean {
+function evaluateNetworkEvent(criterion: SuccessCriterion, criteriaEvidence?: SuccessCriteriaEvidence): SingleCriterionResult {
   const match = parseMatchConfig(criterion.config);
   if (!match) {
-    return false;
+    return { satisfied: false, evidenceSource: "network_event", reason: "No config.match configured." };
   }
   const candidates = criteriaEvidence?.networkEvents ?? [];
-  return candidates.some((entry) => {
+  const matched = candidates.some((entry) => {
     const params = entry.params;
     const flattened: Record<string, unknown> =
       typeof params === "object" && params !== null && !Array.isArray(params) ? { ...entry, ...params } : entry;
     return matchesEventFields(flattened, match);
   });
+  const matchText = JSON.stringify(match);
+  return {
+    satisfied: matched,
+    evidenceSource: "network_event",
+    matchedValue: matchText,
+    reason: matched
+      ? `A network-event record matched config.match ${matchText}.`
+      : `No network-event record matched config.match ${matchText}.`,
+  };
 }
 
 /**
@@ -384,10 +544,14 @@ async function evaluateSemanticPageMatch(
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
   lastActionEvidence?: LastActionEvidence,
-): Promise<boolean> {
+): Promise<SingleCriterionResult> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
-    return false;
+    return {
+      satisfied: false,
+      evidenceSource: "semantic_page_match",
+      reason: "Objective and criterion description were both empty; nothing to match against.",
+    };
   }
 
   const minScore =
@@ -402,11 +566,21 @@ async function evaluateSemanticPageMatch(
   const pageSignals = await gatherSemanticPageSignals(page);
   const score = scoreSemanticPageMatch(anchorText, pageSignals, signals);
   if (score.overall >= minScore) {
-    return true;
+    return {
+      satisfied: true,
+      evidenceSource: "semantic_page_match:deterministic",
+      score: score.overall,
+      reason: `Deterministic vocabulary-overlap score ${score.overall.toFixed(2)} met minScore ${minScore}.`,
+    };
   }
 
   if (!semanticVerifier) {
-    return false;
+    return {
+      satisfied: false,
+      evidenceSource: "semantic_page_match:deterministic",
+      score: score.overall,
+      reason: `Deterministic vocabulary-overlap score ${score.overall.toFixed(2)} fell short of minScore ${minScore}; no semanticVerifier was configured.`,
+    };
   }
 
   const verification = await semanticVerifier.verify({
@@ -415,7 +589,14 @@ async function evaluateSemanticPageMatch(
     pageEvidence: pageSignals,
     ...(lastActionEvidence ? { lastActionEvidence } : {}),
   });
-  return verification.satisfied;
+  return {
+    satisfied: verification.satisfied,
+    evidenceSource: "semantic_page_match:verifier",
+    score: verification.confidence,
+    reason: verification.satisfied
+      ? `semanticVerifier confirmed a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}`
+      : `semanticVerifier did not confirm a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}`,
+  };
 }
 
 // A NUL character can never legitimately appear in a caller-supplied URL pattern, so it's
