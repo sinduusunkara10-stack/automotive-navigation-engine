@@ -574,21 +574,32 @@ export async function runStep(params: {
   // one more bounded chance. Applies identically whether stop_blocked was proposed directly
   // by the reasoning layer or substituted by the safety layer for a rejected decision -- the
   // engine never inspects which. Only engaged when go_back is itself one of this task's
-  // allowedActions (never a way around that restriction), when there is a previous page to
-  // actually go back to (visitedUrls only exceeds 1 once at least one prior step has already
-  // run), and when one more go_back would not itself already exceed maxBacktracks/maxSteps
-  // -- those hard ceilings are re-checked independently at the top of the next runStep call
-  // regardless, so this is a conservative early check, never the sole enforcement of either.
-  // Never engaged while a branch is actively exploring (branchActiveAndExploring above
-  // already handled or is handling that case) -- PR #41 remains the fallback only outside
-  // an active branch.
+  // allowedActions (never a way around that restriction), when there is a previous *distinct*
+  // page to actually go back to, and when one more go_back would not itself already exceed
+  // maxBacktracks/maxSteps -- those hard ceilings are re-checked independently at the top of
+  // the next runStep call regardless, so this is a conservative early check, never the sole
+  // enforcement of either. Never engaged while a branch is actively exploring
+  // (branchActiveAndExploring above already handled or is handling that case) -- PR #41
+  // remains the fallback only outside an active branch.
+  //
+  // Safe replanning / go_back fix: state.distinctVisitedUrls.size (not visitedUrls.length,
+  // and not a step count) is what actually answers "has the browser genuinely been on more
+  // than one page this run" -- visitedUrls grows by one every single step regardless of
+  // whether the URL changed, which previously let a run stuck re-observing the same
+  // (falsely-reported-successful) page for several steps look identical to one that had
+  // genuinely visited a second page. The explicit "not already on about:blank" check is
+  // additional, defense-in-depth protection against ever selecting go_back from a
+  // content-free state at all -- see actions/goBack.ts, which now also refuses to execute
+  // such a call itself, making a blind go_back from about:blank impossible regardless of
+  // which of these two layers would otherwise have let it through.
   const journeyReplanningEligible =
     !branchActiveAndExploring &&
     !branchReturnAttempted &&
     effectiveAction.type === "stop_blocked" &&
     state.journeyReplanningAttempts < MAX_JOURNEY_REPLANNING_ATTEMPTS &&
     task.safety.allowedActions.includes("go_back") &&
-    state.visitedUrls.length > 1 &&
+    state.distinctVisitedUrls.size > 1 &&
+    observation.url !== "about:blank" &&
     state.backtrackCount < task.limits.maxBacktracks &&
     state.stepCount + 1 < task.limits.maxSteps;
 

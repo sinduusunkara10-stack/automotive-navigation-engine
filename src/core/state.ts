@@ -10,6 +10,19 @@ export class RunState {
   readonly startedAtMs = Date.now();
   readonly actionHistory: RecordedAction[] = [];
   readonly visitedUrls: string[] = [];
+  /**
+   * Safe replanning / go_back fix: distinct URLs actually observed this run, as opposed to
+   * visitedUrls' per-step (possibly repeated) log. core/loop.ts's journey-replanning
+   * eligibility check uses this -- not visitedUrls.length -- to decide whether there is
+   * genuinely a different prior page to go back to. visitedUrls.length grows by one on
+   * every single step regardless of whether the observed URL actually changed (e.g. a click
+   * later found not to have navigated the page at all still gets a fresh observation next
+   * step), so it was never a safe proxy for "the browser has real history behind it" -- a
+   * run stuck observing the same URL for several steps in a row previously looked, from
+   * that count alone, exactly like a run that had genuinely visited two different pages.
+   * This Set collapses repeats, so it only grows when the observed URL is actually new.
+   */
+  readonly distinctVisitedUrls = new Set<string>();
   readonly satisfiedCriteriaIds = new Set<string>();
   /**
    * One record per success criterion, appended the moment it first becomes satisfied -- see
@@ -93,6 +106,7 @@ export class RunState {
 
   recordVisit(url: string): void {
     this.visitedUrls.push(url);
+    this.distinctVisitedUrls.add(url);
   }
 
   recordAction(action: SelectedAction, observationBefore: { url: string; title: string }): void {
