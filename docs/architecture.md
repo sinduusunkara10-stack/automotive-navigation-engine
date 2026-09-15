@@ -224,14 +224,18 @@ safety nets if a reasoning provider keeps proposing the exact same broken target
 
 The reasoning layer's own latitude to interact with a consent/preference-shaped control at all is
 governed by `safety.consentInteractionPolicy` (`types/task-request.ts`) -- `"reject_optional"`
-(the default), `"essential_only"`, `"accept_optional"` (an explicit, never-default opt-in), or
+(the default), `"essential_only"`, `"accept_optional"` (an explicit, never-default opt-in to
+actually grant optional consent when a control for doing so is visible, not merely a last resort
+for unblocking a control that's reachable regardless of the consent choice made), or
 `"do_not_interact"`. This is surfaced to the model as one short, plain-language system-prompt
 clause (`src/reasoning/promptBuilder.ts`) driven entirely by the enum value -- there is no
 CTA-word dictionary, translation table, or vendor-specific selector anywhere in the engine. Which
 *specific* control best fits the resulting semantic description (e.g. "a control that declines
 optional data collection") is left to the model's own judgement, exactly like every other action
 choice in this prompt (e.g. preferring a "summary" vs. "continue"-purposed control). The engine
-never keyword-matches "accept"/"reject" text and never itself decides which button is which.
+never keyword-matches "accept"/"reject" text and never itself decides which button is which -- see
+"Deterministic consent-policy enforcement" below for how the engine still checks the *outcome* of
+that judgement without ever inspecting the control itself.
 
 Dismissing a blocker is never itself treated as satisfying the objective: a click's
 `actionAnalytics.newlySatisfiedCriteriaIds` only ever reflects a success criterion the engine
@@ -341,6 +345,49 @@ Separately, `safety.consentInteractionPolicy`'s `"reject_optional"` system-promp
 control is preferred over a manage/settings control even when both are visible -- still a
 plain-language instruction to the model, not a keyword-matched or enforced choice, consistent with
 this mechanism's existing design.
+
+### Deterministic consent-policy enforcement
+
+A real production run (Nissan UK) showed that the plain-language prompt clause above is not, by
+itself, enough: `consentInteractionPolicy` was `"accept_optional"`, but the reasoning layer chose
+the necessary-only cookie-banner control anyway, reasoning that minimal consent was preferred --
+because a cookie banner's necessary-only control almost always dismisses the banner just as well
+as its accept-all counterpart, `"accept_optional"`'s previous wording ("solely to clear a blocking
+control... never when the objective is reachable without it") made it behaviourally
+indistinguishable from `"reject_optional"` in the exact scenario it exists for, and nothing in the
+engine checked the *outcome* of the model's choice against the requested policy.
+
+Two changes close this gap, both staying inside this mechanism's existing generic, semantic-
+judgement design:
+
+- `"accept_optional"`'s prompt wording (above) no longer gates granting optional consent behind
+  blocking-overlay necessity: it now states plainly that accepting optional consent is itself the
+  desired outcome under this policy, to be preferred whenever a control for it is visible.
+- Every decision's structured output now also includes a required, self-reported
+  `consentControlIntent` (`types/consentControl.ts`): `"grants_optional_consent"`,
+  `"declines_optional_consent"`, `"opens_consent_settings"`, or `"not_consent_related"` (the
+  correct value for the overwhelming majority of decisions) -- classified by the model using the
+  same generic, language-agnostic semantic judgement as everything else in this prompt, never a
+  fixed wordlist. `src/safety/consentPolicyGuard.ts`'s `isConsentIntentCompliant` then
+  deterministically compares this self-report against `consentInteractionPolicy`, with no
+  knowledge of the control's label, selector, or vendor whatsoever -- it only compares two
+  already-classified enum values.
+
+This check runs twice, mirroring the existing double layer already used for domain/redirect
+safety (`checkNavigationAllowed`, used both by `validateClaudeDecision.ts` and independently by
+`src/safety/index.ts`): first inside `validateClaudeDecision.ts`, Claude-specific and
+pre-dispatch, where a contradicting decision is rejected as `consent_policy_violation` and given
+one bounded corrective retry (the same `CORRECTIVE_RETRY_CATEGORIES` machinery
+`src/reasoning/claudeReasoningProvider.ts` already uses for a malformed/invalid response, with an
+addendum naming the actual policy instead of a generic schema complaint); second, independently of
+which provider produced the decision, inside `src/safety/index.ts`'s `validateDecision`, which
+flags the same `consent_policy_violation` and forces `stop_blocked` exactly like any other
+guardrail trip if a non-compliant decision ever reaches it regardless. A decision that still
+contradicts the policy after the one corrective retry stops the run safely with that flag rather
+than ever silently dispatching the opposite of what was requested -- audit trail for all of this
+(the resolved policy for the run, and each decision's `consentControlIntent`/
+`consentPolicyCompliant`) is on `diagnostics.reasoningProvider`
+(`REASONING_PROVIDER_DIAGNOSTICS_VERSION` "1.2.0").
 
 ### Bounded journey replanning
 
@@ -828,6 +875,10 @@ as not-yet-built rather than removed from the plan — see §11.
     limitsGuard.ts
     repeatedActionGuard.ts
     loopDetector.ts
+    consentPolicyGuard.ts   # deterministic ConsentInteractionPolicy vs. self-reported
+                            # ConsentControlIntent check (see "Deterministic consent-policy
+                            # enforcement" above) -- reused by both validateClaudeDecision.ts
+                            # and this package's own validateDecision()
     index.ts               # aggregates the guards into one validateDecision() call
 
   /types                   # TS types mirroring /schemas/*.json
@@ -835,6 +886,10 @@ as not-yet-built rather than removed from the plan — see §11.
     captureModule.ts
     task-request.ts
     task-response.ts
+    consentControl.ts       # ConsentControlIntent -- a reasoning/diagnostics-only vocabulary
+                            # type, never part of the request wire shape, kept in its own file
+                            # so src/types stays self-contained (no src/types file imports
+                            # outside src/types)
     routeMemory.ts          # Route Memory (see §16) shared type shapes -- kept here (not in
                             # core/routeMemory.ts) so src/reasoning can depend on the type
                             # shapes without depending on src/core's implementation module

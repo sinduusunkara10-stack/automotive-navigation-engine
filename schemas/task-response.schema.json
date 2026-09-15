@@ -1323,6 +1323,20 @@
         "elementSelection": {
           "$ref": "#/$defs/promptElementSelectionDiagnostic",
           "description": "Bounded diagnostic of which interactive elements from this step's Observation actually reached the model's prompt for this attempt, and why."
+        },
+        "consentControlIntent": {
+          "type": "string",
+          "enum": [
+            "grants_optional_consent",
+            "declines_optional_consent",
+            "opens_consent_settings",
+            "not_consent_related"
+          ],
+          "description": "This decision's self-reported consent semantics (see safety.consentInteractionPolicy's own description). Present whenever the provider produced a parseable response -- on acceptance and on a consent_policy_violation rejection alike -- so the full attempt-by-attempt consent history is auditable even when nothing was ultimately dispatched."
+        },
+        "consentPolicyCompliant": {
+          "type": "boolean",
+          "description": "Whether consentControlIntent (above) complied with this run's safety.consentInteractionPolicy, per the engine's deterministic enforcement. Present alongside consentControlIntent."
         }
       }
     },
@@ -1413,9 +1427,9 @@
       "properties": {
         "version": {
           "type": "string",
-          "description": "Version of this reasoning-provider diagnostics structure, e.g. \"1.1.0\". Bumped from \"1.0.0\" to \"1.1.0\" for the additive, optional decisions[].elementSelection diagnostic -- no existing field removed or renamed.",
+          "description": "Version of this reasoning-provider diagnostics structure, e.g. \"1.2.0\". Bumped from \"1.1.0\" to \"1.2.0\" for the consent-policy-enforcement audit trail (see safety.consentInteractionPolicy's own description): the additive, optional consentInteractionPolicy (the resolved policy for this run) and decisions[].consentControlIntent/consentPolicyCompliant -- no existing field removed or renamed. Bumped from \"1.0.0\" to \"1.1.0\" earlier for the additive, optional decisions[].elementSelection diagnostic -- no existing field removed or renamed.",
           "pattern": "^\\d+\\.\\d+\\.\\d+$",
-          "const": "1.1.0"
+          "const": "1.2.0"
         },
         "provider": {
           "type": "string",
@@ -1460,6 +1474,16 @@
           "type": "integer",
           "minimum": 0,
           "description": "Number of retry attempts (beyond each decision's first attempt) made this run."
+        },
+        "consentInteractionPolicy": {
+          "type": "string",
+          "enum": [
+            "reject_optional",
+            "accept_optional",
+            "essential_only",
+            "do_not_interact"
+          ],
+          "description": "The resolved safety.consentInteractionPolicy (task-request.schema.json) this run actually enforced -- present so a caller can audit which policy applied even when the request itself omitted the field and the documented default (\"reject_optional\") applied instead. Absent only for a provider (e.g. the mock provider) that never resolved a policy."
         },
         "decisions": {
           "type": "array",

@@ -64,6 +64,7 @@ function clickPayload(targetElementId: string): ClaudeDecisionPayload {
     targetElementId,
     reason: "Continue is the visible path toward the objective.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
 }
 
@@ -71,6 +72,7 @@ const STOP_SUCCESS_PAYLOAD: ClaudeDecisionPayload = {
   action: "stop_success",
   reason: "The success page has been reached.",
   confidence: 0.95,
+  consentControlIntent: "not_consent_related",
 };
 
 test("a full run through a real ClaudeReasoningProvider (fake model client) surfaces accurate diagnostics.reasoningProvider", async () => {
@@ -104,7 +106,7 @@ test("a full run through a real ClaudeReasoningProvider (fake model client) surf
 
     const diagnostics = response.diagnostics.reasoningProvider;
     assert.ok(diagnostics, "expected diagnostics.reasoningProvider to be present");
-    assert.equal(diagnostics?.version, "1.1.0");
+    assert.equal(diagnostics?.version, "1.2.0");
     assert.equal(diagnostics?.provider, "claude");
     assert.equal(diagnostics?.model, "claude-sonnet-5");
     assert.equal(diagnostics?.callCount, 3);

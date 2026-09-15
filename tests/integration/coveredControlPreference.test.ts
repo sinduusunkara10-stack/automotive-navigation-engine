@@ -90,7 +90,12 @@ class CoveredAwareModelClient implements ReasoningModelClient {
     const requiredIds = payload.successCriteria.filter((c) => c.required).map((c) => c.id);
     const allRequiredSatisfied = requiredIds.every((id) => payload.satisfiedCriteriaIds.includes(id));
     if (allRequiredSatisfied && payload.allowedActions.includes("stop_success")) {
-      return this.result({ action: "stop_success", reason: "Required criteria satisfied.", confidence: 0.95 });
+      return this.result({
+        action: "stop_success",
+        reason: "Required criteria satisfied.",
+        confidence: 0.95,
+        consentControlIntent: "not_consent_related",
+      });
     }
 
     const isReachable = (el: PromptPageElement) => el.visible !== false && !el.disabled && !el.covered;
@@ -104,6 +109,7 @@ class CoveredAwareModelClient implements ReasoningModelClient {
         targetElementId: preferredTarget.id,
         reason: `"${preferredTarget.accessibleName}" is uncovered and matches the objective.`,
         confidence: 0.9,
+        consentControlIntent: "not_consent_related",
       });
     }
 
@@ -116,10 +122,16 @@ class CoveredAwareModelClient implements ReasoningModelClient {
         targetElementId: uncoveredBlocker.id,
         reason: `Clearing blocking control "${uncoveredBlocker.accessibleName}" before the objective control is reachable.`,
         confidence: 0.7,
+        consentControlIntent: "not_consent_related",
       });
     }
 
-    return this.result({ action: "stop_failure", reason: "No reachable control available.", confidence: 0.5 });
+    return this.result({
+      action: "stop_failure",
+      reason: "No reachable control available.",
+      confidence: 0.5,
+      consentControlIntent: "not_consent_related",
+    });
   }
 
   private result<TPayload>(payload: ClaudeDecisionPayload): ReasoningModelResult<TPayload> {

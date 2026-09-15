@@ -1238,6 +1238,7 @@ async function obtainDecision(params: {
       actionHistory: state.actionHistory,
       visitedUrls: state.visitedUrls,
     },
+    consentControlIntent: decision.consentControlIntent,
   });
 
   const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
