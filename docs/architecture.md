@@ -1971,20 +1971,38 @@ interactive elements are required, so a single incidentally-injected ad/analytic
 element is never mistaken for a real overlay (a genuine modal/drawer almost always introduces
 several controls — heading, close control, its own actions — at once).
 
-`actions/click.ts` captures a pre-click `InteractionSnapshot` unconditionally, before anything
-else touches the page. When a direct click throws a Playwright interception timeout
+**Target-attributable click success.** `detectClickSideEffect` above is a whole-page, target-blind
+comparison: a click on one control cannot be told apart, from that comparison alone, from an
+unrelated element (a cookie banner, an ad, an unrelated timer-driven widget) happening to mutate
+at the same moment — exactly the false-positive class a real production incident demonstrated (a
+click intercepted by an unrelated consent overlay was reported as successful because the overlay
+itself, not the clicked control, changed state around the same time). `detectTargetAttributableSideEffect(before, after, targetBefore, targetAfter)` requires the
+observed change to be attributable to the clicked target specifically: a genuine dialog/modal
+signal (`role="dialog"`/`aria-modal="true"`/native `<dialog>`) is still trusted unconditionally,
+exactly as before — that markup is a standards-based fact the page author chose to declare, not a
+heuristic, and very few things other than the user's own just-dispatched click cause one to
+appear in the same bounded settle window. Only the *weaker* elements-count fallback signal (no
+dialog markup at all) now additionally requires target self-evidence: the target's own
+`aria-expanded` flipping to `"true"`, the target becoming newly covered (its own click opened a
+surface that now sits on top of it), or the target disappearing from the DOM entirely. An
+unattributed whole-page mutation with zero involvement of the clicked target — no dialog, no
+effect on the target itself — now correctly reports `detected: false`.
+
+`actions/click.ts` captures a pre-click `InteractionSnapshot` and the target's own
+pre-click state (via `readElementState`/`targetElementSnapshot`) unconditionally, before
+anything else touches the page. When a direct click throws a Playwright interception timeout
 specifically classified as `"intercepted"` (never the broader `"timeout"` catch-all, and never
 `"disabled"`), a bounded, mutation-aware settle wait (`waitForInteractionSideEffect`, polling
 every 100ms up to `CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS` = 1000ms, exiting as soon as a side effect
-is recognised rather than always waiting out the full budget) re-captures the snapshot and
-compares it. If evidence is found, the click is reported as a success
-(`ActionResult.clickSideEffectDetected: true`) and the `destinationUrl` fallback is never
-invoked at all — the overlay's own DOM state is preserved exactly as the browser rendered it, so
-the next observation exposes its controls normally. A single additional lightweight snapshot
-(no extra wait budget) is also taken after an ordinary, non-intercepted non-navigating click
-success, so a click that opens a same-document modal *without* ever looking intercepted is
-equally recognised — this feeds §18's route-progress classification below as much as the
-recovery path does.
+is recognised rather than always waiting out the full budget) re-captures the snapshot and the
+target's own state, and compares both via `detectTargetAttributableSideEffect`. If evidence is
+found, the click is reported as a success (`ActionResult.clickSideEffectDetected: true`) and the
+`destinationUrl` fallback is never invoked at all — the overlay's own DOM state is preserved
+exactly as the browser rendered it, so the next observation exposes its controls normally. A
+single additional lightweight snapshot (no extra wait budget) is also taken after an ordinary,
+non-intercepted non-navigating click success, so a click that opens a same-document modal
+*without* ever looking intercepted is equally recognised — this feeds §18's route-progress
+classification below as much as the recovery path does.
 
 ### Fallback verification (`src/actions/click.ts`)
 
@@ -1992,12 +2010,24 @@ recovery path does.
 different origin/path/query as inherently verified (an ordinary GET navigation is exactly what
 the fallback exists for — see the original design note in §5's "Action-execution consistency").
 A fallback that only changes the URL's fragment or query on the *same* path is not assumed
-equivalent to a real click: the same bounded `InteractionSnapshot` comparison used for
-side-effect detection is applied against the pre-click baseline, and `ActionResult.
-fallbackVerified` is set accordingly (`true`/`false`, always present when a fallback was used).
-An unverified fallback is still reported as a successful *action* (the dispatch itself
-mechanically succeeded — the run is not blocked on it), but it is never trusted as evidence of
-real progress by the route-progress classification below.
+equivalent to a real click: the target's own live state is re-read after the fallback navigation
+(via `readElementState`) and compared, together with the pre-click `InteractionSnapshot`
+baseline, via `detectTargetAttributableSideEffect` — the same target-attribution requirement
+side-effect detection above uses. `ActionResult.fallbackVerified` is set accordingly
+(`true`/`false`, always present when a fallback was used), and `ActionResult.
+fallbackVerificationReason` names the specific mechanism (`"path_changed"`, a
+`ClickSideEffectType` value, or `"unverified_hash_or_query_only_change"`).
+
+**`fallbackVerified` is no longer diagnostic-only.** Previously an unverified fallback was still
+reported as a successful action (the dispatch itself mechanically succeeded, so the run was never
+blocked on it) — only excluded from the route-progress classification below counting it as
+`"advanced"`. That let a fallback whose only evidence was an unattributed URL change be silently
+reported as journey progress at the `ActionResult`/`StepLog` level even though nothing about it
+was ever confirmed. `ActionResult.success` is now `false` whenever `fallbackVerified` is `false`,
+with `staleTarget: true` — the same non-fatal, bounded recovery classification a directly-stale
+target already used (`MAX_STALE_TARGET_RECOVERY_ATTEMPTS` in `core/loop.ts`), giving the
+reasoning layer a further genuine chance instead of silently reporting unverified progress as
+success.
 
 ### Modal-aware observation and prompt prioritisation (`src/observation/observationBuilder.ts`, `src/reasoning/promptBuilder.ts`, `src/actions/scroll.ts`)
 
