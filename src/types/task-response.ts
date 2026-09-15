@@ -139,28 +139,42 @@ export interface ActionResult {
    */
   staleTarget?: boolean;
   /**
-   * Overlay-click-detection fix (see actions/click.ts): true only when a bounded post-click
-   * check found generic evidence (a newly-appeared dialog/modal surface, or a materially
-   * different set of visible interactive controls) that this click produced a real
+   * Overlay-click-detection fix (see actions/click.ts), target-attributable click-success
+   * fix: true only when a bounded post-click check found generic evidence, attributable to
+   * the clicked target specifically (its own aria-expanded/covered state changing, or it
+   * disappearing -- see detectTargetAttributableSideEffect), that this click produced a real
    * interaction-state change -- including the case where the direct dispatch appeared to
    * fail as intercepted/timed-out because the overlay it opened came to cover the trigger
    * itself, so the click is reported as a success on that basis instead of falling through
-   * to the destinationUrl fallback. Absent (never false), consistent with every other
-   * boolean evidence flag in this schema, whenever no such evidence was found or no check
-   * applied.
+   * to the destinationUrl fallback. An unrelated element elsewhere on the page changing at
+   * the same moment (e.g. a cookie/consent overlay re-rendering independently of this click)
+   * no longer counts. Absent (never false), consistent with every other boolean evidence
+   * flag in this schema, whenever no such evidence was found or no check applied.
    */
   clickSideEffectDetected?: boolean;
   /**
-   * Overlay-click-detection / fallback-verification fix (see actions/click.ts): present
-   * only when a generic destinationUrl navigation fallback was actually used to recover an
-   * unactionable click. True means the fallback's resulting page state was verified as a
-   * genuine, meaningful change (a different page path/origin, or generic evidence of a new
+   * Overlay-click-detection / fallback-verification fix (see actions/click.ts), target-
+   * attributable click-success fix: present only when a generic destinationUrl navigation
+   * fallback was actually used to recover an unactionable click. True means the fallback's
+   * resulting page state was verified as a genuine, meaningful change attributable to the
+   * clicked target (a different page path/origin, or target-attributable evidence of a new
    * interactive surface) rather than assumed equivalent to a real click; false means the
    * fallback only changed the URL (e.g. a same-document hash-only navigation) with no
-   * verified further evidence -- core/loop.ts's route-memory classification never records
-   * such an unverified fallback as "advanced" on the strength of the URL change alone.
+   * verified further evidence. This is no longer diagnostic-only: `success` itself is false
+   * whenever fallbackVerified is false (see `staleTarget` below) -- an unverified fallback is
+   * never reported as a successful action, not merely excluded from route-memory's
+   * "advanced" classification.
    */
   fallbackVerified?: boolean;
+  /**
+   * Fallback-verification fix (see actions/click.ts's verifyFallbackNavigation): present
+   * whenever fallbackVerified is present, naming the specific mechanism that produced that
+   * verdict -- e.g. "path_changed" (a genuinely different page was reached), a
+   * ClickSideEffectType value (target-attributable evidence found), or
+   * "unverified_hash_or_query_only_change" (fallbackVerified: false). Purely explanatory --
+   * never itself a gating condition anywhere in the engine.
+   */
+  fallbackVerificationReason?: string;
   /**
    * Popup/new-context capture (see src/capture-modules/popupCapture.ts): true only when this
    * click produced a "popup" event (a target="_blank" anchor or a window.open() call from a
@@ -797,7 +811,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.12.0";
+  schemaVersion: "1.13.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

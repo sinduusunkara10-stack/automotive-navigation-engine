@@ -111,7 +111,7 @@ async function clickFirst(page: import("playwright").Page, allowedDomains: strin
   return { result, errors: captures.errors ?? [] };
 }
 
-test("an unverified same-document hash-only destinationUrl fallback is reported with fallbackVerified: false, and the reason is recorded", async () => {
+test("an unverified same-document hash-only destinationUrl fallback is reported as a failed, staleTarget-classified action, not a successful one", async () => {
   const { baseUrl, close } = await startFixtureServer();
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -119,13 +119,21 @@ test("an unverified same-document hash-only destinationUrl fallback is reported 
     await page.goto(`${baseUrl}/unverified-start.html`);
     const { result, errors } = await clickFirst(page, ["127.0.0.1"], "View Details");
 
-    assert.equal(result.success, true, "the fallback navigation itself still mechanically succeeds");
+    // Target-attributable click-success fix: fallbackVerified is no longer diagnostic-only.
+    // A hash-only change with no target-attributable evidence must not be reported as a
+    // successful action -- it falls through to the same bounded staleTarget recovery any
+    // other stale-target failure uses, giving the reasoning layer a further chance instead
+    // of silently reporting unverified progress as journey success.
+    assert.equal(result.success, false, "an unverified fallback must not be reported as a successful action");
     assert.equal(result.fallbackVerified, false, "a hash-only change with no further evidence must not be verified");
+    assert.equal(result.fallbackVerificationReason, "unverified_hash_or_query_only_change");
+    assert.equal(result.staleTarget, true, "an unverified fallback is classified the same as any other stale-target failure");
+    assert.equal(result.resultingUrl, `${baseUrl}/unverified-start.html#detail`, "the URL the fallback actually reached is still reported for diagnostics");
 
-    const diagnostic = errors.find((e) => /fallbackNavigationUsed=true/.test(e.message));
+    const diagnostic = errors.find((e) => /fallback changed the URL but produced no target-attributable evidence/.test(e.message));
     assert.ok(diagnostic);
-    assert.match(diagnostic?.message ?? "", /fallbackVerified=false/);
-    assert.match(diagnostic?.message ?? "", /fallbackVerificationReason=unverified_hash_or_query_only_change/);
+    assert.equal(diagnostic?.recoverable, true);
+    assert.equal(diagnostic?.stoppedRun, false);
   } finally {
     await page.close();
     await browser.close();

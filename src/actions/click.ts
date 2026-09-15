@@ -4,14 +4,16 @@ import type { ActionResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import {
   captureInteractionSnapshot,
-  detectClickSideEffect,
+  detectTargetAttributableSideEffect,
   elementLocatorSelector,
   readElementState,
   resolveElementActionTarget,
+  targetElementSnapshot,
   waitForInteractionSideEffect,
   type ClickSideEffectType,
   type ElementState,
   type InteractionSnapshot,
+  type TargetElementSnapshot,
 } from "../observation/observationBuilder.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { assessNavigationRecovery, robustGoto, PAGE_SETTLE_DELAY_MS, type RobustGotoOutcome } from "../core/robustNavigation.js";
@@ -144,17 +146,20 @@ function formatClickDiagnostics(d: ClickDiagnostics): string {
  * for). When the fallback only changed the URL by its fragment (or query only, or nothing
  * detectable at all -- e.g. a same-document hash the site's own click handler would
  * otherwise have used to drive further, non-navigational DOM changes), the resulting page
- * state is verified against the pre-click InteractionSnapshot the same way a
- * direct-click side effect is: a new/changed dialog, or a materially different set of
- * visible interactive controls, counts as verified; the URL change alone does not.
+ * state is verified against the pre-click InteractionSnapshot and the target's own
+ * before/after state, using the same target-attributable evidence a direct-click side
+ * effect requires (see detectTargetAttributableSideEffect): the URL change alone never
+ * counts, and neither does an unattributed whole-page mutation.
  */
 async function verifyFallbackNavigation(params: {
   page: Page;
+  targetElementId: string;
+  targetBeforeFallback: TargetElementSnapshot;
   preClickSnapshot: InteractionSnapshot;
   urlBeforeClick: string;
   resultingUrl: string;
 }): Promise<{ verified: boolean; reason: string }> {
-  const { page, preClickSnapshot, urlBeforeClick, resultingUrl } = params;
+  const { page, targetElementId, targetBeforeFallback, preClickSnapshot, urlBeforeClick, resultingUrl } = params;
 
   let samePathAndOrigin = false;
   try {
@@ -169,7 +174,16 @@ async function verifyFallbackNavigation(params: {
   }
 
   const postSnapshot = await waitForInteractionSideEffect(page, preClickSnapshot);
-  const sideEffect = detectClickSideEffect({ before: preClickSnapshot, after: postSnapshot });
+  // Re-read the target's own live state after the fallback navigation -- a raw page.goto()
+  // to a same-document URL is a different mechanism than a real click, so this is never
+  // assumed unchanged; it is verified the same way a direct click's own target state is.
+  const targetAfterFallback = targetElementSnapshot(await readElementState(page, targetElementId));
+  const sideEffect = detectTargetAttributableSideEffect({
+    before: preClickSnapshot,
+    after: postSnapshot,
+    targetBefore: targetBeforeFallback,
+    targetAfter: targetAfterFallback,
+  });
   if (sideEffect.detected) {
     return { verified: true, reason: sideEffect.type ?? "interactive_surface_changed" };
   }
@@ -295,6 +309,8 @@ async function resolveUnactionableClick(params: {
   if (fallbackSucceeded && fallback.outcome) {
     fallbackVerification = await verifyFallbackNavigation({
       page,
+      targetElementId,
+      targetBeforeFallback: targetElementSnapshot(state),
       preClickSnapshot,
       urlBeforeClick,
       resultingUrl: fallback.outcome.url,
@@ -321,6 +337,48 @@ async function resolveUnactionableClick(params: {
   };
 
   if (fallbackSucceeded && fallback.outcome) {
+    // Target-attributable click-success fix: fallbackVerified is no longer diagnostic-only.
+    // An unverified fallback (same path/origin, no target-attributable evidence -- see
+    // verifyFallbackNavigation above) previously still reported an unqualified success on
+    // the strength of the URL change alone; it now falls through to the same
+    // staleTarget-classified failure path a directly-intercepted click uses, giving the
+    // reasoning layer a further bounded chance (core/loop.ts's existing stale-target
+    // recovery -- MAX_STALE_TARGET_RECOVERY_ATTEMPTS) instead of silently reporting
+    // progress that was never actually confirmed.
+    if (fallbackVerification?.verified === false) {
+      if (captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "navigation_failure",
+          severity: "warning",
+          pageUrl: fallback.outcome.url,
+          actionType: "click",
+          targetElementId,
+          message:
+            `Click target was not directly clickable (${category}); the generic destinationUrl ` +
+            `navigation fallback changed the URL but produced no target-attributable evidence of a ` +
+            `real state change (${fallbackVerification.reason}) -- not reporting this as a successful ` +
+            `action. ${formatClickDiagnostics(diagnostics)}` +
+            (originalErrorMessage ? ` Original click error: ${originalErrorMessage}` : ""),
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
+      return {
+        success: false,
+        error:
+          `click target not actionable (${category}); the destinationUrl fallback changed the URL but ` +
+          `produced no verified evidence of a real state change (${fallbackVerification.reason}). ` +
+          `${formatClickDiagnostics(diagnostics)}` +
+          (originalErrorMessage ? ` Original click error: ${originalErrorMessage}` : ""),
+        resultingUrl: fallback.outcome.url,
+        fallbackVerified: false,
+        fallbackVerificationReason: fallbackVerification.reason,
+        staleTarget: true,
+        ...(openedNewContext ? { openedNewContext, observedNewContext: Boolean(observedNewContext) } : {}),
+      };
+    }
+
     if (captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         stepIndex,
@@ -341,6 +399,7 @@ async function resolveUnactionableClick(params: {
       success: true,
       resultingUrl: fallback.outcome.url,
       fallbackVerified: fallbackVerification?.verified ?? true,
+      ...(fallbackVerification ? { fallbackVerificationReason: fallbackVerification.reason } : {}),
       ...(openedNewContext ? { openedNewContext, observedNewContext: Boolean(observedNewContext) } : {}),
     };
   }
@@ -516,10 +575,20 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // by some other element -- see categorizeUnactionableState), never for the broader
     // catch-all "timeout" (a click can time out for reasons -- e.g. pointer-events: none --
     // with no plausible connection to a new interactive surface having appeared) or
-    // "disabled" (a legitimate, already-visible fact, not a race).
+    // "disabled" (a legitimate, already-visible fact, not a race). Target-attributable
+    // click-success fix: the evidence checked here must be attributable to the clicked
+    // target itself (its own aria-expanded/covered state changing, or it disappearing) --
+    // an unrelated element elsewhere on the page changing at the same moment (e.g. a
+    // cookie/consent overlay re-rendering independently of this click) no longer counts;
+    // see detectTargetAttributableSideEffect.
     if (category === "intercepted") {
       const postClickSnapshot = await waitForInteractionSideEffect(page, preClickSnapshot);
-      const sideEffect = detectClickSideEffect({ before: preClickSnapshot, after: postClickSnapshot });
+      const sideEffect = detectTargetAttributableSideEffect({
+        before: preClickSnapshot,
+        after: postClickSnapshot,
+        targetBefore: targetElementSnapshot(preClickState),
+        targetAfter: targetElementSnapshot(postFailureState),
+      });
       if (sideEffect.detected) {
         if (captureModules.includes("errors")) {
           recordDiagnosticError(captures, {
@@ -629,7 +698,13 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // having produced a real interaction-state change, for core/loop.ts's route-memory
     // classification (requirement E) as much as for the overlay-detection case above.
     const postSnapshot = await captureInteractionSnapshot(page).catch(() => preClickSnapshot);
-    const sideEffect = detectClickSideEffect({ before: preClickSnapshot, after: postSnapshot });
+    const postClickTargetState = await readElementState(page, targetElementId).catch(() => preClickState);
+    const sideEffect = detectTargetAttributableSideEffect({
+      before: preClickSnapshot,
+      after: postSnapshot,
+      targetBefore: targetElementSnapshot(preClickState),
+      targetAfter: targetElementSnapshot(postClickTargetState),
+    });
     return {
       success: true,
       resultingUrl: safePageUrl(page) ?? urlBeforeClick,

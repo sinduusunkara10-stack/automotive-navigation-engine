@@ -166,7 +166,7 @@ class AsyncDialogProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; maxBacktracks?: number }): TaskRequest {
   return {
-    schemaVersion: "1.13.0",
+    schemaVersion: "1.14.0",
     taskId: "route-progress-classification",
     objective: "Exercise the configured controls; this suite only inspects routeMemory context, never final status.",
     startUrl: params.startUrl,
@@ -182,11 +182,11 @@ function buildTask(params: { startUrl: string; maxBacktracks?: number }): TaskRe
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: params.maxBacktracks ?? 1, maxRepeatedActions: 5 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.12.0",
+    outputSchemaVersion: "1.13.0",
   };
 }
 
-test("an unverified same-document destinationUrl fallback (hash-only, no meaningful state change) is never classified as 'advanced' when the same decision point recurs", async () => {
+test("an unverified same-document destinationUrl fallback (hash-only, no meaningful state change) is never classified as 'advanced', and -- since the fixture provides no way to ever verify it -- the action itself now correctly fails rather than reporting silent progress", async () => {
   const { baseUrl, close } = await startFixtureServer();
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -194,18 +194,38 @@ test("an unverified same-document destinationUrl fallback (hash-only, no meaning
   try {
     const task = buildTask({ startUrl: `${baseUrl}/unverified-fallback-start.html`, maxBacktracks: 1 });
     const provider = new ScriptedRouteMemoryProvider("View Details");
-    await runTask({ page, task, reasoning: provider });
+    const response = await runTask({ page, task, reasoning: provider });
 
-    // Captured by the provider at the exact decide() call that proposed the revisit click
-    // -- this is where a previous, misleading "advanced" classification would have shown up.
-    const onRevisit = provider.revisitRouteMemorySnapshot;
-    assert.ok(onRevisit, "expected the revisit to actually happen -- the candidate must have been tracked and gone back to");
-    const candidate = onRevisit?.find((c) => c.label.includes("View Details"));
-    assert.ok(candidate, "expected the 'View Details' candidate to be present in routeMemory");
-    assert.notEqual(
-      candidate?.lastOutcome,
-      "advanced",
-      "an unverified hash-only fallback must never be classified as advanced solely because the URL changed",
+    // Target-attributable click-success fix (superseding this test's original premise): this
+    // fixture's anchor is permanently covered by a transparent overlay and nothing on the
+    // page ever reacts to its hash -- by the fixture's own design, its destinationUrl
+    // fallback can *never* produce target-attributable evidence. Before that fix, such a
+    // fallback still reported success (unverified only for route-memory purposes), so a
+    // scripted revisit could eventually happen; now the click correctly fails outright every
+    // time (never "advanced", never even a completed action), so the run exhausts the
+    // bounded stale-target recovery allowance instead of ever reaching a revisit. This is a
+    // strictly stronger form of the same guarantee the original test asserted: an unverified
+    // hash-only fallback can never be mistaken for progress, in route memory or anywhere else.
+    assert.equal(response.status, "failure");
+    assert.equal(response.statusReason, "stale_target_recovery_exhausted");
+    assert.ok(
+      !provider.revisitRouteMemorySnapshot,
+      "no revisit can ever happen for a candidate whose fallback can never be verified -- the run must fail safely first",
+    );
+
+    // Route Memory's "advanced"/"no_change" classification (core/loop.ts) is only ever
+    // recorded for a *successful* action -- and this candidate's action now never succeeds
+    // at all (every attempt fails as staleTarget, per the comment above), so it correctly
+    // never reaches that classification step in the first place. This is a strictly
+    // stronger guarantee than the original "recorded as no_change, not advanced" assertion:
+    // there is no route-memory entry that could ever be misread as progress, because no
+    // outcome for this candidate is ever recorded as anything but a failure.
+    const anyRouteMemoryObservationOfCandidate = provider.routeMemorySeen.some((snapshot) =>
+      snapshot?.some((c) => c.label.includes("View Details")),
+    );
+    assert.ok(
+      !anyRouteMemoryObservationOfCandidate,
+      "a candidate whose action always fails must never acquire a routeMemory entry at all, let alone an 'advanced' one",
     );
   } finally {
     await page.close();

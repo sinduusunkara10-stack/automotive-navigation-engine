@@ -30,28 +30,54 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
         .end(`<!doctype html><html><head><title>${title}</title></head><body>${body}</body></html>`);
 
     if (path === "/race-start.html") {
-      // Models the reported race directly: a dialog begins rendering shortly after the
-      // page loads (e.g. a lazy-hydrating overlay component) and persists once it appears.
-      // Playwright's own click() commits to dispatching a real click only once its
-      // actionability pre-check already passed, so a handler *triggered by* that same
-      // click cannot itself race the click's own dispatch -- this is the closest
-      // deterministic stand-in for "the trigger became covered while Playwright was still
-      // performing actionability retries" that a test can reliably reproduce. The click
-      // executor's own recovery logic (actions/click.ts) does not know or care what caused
-      // the interception -- only whether generic evidence of a real side effect exists once
-      // it happens -- so this is a faithful test of that recovery logic either way.
+      // Models the reported race deterministically, without racing a wall-clock timer
+      // against unknown machine-dependent setup latency (a previous version of this
+      // fixture used setTimeout(50) for the dialog, which -- despite the mitigation of
+      // calling actions/click.ts's executor directly rather than through the full engine
+      // loop -- could still occasionally have the dialog appear *before* this test's own
+      // pre-click actionable-state read on a slow/loaded machine, short-circuiting to a
+      // different, non-navigable code path entirely and failing the click outright; see
+      // the git history of this fixture for the incident this replacement addresses).
+      //
+      // Instead, the button plays a real CSS animation for a fixed, renderer-driven
+      // duration on load -- a continuously-changing bounding box is exactly what
+      // Playwright's own actionability algorithm's "wait until stable" step polls for
+      // before it will ever consider dispatching a click, so Playwright is guaranteed to
+      // keep retrying for the animation's whole duration regardless of any JS-engine
+      // scheduling jitter. This engine's own pre-click readElementState check (see
+      // observation/observationBuilder.ts) never inspects animation/stability at all --
+      // only a live elementFromPoint coverage check -- so the button still reads as
+      // actionable at that pre-check the entire time the animation runs, exactly matching
+      // the scenario under test (looks actionable to our own check; Playwright's own
+      // stricter actionability semantics disagree).
+      //
+      // The dialog is then inserted synchronously from the animation's own "animationend"
+      // event handler -- a real DOM event Chromium fires exactly once, precisely when the
+      // animation completes -- rather than from a second, independent timer. Because that
+      // handler runs synchronously to completion as part of the same task that dispatches
+      // "animationend", there is no JS-observable window in which Playwright's own
+      // actionability polling (driven over CDP, which must wait for the main thread to be
+      // free) could ever observe the button as simultaneously stable *and* uncovered: by
+      // the time stability is reached, the dialog insertion has already happened in the
+      // same synchronous turn. Playwright therefore transitions directly from "retrying due
+      // to instability" to "retrying due to interception" for the remainder of its own
+      // action timeout, with no gap either check could slip through.
       return void page(
         "Start",
-        '<button type="button">View Details</button>' +
+        "<style>" +
+          "@keyframes settle { 0% { transform: translateX(0); } 50% { transform: translateX(1px); } 100% { transform: translateX(0); } }" +
+          "#trigger { animation: settle 1s linear; }" +
+          "</style>" +
+          '<button type="button" id="trigger">View Details</button>' +
           "<script>" +
-          "setTimeout(function () {" +
+          "document.getElementById('trigger').addEventListener('animationend', function () {" +
           "  var d = document.createElement('div');" +
           "  d.setAttribute('role', 'dialog');" +
           "  d.setAttribute('aria-modal', 'true');" +
           "  d.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5)';" +
           "  d.innerHTML = '<h2>Details</h2><button type=\"button\">Request a Callback</button>';" +
           "  document.body.appendChild(d);" +
-          "}, 50);" +
+          "});" +
           "</script>",
       );
     }
@@ -177,7 +203,7 @@ class ListingProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; successCriteria: TaskRequest["successCriteria"] }): TaskRequest {
   return {
-    schemaVersion: "1.13.0",
+    schemaVersion: "1.14.0",
     taskId: "overlay-click-detection",
     objective: "Reach the fixture's goal-directed control via the configured overlay flow.",
     startUrl: params.startUrl,
@@ -186,21 +212,24 @@ function buildTask(params: { startUrl: string; successCriteria: TaskRequest["suc
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.12.0",
+    outputSchemaVersion: "1.13.0",
   };
 }
 
 test("actions/click.ts directly: a click that Playwright's own actionability retries classify as 'intercepted' (a dialog appears mid-poll and persists) is recognised as a real success, and the destinationUrl fallback is never invoked", async () => {
-  // Exercises actions/click.ts's own interception-recovery branch deterministically, at the
-  // executor level rather than through the full engine loop: calling executeClick directly
-  // removes core/loop.ts's own per-step overhead (a reasoning-provider round trip,
-  // evaluateSuccessCriteria, etc.), whose added latency was empirically found to shift this
-  // fixture's race outcome toward the button dispatching cleanly before the dialog ever
-  // appears (still a valid, correctly-handled outcome -- see the non-navigating-success
-  // path test below -- just not *this* specific branch). Calling the executor directly is
-  // the reliable way to prove the "click() itself times out as intercepted, but a bounded
-  // post-click check recognises the dialog anyway" branch specifically, without a flaky,
-  // machine-speed-dependent race baked into an end-to-end test.
+  // Exercises actions/click.ts's own interception-recovery branch specifically, at the
+  // executor level rather than through the full engine loop -- see /race-start.html's own
+  // comment above for how the fixture now deterministically guarantees the button is
+  // reported actionable by this engine's own pre-click check while Playwright's own,
+  // stricter actionability semantics (which additionally require the element to be
+  // stable/not-animating) are made to keep retrying -- rather than the wall-clock-timer
+  // race a previous version of this fixture used, whose narrow window could occasionally
+  // lose to slower/more-loaded-machine setup latency (observed in CI; not reproducible as
+  // a genuine logic defect against a fixed baseline -- see the git history of this file).
+  // Calling the executor directly (rather than through the full engine loop) remains
+  // useful on its own merits -- it isolates this specific branch from core/loop.ts's own
+  // per-step overhead (a reasoning-provider round trip, evaluateSuccessCriteria, etc.) --
+  // but is no longer what makes this test deterministic; the fixture itself is.
   const { baseUrl, close } = await startFixtureServer();
   const browser = await chromium.launch();
   const page = await browser.newPage();

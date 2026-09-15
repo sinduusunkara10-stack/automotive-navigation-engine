@@ -135,7 +135,7 @@ function scanInteractiveElements({
     // Read as-is (string) rather than normalised to a closed set of engine-defined
     // states, so no future ARIA state value requires an engine change.
     const ariaState: Record<string, string> = {};
-    for (const attrName of ["aria-selected", "aria-checked", "aria-pressed", "aria-current"]) {
+    for (const attrName of ["aria-selected", "aria-checked", "aria-pressed", "aria-current", "aria-expanded"]) {
       const value = el.getAttribute(attrName);
       if (value !== null) {
         ariaState[attrName] = value;
@@ -374,6 +374,17 @@ export interface ElementState {
    * tracking (RunState.lastBlockerSignature).
    */
   coveredBySignature?: string;
+  /**
+   * Target-attributable click-success fix: the same generic ARIA selection/toggle-state
+   * evidence InteractiveElement.ariaState already carries in Observation (see
+   * scanInteractiveElements below), read here too so a caller can compare a click target's
+   * own before/after state -- e.g. aria-expanded flipping to "true" is generic, standards-
+   * based evidence that *this* control's own click opened something, independent of
+   * whatever else may have changed elsewhere on the page. Never normalised into an
+   * engine-defined closed set of states, for the same reason InteractiveElement.ariaState
+   * isn't either.
+   */
+  ariaState?: Record<string, string>;
   /** True only when the element's own frame could not be resolved/evaluated at all. */
   frameUnavailable: boolean;
   actionable: boolean;
@@ -416,12 +427,20 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
     const role = el.getAttribute("role") ?? el.tagName.toLowerCase();
     const accessibleName = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "";
     const destinationUrl = el instanceof HTMLAnchorElement ? el.href : undefined;
+    const ariaState: Record<string, string> = {};
+    for (const attrName of ["aria-selected", "aria-checked", "aria-pressed", "aria-current", "aria-expanded"]) {
+      const value = el.getAttribute(attrName);
+      if (value !== null) {
+        ariaState[attrName] = value;
+      }
+    }
     return {
       attached: true,
       visible,
       disabled,
       covered,
       ...(coveredBySignature ? { coveredBySignature } : {}),
+      ...(Object.keys(ariaState).length > 0 ? { ariaState } : {}),
       role,
       accessibleName,
       ...(destinationUrl ? { destinationUrl } : {}),
@@ -558,17 +577,31 @@ const MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE = 2;
  * destinationUrl fallback navigation produced a verified, meaningful state change) and by
  * core/loop.ts (to classify a route-memory candidate's outcome -- see requirement E).
  */
+/**
+ * The dialog-appeared/dialog-changed half of detectClickSideEffect below, factored out so
+ * detectTargetAttributableSideEffect can reuse the exact same standards-based check on its
+ * own (see that function's doc comment for why this specific signal -- unlike the weaker
+ * "N new interactive elements" one -- is trusted without also requiring target-attribution).
+ */
+function detectDialogSideEffect(before: InteractionSnapshot, after: InteractionSnapshot): { detected: boolean; type?: ClickSideEffectType } {
+  if (after.hasDialog && !before.hasDialog) {
+    return { detected: true, type: "dialog_appeared" };
+  }
+  if (after.hasDialog && before.hasDialog && after.dialogSignature !== before.dialogSignature) {
+    return { detected: true, type: "dialog_changed" };
+  }
+  return { detected: false };
+}
+
 export function detectClickSideEffect(params: {
   before: InteractionSnapshot;
   after: InteractionSnapshot;
 }): { detected: boolean; type?: ClickSideEffectType } {
   const { before, after } = params;
 
-  if (after.hasDialog && !before.hasDialog) {
-    return { detected: true, type: "dialog_appeared" };
-  }
-  if (after.hasDialog && before.hasDialog && after.dialogSignature !== before.dialogSignature) {
-    return { detected: true, type: "dialog_changed" };
+  const dialogEffect = detectDialogSideEffect(before, after);
+  if (dialogEffect.detected) {
+    return dialogEffect;
   }
 
   const beforeIdentities = new Set(before.interactiveIdentities);
@@ -576,6 +609,94 @@ export function detectClickSideEffect(params: {
   if (newCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE) {
     return { detected: true, type: "interactive_surface_changed" };
   }
+
+  return { detected: false };
+}
+
+/**
+ * Target-attributable click-success fix: the target's own state, read via readElementState
+ * both before and after a click, for detectTargetAttributableSideEffect below to compare.
+ * Deliberately only the fields that can meaningfully change as a direct consequence of the
+ * click succeeding -- never role/accessibleName/destinationUrl, which don't change as
+ * evidence of a side effect.
+ */
+export interface TargetElementSnapshot {
+  attached: boolean;
+  covered: boolean;
+  coveredBySignature?: string;
+  ariaState?: Record<string, string>;
+}
+
+export function targetElementSnapshot(state: Pick<ElementState, "attached" | "covered" | "coveredBySignature" | "ariaState">): TargetElementSnapshot {
+  return {
+    attached: state.attached,
+    covered: state.covered,
+    ...(state.coveredBySignature ? { coveredBySignature: state.coveredBySignature } : {}),
+    ...(state.ariaState ? { ariaState: state.ariaState } : {}),
+  };
+}
+
+/**
+ * Target-attributable click-success fix (see CLAUDE.md and docs/architecture.md "Overlay-click
+ * side effect detection"): detectClickSideEffect above answers "did *something* on the page
+ * change" -- for its weaker of two signals (MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE
+ * new elements appearing anywhere, with no dialog markup at all), that is a whole-page,
+ * target-blind comparison that a click on one control cannot be told apart from an unrelated
+ * element (a cookie banner, an ad, an unrelated timer-driven widget) happening to mutate at
+ * the same moment. That is precisely the false-positive class a real production incident
+ * demonstrated: a click intercepted by an unrelated consent overlay was reported as
+ * successful because the *overlay itself* (not the clicked control) changed state around the
+ * same time.
+ *
+ * This function keeps detectClickSideEffect's stronger signal -- a dialog/modal appearing or
+ * changing (role="dialog", aria-modal="true", or a native <dialog>) -- trusted on its own,
+ * exactly as before: that markup is a standards-based fact the page's own author chose to
+ * declare, not a heuristic, and very few things other than the user's own just-dispatched
+ * click cause one to appear in the same bounded settle window. It is only the weaker,
+ * elements-count fallback signal that now additionally requires the observed change to be
+ * attributable to the clicked target specifically, using only structural/generic evidence --
+ * never a selector, label, or brand/vendor-specific rule:
+ *
+ * 1. Target self-evidence: the target's *own* state changed in a way consistent with its
+ *    click having succeeded -- an aria-expanded flip to "true" (a standards-based signal for
+ *    "this control just expanded something"), the target becoming newly covered (its own
+ *    click opened a surface that now sits on top of it -- exactly the "backdrop covers its own
+ *    trigger" shape the original overlay-click-detection fix targeted), or the target
+ *    disappearing from the DOM entirely (replaced by whatever it opened).
+ * 2. A genuine dialog/modal signal (see above) -- trusted unconditionally.
+ *
+ * A page whose only evidence is an unrelated element's own independent change, with no
+ * dialog markup and no effect on the target itself, now correctly reports detected: false.
+ */
+export function detectTargetAttributableSideEffect(params: {
+  before: InteractionSnapshot;
+  after: InteractionSnapshot;
+  targetBefore: TargetElementSnapshot;
+  targetAfter: TargetElementSnapshot;
+}): { detected: boolean; type?: ClickSideEffectType } {
+  const { before, after, targetBefore, targetAfter } = params;
+
+  const dialogEffect = detectDialogSideEffect(before, after);
+  if (dialogEffect.detected) {
+    return dialogEffect;
+  }
+
+  const targetExpanded = targetAfter.ariaState?.["aria-expanded"] === "true" && targetBefore.ariaState?.["aria-expanded"] !== "true";
+  if (targetExpanded) {
+    return { detected: true, type: "interactive_surface_changed" };
+  }
+
+  const targetNewlyCovered = targetAfter.covered && !targetBefore.covered;
+  const targetDisappeared = targetBefore.attached && !targetAfter.attached;
+  if (targetNewlyCovered || targetDisappeared) {
+    return { detected: true, type: "interactive_surface_changed" };
+  }
+
+  // The weaker, elements-count-only signal is only trusted when combined with target
+  // self-evidence above -- an unattributed run of new elements alone (no dialog markup, no
+  // effect on the target itself) is exactly the evidence class this function exists to
+  // reject, so it deliberately never reaches detectClickSideEffect's elements-count branch
+  // at all here.
 
   return { detected: false };
 }
