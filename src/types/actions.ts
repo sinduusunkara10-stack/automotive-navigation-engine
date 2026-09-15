@@ -29,4 +29,14 @@ export interface SelectedAction {
  */
 export interface RecordedAction extends SelectedAction {
   observedProgress?: boolean;
+  /**
+   * PR 1C-a (post-click surface awareness): set only when this action's own ActionResult
+   * carried surfaceChangeDetected -- see types/task-response.ts's ActionResult.
+   * surfaceChangeType. Carried into ReasoningContext.recentActions (core/state.ts's
+   * recordAction) so the *next* decision's prompt (src/reasoning/promptBuilder.ts) can be
+   * told the observation it is looking at follows a click that opened a new panel/drawer/
+   * overlay, directly addressing the diagnosed failure mode where the engine had no signal
+   * that a newly-opened, non-ARIA surface was the reason its own confidence was low.
+   */
+  surfaceChangeType?: string;
 }
