@@ -406,7 +406,14 @@ the engine substitutes the existing `go_back` action for it instead, provided:
 
 - `go_back` is itself one of the task's `safety.allowedActions` (this is never a way around
   that restriction);
-- there is a previous page to actually go back to (at least one prior step has already run);
+- there is a previous, *distinct* page to actually go back to -- tracked via
+  `RunState.distinctVisitedUrls`, a set of every URL genuinely observed this run, not a step
+  count. (A per-step-count proxy such as `visitedUrls.length` was tried first and found
+  unsafe: it grows by one on every step regardless of whether the observed URL actually
+  changed, so a run stuck re-observing the same page for several steps in a row -- e.g.
+  after an action later found not to have navigated at all -- looked, from that count alone,
+  identical to a run that had genuinely visited a second page.)
+- the current observation is not already `about:blank` (see below);
 - and one more `go_back` would not, by itself, already exceed `maxBacktracks` or `maxSteps`.
 
 This is a conservative pre-check, never the sole enforcement of either ceiling: every
@@ -427,6 +434,32 @@ with a fresh observation, exactly as after any other successful action, giving t
 layer a genuine further attempt at the objective from the earlier page. Once
 `MAX_JOURNEY_REPLANNING_ATTEMPTS` is exhausted, a further `stop_blocked` is honoured immediately,
 exactly as before this mechanism existed.
+
+**Safe `go_back` execution** (`src/actions/goBack.ts`): a plain `page.goBack()` call
+previously reported success whenever it resolved without throwing, regardless of where it
+actually landed -- including a content-free `about:blank` state when no real prior
+navigation history existed. Verified empirically against real Chromium/Playwright: a
+`goBack()` with genuinely no prior history lands on `about:blank`, so that is a reliable,
+generic failure signal, independent of how many navigations preceded it. `executeGoBack` now:
+
+- refuses to even attempt navigation when the page is already at `about:blank` (making a
+  second, blind `go_back` from an already-blank state structurally impossible, regardless of
+  which caller dispatched it -- the eligibility check above is a second, independent layer of
+  the same protection);
+- reports a resulting `about:blank` state as a failure, not a success, even though the
+  Playwright call itself did not throw, which the journey-replanning handling above then
+  correctly falls through to a `"blocked"` outcome for, exactly as any other failed
+  substituted `go_back`.
+
+Deliberately does *not* also treat "the resulting URL is unchanged from before `goBack()`" as
+failure on its own: a real backward navigation can legitimately land on a URL identical to the
+one just left -- two consecutive same-document navigations to an identical hash-only URL (as
+the generic `destinationUrl` fallback can produce for a repeated candidate at what Route
+Memory's decision-point fingerprint treats as a new decision point once the URL itself
+changes -- see "Route progress classification" above) each still push their own history entry
+in real Chromium, so going back one step can genuinely traverse real history while still
+landing on a same-looking URL. `about:blank` is Chromium's own unambiguous "nothing to go back
+to" signal; a same-URL heuristic would misclassify this real case as a failure.
 
 Every attempt is visible directly on the relevant `StepLog` without any schema change, since
 `safetyFlags` and `decision` are already free-form: `safetyFlags` gains

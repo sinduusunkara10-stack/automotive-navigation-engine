@@ -193,6 +193,37 @@ class DomainBlockedReplanningProvider implements ReasoningProvider {
   }
 }
 
+/**
+ * Safe replanning / go_back fix regression coverage: proposes `wait` twice in a row (an
+ * action that never navigates or changes the page at all) before finally proposing
+ * stop_blocked -- deliberately never visiting a second distinct URL. Before this fix,
+ * state.visitedUrls.length grew by one on every step regardless of whether the observed URL
+ * actually changed, so by step 2 (`visitedUrls.length === 3`) this looked identical to a run
+ * that had genuinely visited multiple pages, and replanning would have been (wrongly)
+ * offered. state.distinctVisitedUrls.size correctly stays at 1 throughout this whole
+ * scenario, since the same URL is all that has ever actually been observed.
+ */
+class RepeatsWaitThenStopBlockedProvider implements ReasoningProvider {
+  readonly decisions: Decision[] = [];
+  private waits = 0;
+
+  async decide(context: ReasoningContext): Promise<Decision> {
+    if (this.waits < 2 && context.allowedActions.includes("wait")) {
+      this.waits += 1;
+      return this.record({ action: { type: "wait" }, rationale: "Waiting -- nothing navigates." });
+    }
+    if (context.allowedActions.includes("stop_blocked")) {
+      return this.record({ action: { type: "stop_blocked" }, rationale: "Nothing reachable, still on the same page." });
+    }
+    return this.record({ action: { type: "stop_failure" }, rationale: "No permitted action available." });
+  }
+
+  private record(decision: Decision): Decision {
+    this.decisions.push(decision);
+    return decision;
+  }
+}
+
 async function startJourneyReplanningFixtureServer(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
   // "Cache-Control: no-store" ensures a real back navigation always re-requests the server
   // rather than being served from bfcache/heuristic caching, so every fixture below behaves
@@ -380,6 +411,37 @@ test("bounded journey replanning: never engages on the run's very first step (no
     assert.equal(response.steps.length, 1, "the very first stop_blocked must be honoured immediately");
     assert.equal(response.diagnostics.backtrackCount, 0);
     assert.ok(!response.steps[0]?.safetyFlags?.includes("journey_replanning_attempted"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("bounded journey replanning: never engages when only one distinct URL has ever actually been observed, however many steps have elapsed", async () => {
+  const { baseUrl, close } = await startJourneyReplanningFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/start.html`,
+      objective: "Wait, then give up -- no real navigation ever happens.",
+      successCriteria: [REACHED_OBJECTIVE_CRITERION],
+      safety: { allowedActions: ["wait", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
+    });
+    const reasoning = new RepeatsWaitThenStopBlockedProvider();
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "blocked", `expected blocked, got ${response.status}/${response.statusReason}`);
+    assert.equal(
+      response.diagnostics.backtrackCount,
+      0,
+      "go_back must never be substituted when the browser has never actually visited a second distinct page",
+    );
+    assert.ok(
+      !response.steps.some((s) => s.safetyFlags?.includes("journey_replanning_attempted")),
+      "no step may claim a replanning attempt when only one distinct URL has ever been observed",
+    );
   } finally {
     await page.close();
     await browser.close();
