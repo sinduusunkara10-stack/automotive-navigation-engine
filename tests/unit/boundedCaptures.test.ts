@@ -42,9 +42,17 @@ test("recordMemorySample bounds the number of retained samples to MAX_MEMORY_SAM
 
 test("captureDataLayer bounds window.dataLayer to the most recent MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT entries", async () => {
   const totalEntries = MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT + 100;
-  const fakePage = {
+  const mainFrameMock = {
     async evaluate() {
       return Array.from({ length: totalEntries }, (_, i) => ({ event: `evt_${i}` }));
+    },
+  };
+  const fakePage = {
+    mainFrame() {
+      return mainFrameMock;
+    },
+    frames() {
+      return [mainFrameMock];
     },
     url() {
       return "http://127.0.0.1/current-page.html";
@@ -52,14 +60,21 @@ test("captureDataLayer bounds window.dataLayer to the most recent MAX_DATA_LAYER
   } as unknown as Page;
 
   const captured = await captureDataLayer(fakePage, 0);
-  assert.equal(captured.raw.length, MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT);
+  assert.equal(captured.length, 1, "no child frames -- exactly one (main_frame) entry, same shape as before this fix");
+  assert.equal(captured[0]?.source, "main_frame");
+  assert.equal(captured[0]?.raw.length, MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT);
+  assert.equal(captured[0]?.truncated, true);
   // Keeps the most recent entries, not the earliest.
-  assert.equal((captured.raw[captured.raw.length - 1] as { event: string }).event, `evt_${totalEntries - 1}`);
+  assert.equal((captured[0]?.raw[captured[0].raw.length - 1] as { event: string }).event, `evt_${totalEntries - 1}`);
 });
 
 test("attachGa4NetworkCapture bounds captures.ga4_network_events to MAX_GA4_NETWORK_EVENTS", () => {
   let requestHandler: ((request: Request) => void) | undefined;
+  const mainFrameMock = {};
   const fakePage = {
+    mainFrame() {
+      return mainFrameMock;
+    },
     on(event: string, handler: (request: Request) => void) {
       if (event === "request") requestHandler = handler;
     },
@@ -72,7 +87,12 @@ test("attachGa4NetworkCapture bounds captures.ga4_network_events to MAX_GA4_NETW
 
   const totalRequests = MAX_GA4_NETWORK_EVENTS + 50;
   for (let i = 0; i < totalRequests; i++) {
-    const fakeRequest = { url: () => `http://127.0.0.1/g/collect?n=${i}` } as unknown as Request;
+    const fakeRequest = {
+      url: () => `http://127.0.0.1/g/collect?n=${i}`,
+      method: () => "GET",
+      frame: () => mainFrameMock,
+      postData: () => null,
+    } as unknown as Request;
     requestHandler!(fakeRequest);
   }
 

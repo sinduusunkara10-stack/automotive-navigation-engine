@@ -70,5 +70,8 @@ export function buildCtaClickCapture(params: {
     actionSucceeded: actionResult.success,
     ...(actionResult.error ? { error: actionResult.error } : {}),
     ...(actionAnalytics ? { actionAnalytics } : {}),
+    ...(actionResult.openedNewContext
+      ? { openedNewContext: actionResult.openedNewContext, observedNewContext: Boolean(actionResult.observedNewContext) }
+      : {}),
   };
 }

@@ -159,6 +159,21 @@ export interface ActionResult {
    * such an unverified fallback as "advanced" on the strength of the URL change alone.
    */
   fallbackVerified?: boolean;
+  /**
+   * Popup/new-context capture (see src/capture-modules/popupCapture.ts): true only when this
+   * click produced a "popup" event (a target="_blank" anchor or a window.open() call from a
+   * click handler) -- regardless of whether that context was successfully instrumented.
+   * Absent (never false) whenever no such context was opened.
+   */
+  openedNewContext?: boolean;
+  /**
+   * Present only when openedNewContext is true. True when the opened context was actually
+   * adopted long enough to attach analytics capture to it (see popupCapture.ts's bounded
+   * adoption window) before being closed; false when it closed, navigated away, or otherwise
+   * became unavailable before instrumentation could attach. Never asserts that the context
+   * produced any particular evidence -- only that it was observed at all.
+   */
+  observedNewContext?: boolean;
 }
 
 export interface Progress {
@@ -242,18 +257,64 @@ export interface PageMetadataCapture {
   lang?: string;
 }
 
+/**
+ * Which browsing context/frame this piece of evidence was actually read from -- a
+ * generic, mechanical fact about *how* the evidence was captured, never an interpretation
+ * of what it means. "main_frame"/"child_frame" both refer to frames of the one Page the
+ * engine is navigating (see src/observation/frames.ts, reused here); "popup_context" means
+ * a separate Page object opened by a click (target="_blank"/window.open()) and adopted for
+ * a short, bounded capture window (see src/capture-modules/popupCapture.ts) rather than the
+ * tracked page itself.
+ */
+export type EvidenceCaptureSource = "main_frame" | "child_frame" | "popup_context";
+
 export interface DataLayerCapture {
   stepIndex: number;
   url: string;
   timestamp: string;
   raw: Record<string, unknown>[];
+  source: EvidenceCaptureSource;
+  /** Origin (scheme+host+port) of the child frame this entry was read from -- present only for source: "child_frame". */
+  frameOrigin?: string;
+  /** Stable id distinguishing the tracked page ("main") from a specific adopted popup context. Absent for legacy/untagged callers only. */
+  contextId?: string;
+  /** True when this entry's raw array was cut down to MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT (oldest dropped first) -- never a silent truncation. */
+  truncated?: boolean;
 }
 
 export interface Ga4NetworkEventCapture {
   stepIndex: number;
   requestUrl: string;
   timestamp: string;
+  /** HTTP method of the outgoing request, e.g. "GET", "POST" -- generic Playwright request.method(). */
+  method: string;
+  /** Query-string parameters, unchanged from before this fix. */
   params?: Record<string, string>;
+  /**
+   * Raw POST/sendBeacon request body, bounded to MAX_GA4_POST_BODY_BYTES (see
+   * src/config/captureLimits.ts) and truncated (never dropped) past that. Absent for a GET
+   * request, or a POST/sendBeacon request with no body.
+   */
+  postDataRaw?: string;
+  /**
+   * Body parameters, generically parsed only when the raw body is unambiguously
+   * form-urlencoded (one or more "key=value&key=value" lines) -- never a client-specific
+   * parsing rule. One entry per newline-delimited hit, matching how a batched GA4
+   * sendBeacon body concatenates multiple hits. Absent when the body doesn't confidently
+   * parse this way; never a guess.
+   */
+  postDataParams?: Record<string, string>[];
+  /** Mechanically read from the standard GA4 Measurement Protocol "tid" parameter (query or body) when present. Never inferred when absent. */
+  measurementId?: string;
+  /** Mechanically read from the standard GA4 consent-state parameters ("gcs", "dma", "dma_cps") when present, verbatim. Never inferred when absent. */
+  consentState?: Record<string, string>;
+  source: EvidenceCaptureSource;
+  /** Stable id distinguishing the tracked page ("main") from a specific adopted popup context. Absent for legacy/untagged callers only. */
+  contextId?: string;
+  /** Origin of the child frame this request originated from -- present only for source: "child_frame". */
+  frameOrigin?: string;
+  /** True when postDataRaw was cut down to MAX_GA4_POST_BODY_BYTES -- never a silent truncation. */
+  truncated?: boolean;
 }
 
 export interface ScreenshotCapture {
@@ -360,6 +421,10 @@ export interface CtaClickCapture {
   error?: string;
   /** Present only when captureModules also requests data_layer_evidence and/or ga4_network_events (see loop.ts). */
   actionAnalytics?: ActionAnalytics;
+  /** Mirrors ActionResult.openedNewContext for this click -- see its own doc comment. */
+  openedNewContext?: boolean;
+  /** Mirrors ActionResult.observedNewContext for this click -- see its own doc comment. */
+  observedNewContext?: boolean;
 }
 
 export interface JourneyPathSelectedElement {
@@ -710,7 +775,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.11.0";
+  schemaVersion: "1.12.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

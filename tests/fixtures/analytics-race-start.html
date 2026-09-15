@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Analytics Race Start</title>
+    <meta
+      name="description"
+      content="Fixture proving: pre-existing dataLayer entries, a nested/unknown client-specific object, a form field seeded with a value the engine never reads, and a CTA click whose own dataLayer.push/GA4 beacon fire immediately before a same-tab navigation (the click-vs-navigation race)."
+    />
+  </head>
+  <body>
+    <h1>Analytics Race Start</h1>
+    <form id="lead-form">
+      <label for="full-name">Full name</label>
+      <input type="text" id="full-name" name="fullName" value="Seed Person Should Never Be Captured" />
+    </form>
+    <button type="button" id="request-quote">REQUEST A QUOTE</button>
+
+    <script>
+      // Pre-existing entries, present before any observer could have been attached by a
+      // caller that only starts watching after this script runs -- proves the per-step
+      // full-array snapshot sees whatever's already there, not only future pushes.
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "analytics-race-start", fictionalId: "FIX-RACE-000" });
+      // A nested, client-specific object with an unknown/arbitrary property -- must survive
+      // byte-for-byte in captures.data_layer_evidence[].raw with no engine-side filtering.
+      window.dataLayer.push({
+        event: "custom_client_event",
+        clientSpecificVendorObject: {
+          internalCode: "XYZ-CLIENT-CODE-123",
+          nested: { a: 1, list: [1, 2, 3], flag: true },
+        },
+        someTotallyUnknownField: "should-survive-unfiltered",
+      });
+
+      document.getElementById("request-quote").addEventListener("click", function () {
+        // The race: push, fire a beacon, then navigate synchronously in the same handler --
+        // no await, no setTimeout. A naive per-step-only snapshot mechanism can lose this if
+        // the navigation tears down the document before the next snapshot ever runs.
+        window.dataLayer.push({ event: "generate_lead", cta: "request_a_quote", fictionalId: "FIX-RACE-001" });
+        var ga4Params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          en: "generate_lead",
+          dl: location.href,
+        });
+        new Image().src = "/g/collect?" + ga4Params.toString();
+        location.href = "/analytics-race-destination.html";
+      });
+    </script>
+  </body>
+</html>

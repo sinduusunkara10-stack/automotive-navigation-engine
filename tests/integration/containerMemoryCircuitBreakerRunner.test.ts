@@ -16,7 +16,7 @@ const TIMING = { ttlSeconds: 86400, staleThresholdMs: 90_000, heartbeatIntervalM
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.12.0",
+    schemaVersion: "1.13.0",
     taskId: "container-memory-runner-task",
     objective: "Reach an unreachable success state so the memory circuit breaker is exercised.",
     startUrl,
@@ -32,7 +32,7 @@ function buildTask(startUrl: string): TaskRequest {
     captureModules: ["page_visits"],
     limits: { maxSteps: 10, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-    outputSchemaVersion: "1.11.0",
+    outputSchemaVersion: "1.12.0",
   };
 }
 

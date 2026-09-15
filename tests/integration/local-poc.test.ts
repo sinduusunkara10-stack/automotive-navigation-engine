@@ -36,7 +36,7 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.12.0",
+      schemaVersion: "1.13.0",
       taskId: "local-poc-success",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -66,7 +66,7 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.11.0",
+      outputSchemaVersion: "1.12.0",
     };
 
     const response = await runTask({ page, task });
@@ -82,14 +82,19 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
     assert.equal(response.diagnostics.finishReason, "stop_success_action");
 
     // dataLayer evidence must cover both pages of the journey: the fixture pushes its
-    // own initial + subsequent events on each page, and evidence is preserved raw.
+    // own initial + subsequent events on each page, and evidence is preserved raw. Since
+    // the cross-client analytics-capture fix, a page's pushes can be split across more
+    // than one entry sharing that page's own url (the per-step full-array snapshot, plus
+    // any real-time push-capture entries for the same pushes -- see
+    // capture-modules/dataLayer.ts) -- so a consumer must flatten every entry for a given
+    // url/step, never assume a single .find() match is the complete picture.
     const dataLayerCaptures = response.captures.data_layer_evidence ?? [];
     assert.ok(dataLayerCaptures.length >= 2, "expected dataLayer evidence from at least two steps");
     assert.ok(dataLayerCaptures.some((entry) => entry.url === `${baseUrl}/start.html`));
-    const successDataLayer = dataLayerCaptures.find((entry) => entry.url === `${baseUrl}/success.html`);
-    assert.ok(successDataLayer, "expected dataLayer evidence captured on the success page");
-    assert.ok(successDataLayer.raw.some((entry) => entry.event === "page_view" && entry.page === "success"));
-    assert.ok(successDataLayer.raw.some((entry) => entry.event === "journey_complete"));
+    const successRaw = dataLayerCaptures.filter((entry) => entry.url === `${baseUrl}/success.html`).flatMap((entry) => entry.raw);
+    assert.ok(successRaw.length > 0, "expected dataLayer evidence captured on the success page");
+    assert.ok(successRaw.some((entry) => entry.event === "page_view" && entry.page === "success"));
+    assert.ok(successRaw.some((entry) => entry.event === "journey_complete"));
 
     // Simulated GA4 collect requests fired by both fixture pages must be observed and
     // their raw fictional parameters preserved, with no unrelated traffic mixed in.
@@ -196,7 +201,7 @@ test("capture modules only run when the task requests them", async () => {
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.12.0",
+      schemaVersion: "1.13.0",
       taskId: "local-poc-selective-capture",
       objective: "Reach the fixture's success page by following the visible continue control.",
       startUrl: `${baseUrl}/start.html`,
@@ -217,7 +222,7 @@ test("capture modules only run when the task requests them", async () => {
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.11.0",
+      outputSchemaVersion: "1.12.0",
     };
 
     const response = await runTask({ page, task });
@@ -248,7 +253,7 @@ test("safety layer blocks a task whose startUrl falls outside allowedDomains", a
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.12.0",
+      schemaVersion: "1.13.0",
       taskId: "local-poc-blocked",
       objective: "Attempt to run against a host outside the allow-list.",
       startUrl: `${baseUrl}/start.html`,
@@ -259,7 +264,7 @@ test("safety layer blocks a task whose startUrl falls outside allowedDomains", a
       captureModules: ["page_visits"],
       limits: { maxSteps: 5, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.11.0",
+      outputSchemaVersion: "1.12.0",
     };
 
     const response = await runTask({ page, task });
@@ -283,7 +288,7 @@ test("limits guard stops the run once maxSteps is reached without a success stat
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.12.0",
+      schemaVersion: "1.13.0",
       taskId: "local-poc-max-steps",
       objective: "Reach an unreachable success state so the step ceiling is exercised.",
       startUrl: `${baseUrl}/start.html`,
@@ -299,7 +304,7 @@ test("limits guard stops the run once maxSteps is reached without a success stat
       captureModules: ["page_visits"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.11.0",
+      outputSchemaVersion: "1.12.0",
     };
 
     const response = await runTask({ page, task });

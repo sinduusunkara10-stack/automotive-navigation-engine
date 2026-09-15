@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.11.0\". Bumped from \"1.10.0\" to \"1.11.0\" for the overlay-click-detection fix (see CLAUDE.md and docs/architecture.md \"Modal-aware observation\" / \"Overlay-click side effect detection\"): observation.activeDialog (see $defs/observation) reports a compact, generic identity (role + short accessible-name excerpt) for a visible dialog/modal surface (role=\"dialog\", aria-modal=\"true\", or a native <dialog>), when one is present in the main document; observation.interactiveElements[].nearestHeadingText surfaces the nearest enclosing heading's text, found via a bounded ancestor walk, so repeated-card/list-item controls that share an identical role+accessibleName (e.g. the same-labelled action button under several different listing cards) can be told apart for route-memory candidate identity; actionResult.clickSideEffectDetected and actionResult.fallbackVerified report, respectively, whether a click that looked intercepted/timed-out was instead recognised as having actually succeeded from generic post-click evidence, and whether a generic destinationUrl navigation fallback's resulting page state was verified as a meaningful change rather than assumed equivalent to a real click. All four fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.9.0\" to \"1.10.0\" earlier because diagnostics.milestoneEvidence (see $defs/milestoneEvidenceRecord) was added: one record per success criterion, appended the moment it first becomes satisfied, explaining which page it was evaluated against, which phase of the step, and what evidence (a matched URL pattern, a matched selector, a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) actually satisfied it -- part of the fix converting ordered-milestone successCriteria from a reporting-only convention (docs/n8n-integration.md §9f) into an enforced runtime constraint: only the first not-yet-satisfied required milestone (in successCriteria declaration order) is ever eligible to be evaluated or satisfied, so a later required milestone can never be satisfied by evidence that only happens to overlap with an earlier page (e.g. a homepage's own persistent navigation advertising a destination it never actually reached). This same change also excludes persistent site-wide navigation/menu/header/footer chrome from semantic_page_match's own interactive-element vocabulary signal (src/core/semanticPageMatch.ts) -- a link living in that chrome is evidence a destination exists, never evidence it was reached. Neither the ordering enforcement nor the chrome exclusion required any new request-schema field: milestone order remains purely successCriteria's own declaration order, exactly as docs/n8n-integration.md §9f already documented. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.8.0\" to \"1.9.0\" earlier because status gained the additive \"container_memory_threshold_reached\" enum value and diagnostics.containerMemory (see $defs/containerMemoryDiagnostics) was added: the opt-in container-memory circuit breaker (MEMORY_CIRCUIT_BREAKER_ENABLED) reports its latest generic Linux cgroup memory sample and whether it stopped the run before the container's own OS-level OOM kill. Present only when that breaker was enabled for a run. Purely diagnostic, generic container-memory evidence -- never anything about the page/task/brand being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.7.0\" to \"1.8.0\" earlier because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.12.0\". Bumped from \"1.11.0\" to \"1.12.0\" for the generic cross-client analytics-capture-evidence fix (see CLAUDE.md and docs/architecture.md \"Generic action-attributed analytics capture\"): captures.data_layer_evidence[] and captures.ga4_network_events[] entries now carry capture-context provenance (source: \"main_frame\"/\"child_frame\"/\"popup_context\", contextId, frameOrigin, truncated); ga4_network_events[] also gained method, postDataRaw, postDataParams, measurementId, and consentState so POST/sendBeacon GA4 requests are no longer only partially captured; captures.cta_clicks[] gained openedNewContext/observedNewContext reporting whether a click opened a popup/new-tab context and whether that context was actually instrumented before being closed, rather than closed unobserved. All new fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.11.0\". Bumped from \"1.10.0\" to \"1.11.0\" for the overlay-click-detection fix (see CLAUDE.md and docs/architecture.md \"Modal-aware observation\" / \"Overlay-click side effect detection\"): observation.activeDialog (see $defs/observation) reports a compact, generic identity (role + short accessible-name excerpt) for a visible dialog/modal surface (role=\"dialog\", aria-modal=\"true\", or a native <dialog>), when one is present in the main document; observation.interactiveElements[].nearestHeadingText surfaces the nearest enclosing heading's text, found via a bounded ancestor walk, so repeated-card/list-item controls that share an identical role+accessibleName (e.g. the same-labelled action button under several different listing cards) can be told apart for route-memory candidate identity; actionResult.clickSideEffectDetected and actionResult.fallbackVerified report, respectively, whether a click that looked intercepted/timed-out was instead recognised as having actually succeeded from generic post-click evidence, and whether a generic destinationUrl navigation fallback's resulting page state was verified as a meaningful change rather than assumed equivalent to a real click. All four fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.9.0\" to \"1.10.0\" earlier because diagnostics.milestoneEvidence (see $defs/milestoneEvidenceRecord) was added: one record per success criterion, appended the moment it first becomes satisfied, explaining which page it was evaluated against, which phase of the step, and what evidence (a matched URL pattern, a matched selector, a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) actually satisfied it -- part of the fix converting ordered-milestone successCriteria from a reporting-only convention (docs/n8n-integration.md \u00a79f) into an enforced runtime constraint: only the first not-yet-satisfied required milestone (in successCriteria declaration order) is ever eligible to be evaluated or satisfied, so a later required milestone can never be satisfied by evidence that only happens to overlap with an earlier page (e.g. a homepage's own persistent navigation advertising a destination it never actually reached). This same change also excludes persistent site-wide navigation/menu/header/footer chrome from semantic_page_match's own interactive-element vocabulary signal (src/core/semanticPageMatch.ts) -- a link living in that chrome is evidence a destination exists, never evidence it was reached. Neither the ordering enforcement nor the chrome exclusion required any new request-schema field: milestone order remains purely successCriteria's own declaration order, exactly as docs/n8n-integration.md \u00a79f already documented. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.8.0\" to \"1.9.0\" earlier because status gained the additive \"container_memory_threshold_reached\" enum value and diagnostics.containerMemory (see $defs/containerMemoryDiagnostics) was added: the opt-in container-memory circuit breaker (MEMORY_CIRCUIT_BREAKER_ENABLED) reports its latest generic Linux cgroup memory sample and whether it stopped the run before the container's own OS-level OOM kill. Present only when that breaker was enabled for a run. Purely diagnostic, generic container-memory evidence -- never anything about the page/task/brand being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.7.0\" to \"1.8.0\" earlier because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.11.0"
+      "const": "1.12.0"
     },
     "taskId": {
       "type": "string",
@@ -134,6 +134,14 @@
         "fallbackVerified": {
           "type": "boolean",
           "description": "Present only when a generic destinationUrl navigation fallback was actually used to recover an unactionable click. True means the fallback's resulting page state was verified as a genuine, meaningful change (a different page path/origin, or generic evidence of a new interactive surface) rather than assumed equivalent to a real click; false means the fallback only changed the URL (e.g. a same-document hash-only navigation) with no verified further evidence."
+        },
+        "openedNewContext": {
+          "type": "boolean",
+          "description": "True only when this click produced a \"popup\" event (a target=\"_blank\" anchor or a window.open() call from a click handler) -- regardless of whether that context was successfully instrumented. Absent (never false) whenever no such context was opened."
+        },
+        "observedNewContext": {
+          "type": "boolean",
+          "description": "Present only when openedNewContext is true. True when the opened context was actually adopted long enough to attach analytics capture to it before being closed; false when it closed, navigated away, or otherwise became unavailable before instrumentation could attach. Never asserts the context produced any particular evidence, only that it was observed at all."
         }
       }
     },
@@ -237,7 +245,10 @@
           "type": "object",
           "description": "Present when a visible dialog/modal surface (role=\"dialog\", aria-modal=\"true\", or a native <dialog>) exists in the main document at the time of this observation. A compact, generic identity only -- never the dialog's full content, which is still carried element by element in interactiveElements as usual.",
           "additionalProperties": false,
-          "required": ["role", "accessibleName"],
+          "required": [
+            "role",
+            "accessibleName"
+          ],
           "properties": {
             "role": {
               "type": "string"
@@ -464,7 +475,7 @@
         },
         "finish_page_ctas": {
           "type": "array",
-          "description": "Visible calls-to-action found on the page at capture time (e.g. a journey's finish/success state). Generic element evidence only — no domain-specific classification.",
+          "description": "Visible calls-to-action found on the page at capture time (e.g. a journey's finish/success state). Generic element evidence only \u2014 no domain-specific classification.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -577,6 +588,14 @@
               "actionAnalytics": {
                 "$ref": "#/$defs/actionAnalytics",
                 "description": "Generic, action-attributed analytics evidence for this click, present only when captureModules also requested data_layer_evidence and/or ga4_network_events."
+              },
+              "openedNewContext": {
+                "type": "boolean",
+                "description": "Mirrors actionResult.openedNewContext for this click."
+              },
+              "observedNewContext": {
+                "type": "boolean",
+                "description": "Mirrors actionResult.observedNewContext for this click."
               }
             }
           }
@@ -665,7 +684,8 @@
               "stepIndex",
               "url",
               "timestamp",
-              "raw"
+              "raw",
+              "source"
             ],
             "properties": {
               "stepIndex": {
@@ -685,6 +705,27 @@
                 "items": {
                   "type": "object"
                 }
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "main_frame",
+                  "child_frame",
+                  "popup_context"
+                ],
+                "description": "Which browsing context/frame this entry was actually read from -- a generic, mechanical capture-provenance fact, never an interpretation of what the entry means."
+              },
+              "frameOrigin": {
+                "type": "string",
+                "description": "Origin (scheme+host+port) of the child frame this entry was read from -- present only for source: \"child_frame\"."
+              },
+              "contextId": {
+                "type": "string",
+                "description": "Stable id distinguishing the tracked page (\"main\") from a specific adopted popup context."
+              },
+              "truncated": {
+                "type": "boolean",
+                "description": "True when this entry's raw array was cut down to the configured per-snapshot cap (oldest dropped first) -- never a silent truncation."
               }
             }
           }
@@ -692,30 +733,7 @@
         "ga4_network_events": {
           "type": "array",
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "stepIndex",
-              "requestUrl",
-              "timestamp"
-            ],
-            "properties": {
-              "stepIndex": {
-                "type": "integer"
-              },
-              "requestUrl": {
-                "type": "string",
-                "format": "uri"
-              },
-              "timestamp": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "params": {
-                "description": "Raw query/body parameters observed on the outgoing GA4 network request.",
-                "type": "object"
-              }
-            }
+            "$ref": "#/$defs/ga4NetworkEventCapture"
           }
         },
         "screenshots": {
@@ -897,10 +915,17 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["name", "domain"],
+                  "required": [
+                    "name",
+                    "domain"
+                  ],
                   "properties": {
-                    "name": { "type": "string" },
-                    "domain": { "type": "string" }
+                    "name": {
+                      "type": "string"
+                    },
+                    "domain": {
+                      "type": "string"
+                    }
                   }
                 }
               },
@@ -910,13 +935,21 @@
                 "items": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["store", "key"],
+                  "required": [
+                    "store",
+                    "key"
+                  ],
                   "properties": {
                     "store": {
                       "type": "string",
-                      "enum": ["local", "session"]
+                      "enum": [
+                        "local",
+                        "session"
+                      ]
                     },
-                    "key": { "type": "string" }
+                    "key": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -1031,7 +1064,17 @@
       "type": "object",
       "description": "Explains why the engine judged one specific success criterion satisfied: which page it was evaluated against, in which phase of the step, and what evidence (a matched URL pattern, a matched selector, a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) actually satisfied it. This is engine classification (the \"why\"), kept in diagnostics rather than captures, which stays raw, website-derived evidence only.",
       "additionalProperties": false,
-      "required": ["criterionId", "criterionType", "description", "stepIndex", "phase", "pageUrl", "pageTitle", "evidenceSource", "reason"],
+      "required": [
+        "criterionId",
+        "criterionType",
+        "description",
+        "stepIndex",
+        "phase",
+        "pageUrl",
+        "pageTitle",
+        "evidenceSource",
+        "reason"
+      ],
       "properties": {
         "criterionId": {
           "type": "string"
@@ -1050,7 +1093,10 @@
         },
         "phase": {
           "type": "string",
-          "enum": ["pre_action", "post_action"],
+          "enum": [
+            "pre_action",
+            "post_action"
+          ],
           "description": "Whether this criterion was evaluated before this step's own action was dispatched, or immediately after it."
         },
         "pageUrl": {
@@ -1098,7 +1144,10 @@
         },
         "version": {
           "type": "string",
-          "enum": ["v2", "v1"],
+          "enum": [
+            "v2",
+            "v1"
+          ],
           "description": "Which cgroup version's memory files were read."
         },
         "thresholdFraction": {
@@ -1197,7 +1246,11 @@
         },
         "label": {
           "type": "string",
-          "enum": ["run_start", "step", "after_cleanup"]
+          "enum": [
+            "run_start",
+            "step",
+            "after_cleanup"
+          ]
         },
         "stepIndex": {
           "type": "integer",
@@ -1277,7 +1330,14 @@
       "type": "object",
       "description": "Bounded diagnostic explaining which interactive elements from a step's Observation were actually included in one decision attempt's model prompt, and why (see src/reasoning/promptBuilder.ts). Never duplicates the full observation or the raw prompt -- `selected` is capped at the same per-step interactive-element limit already applied to the prompt itself, and `excludedRelevantCount` is a count only, never a list.",
       "additionalProperties": false,
-      "required": ["candidateCount", "selectedCount", "relevantSelectedCount", "structuralSelectedCount", "excludedRelevantCount", "selected"],
+      "required": [
+        "candidateCount",
+        "selectedCount",
+        "relevantSelectedCount",
+        "structuralSelectedCount",
+        "excludedRelevantCount",
+        "selected"
+      ],
       "properties": {
         "candidateCount": {
           "type": "integer",
@@ -1310,11 +1370,25 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["id", "accessibleName", "reason"],
+            "required": [
+              "id",
+              "accessibleName",
+              "reason"
+            ],
             "properties": {
-              "id": { "type": "string" },
-              "accessibleName": { "type": "string" },
-              "reason": { "type": "string", "enum": ["relevant", "structural"] }
+              "id": {
+                "type": "string"
+              },
+              "accessibleName": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "relevant",
+                  "structural"
+                ]
+              }
             }
           }
         }
@@ -1400,7 +1474,11 @@
       "type": "object",
       "description": "Safe per-decision usage summary for one SemanticCriterionVerifier attempt. Never includes prompts, raw model responses, page content, request bodies, API keys, headers, or credentials.",
       "additionalProperties": false,
-      "required": ["attempt", "outcome", "latencyMs"],
+      "required": [
+        "attempt",
+        "outcome",
+        "latencyMs"
+      ],
       "properties": {
         "attempt": {
           "type": "integer",
@@ -1408,7 +1486,12 @@
         },
         "outcome": {
           "type": "string",
-          "enum": ["satisfied", "not_satisfied", "error", "cache_hit"]
+          "enum": [
+            "satisfied",
+            "not_satisfied",
+            "error",
+            "cache_hit"
+          ]
         },
         "confidence": {
           "type": "number",
@@ -1510,7 +1593,10 @@
       "type": "object",
       "description": "Generic, mechanical before/after delta of window.dataLayer's contents around one click -- a cursor/position delta, never a full re-snapshot of either side. See src/capture-modules/dataLayerDelta.ts.",
       "additionalProperties": false,
-      "required": ["available", "newEntries"],
+      "required": [
+        "available",
+        "newEntries"
+      ],
       "properties": {
         "available": {
           "type": "boolean",
@@ -1533,7 +1619,9 @@
       "type": "object",
       "description": "Generic, action-attributed analytics evidence for one click the engine dispatched -- the single mechanism used for every journey, never a per-journey capture. GA4 field naming is deliberately non-causal: a request observed inside the bounded post-click window is temporally correlated with the click, never asserted to have been caused by it.",
       "additionalProperties": false,
-      "required": ["advancedJourney"],
+      "required": [
+        "advancedJourney"
+      ],
       "properties": {
         "dataLayerDelta": {
           "$ref": "#/$defs/dataLayerDelta"
@@ -1542,15 +1630,7 @@
           "type": "array",
           "description": "GA4-style requests observed within a short, fixed window after this click. Correlation, not causation.",
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["stepIndex", "requestUrl", "timestamp"],
-            "properties": {
-              "stepIndex": { "type": "integer" },
-              "requestUrl": { "type": "string", "format": "uri" },
-              "timestamp": { "type": "string", "format": "date-time" },
-              "params": { "type": "object" }
-            }
+            "$ref": "#/$defs/ga4NetworkEventCapture"
           }
         },
         "advancedJourney": {
@@ -1577,18 +1657,32 @@
       "type": "object",
       "description": "One hostname the run trusted for navigation, and why.",
       "additionalProperties": false,
-      "required": ["hostname", "reason"],
+      "required": [
+        "hostname",
+        "reason"
+      ],
       "properties": {
         "hostname": {
           "type": "string"
         },
         "reason": {
           "type": "string",
-          "enum": ["caller_supplied", "exact_start_host", "redirect_landing_host", "same_registrable_domain_subdomain"]
+          "enum": [
+            "caller_supplied",
+            "exact_start_host",
+            "redirect_landing_host",
+            "same_registrable_domain_subdomain"
+          ]
         },
         "evidenceType": {
           "type": "string",
-          "enum": ["redirect_landing_host", "canonical_url", "visible_anchor", "nav_anchor", "objective_candidate_anchor"]
+          "enum": [
+            "redirect_landing_host",
+            "canonical_url",
+            "visible_anchor",
+            "nav_anchor",
+            "objective_candidate_anchor"
+          ]
         },
         "sourceUrl": {
           "type": "string",
@@ -1600,17 +1694,32 @@
       "type": "object",
       "description": "A hostname discovered during preflight on a different registrable domain than the site being navigated. Never auto-trusted -- surfaced here so a caller/operator can review and explicitly add it to the task's allowedDomains if the run is meant to cross into it.",
       "additionalProperties": false,
-      "required": ["hostname", "registrableDomain", "evidenceType", "sourceUrl", "reason"],
+      "required": [
+        "hostname",
+        "registrableDomain",
+        "evidenceType",
+        "sourceUrl",
+        "reason"
+      ],
       "properties": {
         "hostname": {
           "type": "string"
         },
         "registrableDomain": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "evidenceType": {
           "type": "string",
-          "enum": ["redirect_landing_host", "canonical_url", "visible_anchor", "nav_anchor", "objective_candidate_anchor"]
+          "enum": [
+            "redirect_landing_host",
+            "canonical_url",
+            "visible_anchor",
+            "nav_anchor",
+            "objective_candidate_anchor"
+          ]
         },
         "sourceUrl": {
           "type": "string"
@@ -1625,7 +1734,11 @@
       "type": "object",
       "description": "A URL considered during preflight and rejected outright by the conservative candidate-validation policy (unsupported protocol, localhost, loopback, or link-local address).",
       "additionalProperties": false,
-      "required": ["url", "evidenceType", "reason"],
+      "required": [
+        "url",
+        "evidenceType",
+        "reason"
+      ],
       "properties": {
         "url": {
           "type": "string"
@@ -1643,7 +1756,13 @@
         },
         "reason": {
           "type": "string",
-          "enum": ["unsupported_protocol", "unparseable_url", "localhost", "loopback_address", "link_local_address"]
+          "enum": [
+            "unsupported_protocol",
+            "unparseable_url",
+            "localhost",
+            "loopback_address",
+            "link_local_address"
+          ]
         }
       }
     },
@@ -1651,7 +1770,15 @@
       "type": "object",
       "description": "Diagnostics from the engine's deterministic preflight domain-discovery phase, which runs before the Claude-driven navigation loop and proposes an allowedDomains set so a caller need not enumerate every domain/subdomain a journey might use. See docs/architecture.md 'Preflight domain discovery' for the full conservative validation policy this reflects.",
       "additionalProperties": false,
-      "required": ["version", "startHostname", "finalUrl", "redirectChain", "trustedDomains", "proposedAllowedDomains", "allowedDomainsUsed"],
+      "required": [
+        "version",
+        "startHostname",
+        "finalUrl",
+        "redirectChain",
+        "trustedDomains",
+        "proposedAllowedDomains",
+        "allowedDomainsUsed"
+      ],
       "properties": {
         "version": {
           "type": "string",
@@ -1662,7 +1789,10 @@
           "type": "string"
         },
         "startRegistrableDomain": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Registrable (eTLD+1) domain of the start hostname, resolved via a maintained Public Suffix List-backed library. Null for hosts with no PSL-registrable domain (bare IPs, \"localhost\", or a hostname that is itself only a public suffix)."
         },
         "finalUrl": {
@@ -1718,6 +1848,78 @@
         "blockedReason": {
           "type": "string",
           "description": "Present only when preflight discovery itself blocked the run (e.g. the initial navigation redirected to an unsafe host)."
+        }
+      }
+    },
+    "ga4NetworkEventCapture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepIndex",
+        "requestUrl",
+        "timestamp",
+        "method",
+        "source"
+      ],
+      "properties": {
+        "stepIndex": {
+          "type": "integer"
+        },
+        "requestUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "params": {
+          "description": "Raw query/body parameters observed on the outgoing GA4 network request.",
+          "type": "object"
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method of the outgoing request, e.g. \"GET\", \"POST\"."
+        },
+        "postDataRaw": {
+          "type": "string",
+          "description": "Raw POST/sendBeacon request body, bounded and truncated (never dropped) past a fixed size cap. Absent for a GET request, or a POST/sendBeacon request with no body."
+        },
+        "postDataParams": {
+          "type": "array",
+          "description": "Body parameters, generically parsed only when the raw body is unambiguously form-urlencoded -- never a client-specific parsing rule. One entry per newline-delimited hit (a batched GA4 sendBeacon body concatenates multiple hits this way). Absent when the body doesn't confidently parse this way.",
+          "items": {
+            "type": "object"
+          }
+        },
+        "measurementId": {
+          "type": "string",
+          "description": "Mechanically read from the standard GA4 Measurement Protocol \"tid\" parameter (query or body) when present. Never inferred when absent."
+        },
+        "consentState": {
+          "type": "object",
+          "description": "Mechanically read from the standard GA4 consent-state parameters (\"gcs\", \"dma\", \"dma_cps\") when present, verbatim. Never inferred when absent."
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "main_frame",
+            "child_frame",
+            "popup_context"
+          ],
+          "description": "Which browsing context/frame this request was actually observed on -- a generic, mechanical capture-provenance fact, never an interpretation of what the request means."
+        },
+        "contextId": {
+          "type": "string",
+          "description": "Stable id distinguishing the tracked page (\"main\") from a specific adopted popup context."
+        },
+        "frameOrigin": {
+          "type": "string",
+          "description": "Origin of the child frame this request originated from -- present only for source: \"child_frame\"."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when postDataRaw was cut down to the configured size cap -- never a silent truncation."
         }
       }
     }

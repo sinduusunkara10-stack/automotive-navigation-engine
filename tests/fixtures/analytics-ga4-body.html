@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Analytics GA4 Body</title>
+    <meta
+      name="description"
+      content="Fixture proving: GA4 POST/sendBeacon body parameters (including measurementId/consentState mechanically read from the body, and an unknown param retained unfiltered), oversized-body truncation, duplicate-event non-deduplication, and consent-only vs business dataLayer events both preserved raw with no vendor-specific classification in the engine."
+    />
+  </head>
+  <body>
+    <h1>GA4 Body Fixture</h1>
+    <button type="button" id="fire-post-collect">Fire POST collect (body params only)</button>
+    <button type="button" id="fire-oversized-collect">Fire oversized POST collect</button>
+    <button type="button" id="fire-duplicate-collect">Fire duplicate GET collect</button>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      // Consent-management-style events that fire regardless of the visitor's actual
+      // consent choice -- the engine must preserve these as raw evidence exactly like any
+      // other event, never classify or drop them.
+      window.dataLayer.push({ event: "OneTrustLoaded" });
+      window.dataLayer.push({ event: "OptanonLoaded" });
+      window.dataLayer.push({ event: "OneTrustGroupsUpdated", OnetrustActiveGroups: "C0001,C0002" });
+      // A business event alongside the consent events -- both must survive raw, unfiltered.
+      window.dataLayer.push({ event: "view_offer_details", offerId: "FICTIONAL-OFFER-1" });
+
+      document.getElementById("fire-post-collect").addEventListener("click", function () {
+        var body = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALBODY1",
+          en: "generate_lead",
+          gcs: "G111",
+          dma: "1",
+          clientOnlyCustomParam: "fixture-unknown-value",
+        }).toString();
+        navigator.sendBeacon("/g/collect", body);
+      });
+
+      document.getElementById("fire-oversized-collect").addEventListener("click", function () {
+        var padding = "x".repeat(10000);
+        var body = new URLSearchParams({ v: "2", tid: "G-FICTIONALBODY1", en: "generate_lead", pad: padding }).toString();
+        navigator.sendBeacon("/g/collect", body);
+      });
+
+      document.getElementById("fire-duplicate-collect").addEventListener("click", function () {
+        // cache: "no-store" so two logically-identical hits genuinely reach the network
+        // twice, rather than the browser's own HTTP cache coalescing the second, otherwise
+        // identical, in-flight GET into the first (a browser caching behaviour, not
+        // anything to do with the engine's own capture/bounding logic under test here).
+        var params = new URLSearchParams({ v: "2", tid: "G-FICTIONALTEST1", en: "page_view", dl: location.href }).toString();
+        fetch("/g/collect?" + params, { cache: "no-store" }).catch(function () {});
+        fetch("/g/collect?" + params, { cache: "no-store" }).catch(function () {});
+      });
+    </script>
+  </body>
+</html>

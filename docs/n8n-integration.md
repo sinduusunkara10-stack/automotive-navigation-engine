@@ -269,6 +269,35 @@ fixtures in this repo, all of which were updated the same way. No other n8n-side
 required: both new fields are additive/diagnostic-only, so a workflow that only bumps the
 two version strings continues to behave exactly as before.
 
+**Example (already applied, again): response `"1.11.0"` → `"1.12.0"`, request `"1.12.0"` →
+`"1.13.0"`.** The cross-client analytics-capture-evidence fix (see `docs/architecture.md`
+"Cross-client analytics-capture-evidence fix") widened the response contract, all
+additively: `captures.data_layer_evidence[]` and `captures.ga4_network_events[]` entries
+gained capture-context provenance (`source`: `"main_frame"`/`"child_frame"`/`"popup_context"`,
+`contextId`, `frameOrigin`, `truncated`); `ga4_network_events[]` also gained `method`,
+`postDataRaw`, `postDataParams`, `measurementId`, and `consentState`, so a GA4
+POST/`sendBeacon` request is no longer only partially captured; `captures.cta_clicks[]`
+gained `openedNewContext`/`observedNewContext`, reporting whether a click opened a
+popup/new-tab context and whether that context was actually instrumented before being
+closed (previously closed unobserved — see `src/capture-modules/popupCapture.ts`). No
+existing field on either contract was removed, renamed, or had its meaning changed. Per
+this repo's own stated convention, the response contract's `schemaVersion` moved from
+`"1.11.0"` to `"1.12.0"`, and the request contract's `outputSchemaVersion` and its own
+`schemaVersion` tracked the same way, ending at `"1.12.0"` and `"1.13.0"` respectively (the
+gap between this entry's starting versions and the previous entry's ending versions
+reflects earlier additive bumps not individually logged here — each engine response/request
+schema's own top-level `schemaVersion` description carries the complete, exact history).
+**An n8n workflow must update both version strings it sends to `outputSchemaVersion:
+"1.12.0"` and `schemaVersion: "1.13.0"`** — see the `examples/*.json` fixtures in this repo,
+all of which were updated the same way. One consumption-pattern note (not a schema change):
+a page's `data_layer_evidence` can now be split across more than one entry sharing that
+page's own `url`/`stepIndex` (the existing per-step full-array snapshot, plus any real-time
+`dataLayer.push` entries recovered from a same-tab navigation race) — a workflow that reads
+`captures.data_layer_evidence` should flatten every entry sharing a `stepIndex`/`contextId`
+rather than assume one lookup is the complete picture. No other n8n-side change is
+required: every new field is additive, so a workflow that only bumps the two version
+strings continues to behave exactly as before.
+
 ## 8. Task store and instance limitations
 
 Run records are held behind a pluggable `TaskStore` interface (`src/api/taskStore.ts`; see

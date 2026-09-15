@@ -9,6 +9,7 @@ import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVe
 import { checkLimitsBreach, validateDecision, type LimitBreach, type SafetyCheckResult } from "../safety/index.js";
 import { dispatchAction } from "../actions/index.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
+import { MAIN_CONTEXT_ID } from "../capture-modules/captureContext.js";
 import { diffDataLayer, readDataLayerSnapshot, type DataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
 import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
@@ -115,8 +116,8 @@ export async function runStep(params: {
   // the journey (its initial pushes and whatever accumulated by the time each step runs),
   // so it is sampled opportunistically on every step rather than only when requested.
   if (task.captureModules.includes("data_layer_evidence")) {
-    const dataLayerEntry = await captureDataLayer(page, stepIndex);
-    captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), dataLayerEntry];
+    const dataLayerEntries = await captureDataLayer(page, stepIndex, { contextId: MAIN_CONTEXT_ID });
+    captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), ...dataLayerEntries];
   }
 
   (

@@ -657,6 +657,59 @@ only when `ga4_network_events` was; `advancedJourney` is always present whenever
 requested and a click was dispatched, since it costs nothing extra to compute. No new
 capture-module name or task-request field was needed for any of this.
 
+### Cross-client analytics-capture-evidence fix: provenance, popups, and GA4 request bodies
+
+A production run against a real client's "Request a Quote"/"View Offer Details"-style CTA
+showed three structural gaps in the mechanism above, none of them brand- or client-specific:
+
+1. **Popup/new-context capture.** A click that opens a new browsing context
+   (`target="_blank"`, or a `window.open()` call from a click handler) used to be closed
+   immediately, before any capture code ever ran against it — whatever GA4 request or
+   `dataLayer.push()` its own click handler fired *inside that context* was permanently lost.
+   `src/capture-modules/popupCapture.ts`'s `adoptPopupForCapture` now instruments a popup as
+   early as possible (attached the instant Playwright's own `"popup"` event fires — see
+   `src/actions/click.ts`'s `onPopup` handler — not after the click's own dispatch/navigation
+   handling has already run its course) for a short, bounded window
+   (`POPUP_ADOPTION_WINDOW_MS`), then closes it. The engine still never adopts the popup as
+   its own tracked page — navigation safety/`allowedDomains` and the existing generic
+   `destinationUrl` fallback (`src/actions/click.ts`) are entirely unchanged; this is
+   capture-only. `ActionResult`/`CtaClickCapture` gain `openedNewContext` (a popup was
+   opened at all) and `observedNewContext` (it was actually instrumented before closing,
+   vs. neither capture module being requested at all).
+2. **Frame/context provenance and the click-vs-navigation race.** `data_layer_evidence` and
+   `ga4_network_events` entries now carry a generic `source`
+   (`"main_frame"`/`"child_frame"`/`"popup_context"`), `contextId`, and — for a child
+   frame — `frameOrigin`. `captureDataLayer` (`src/capture-modules/dataLayer.ts`) is now
+   frame-aware, reusing `src/observation/frames.ts`'s existing same-origin child-frame
+   discovery rather than reading only the main document. Separately,
+   `attachDataLayerPushCapture` attaches a real-time `dataLayer.push` observer (a
+   `page.exposeBinding` + `page.addInitScript` pair, re-applied on every navigation) that
+   captures a push the moment it happens, in Node, independent of the per-step full-array
+   snapshot — this is what recovers a click handler's own `dataLayer.push()` when it fires
+   immediately before a same-tab navigation that would otherwise tear down the JS context
+   (and reset `window.dataLayer` to a fresh array) before any later snapshot could see it.
+   **Consequence for consumers:** a page's dataLayer evidence can now be split across more
+   than one `data_layer_evidence` entry sharing that page's own `url`/`stepIndex` (the
+   per-step snapshot, plus any real-time push entries for the same pushes) — a caller must
+   flatten every entry for a given `url`/`stepIndex`, never assume a single lookup is the
+   complete picture (this is why correlation is keyed on `stepIndex`/`contextId`, not
+   positional indexing).
+3. **GA4 request completeness.** `attachGa4NetworkCapture` (`src/capture-modules/ga4NetworkEvents.ts`)
+   now also reads `request.method()` and — for a POST/`sendBeacon` hit — the raw body
+   (`postDataRaw`, bounded to `MAX_GA4_POST_BODY_BYTES` and flagged `truncated` rather than
+   dropped past that), plus a generic, best-effort form-urlencoded parse of it
+   (`postDataParams`; never attempted when the body doesn't unambiguously look like
+   `key=value` pairs). `measurementId` and `consentState` are mechanically read from GA4's
+   own fixed, protocol-level parameter names (`tid`; `gcs`/`dma`/`dma_cps`) across the union
+   of query and body params — never inferred, never brand/client vocabulary.
+
+None of this adds brand/vendor/CTA-label logic anywhere in `src/capture-modules` or
+`src/actions`: `source`, `contextId`, `frameOrigin`, `truncated`, `method`, `postDataRaw`,
+`postDataParams`, `measurementId`, `consentState`, `openedNewContext`, and
+`observedNewContext` are all generic, mechanically-derived facts about *how* evidence was
+captured, never an interpretation of what it means — mapping raw evidence to a specific
+client's reporting columns remains n8n's job (`docs/n8n-integration.md` §6), unchanged.
+
 ## 9. HTTP API boundary (n8n integration)
 
 n8n submits a `task-request` JSON (see `schemas/task-request.schema.json`) over HTTP and
@@ -751,11 +804,17 @@ as not-yet-built rather than removed from the plan — see §11.
   /capture-modules         # pluggable, task-specific evidence extraction
     pageVisits.ts           # implemented
     pageMetadata.ts         # implemented
-    dataLayer.ts             # implemented (data_layer_evidence)
+    dataLayer.ts             # implemented (data_layer_evidence) -- frame-aware per-step
+                              # snapshot (captureDataLayer) plus a real-time
+                              # dataLayer.push observer (attachDataLayerPushCapture) that
+                              # survives a same-tab navigation race, see §8 above
     dataLayerDelta.ts        # implemented -- generic before/after dataLayer delta used by
                               # the action-attributed analytics capture below, distinct from
                               # dataLayer.ts's own per-step full-snapshot capture
-    ga4NetworkEvents.ts      # implemented
+    ga4NetworkEvents.ts      # implemented -- GET query params, POST/sendBeacon body
+                              # (bounded, generically parsed), measurementId/consentState
+    popupCapture.ts           # implemented -- bounded popup/new-context adoption, see §8 above
+    captureContext.ts         # shared contextId constants (MAIN_CONTEXT_ID, popupContextId)
     screenshots.ts           # implemented
     finishPageCtas.ts        # implemented
     ctaClicks.ts             # implemented -- also builds the optional actionAnalytics
