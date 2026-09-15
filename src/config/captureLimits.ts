@@ -17,6 +17,37 @@ export const MAX_GA4_NETWORK_EVENTS = 500;
 /** Whole-run cap on captures.errors -- a persistent, run-lifetime listener. */
 export const MAX_ERROR_ENTRIES = 200;
 
+/**
+ * Fixed byte cap on a single GA4 network request's raw POST/sendBeacon body
+ * (Ga4NetworkEventCapture.postDataRaw) -- bounds the one place an arbitrary-size payload
+ * could otherwise enter the response. Past this cap the body is truncated (never dropped;
+ * see Ga4NetworkEventCapture.truncated) rather than the whole event being discarded. Not
+ * brand/vendor-specific -- it bounds a request body's byte length, not its content.
+ */
+export const MAX_GA4_POST_BODY_BYTES = 8192;
+
+/**
+ * Whole-run cap on real-time dataLayer.push captures (see
+ * capture-modules/dataLayer.ts's attachDataLayerPushCapture) -- a persistent,
+ * run-lifetime listener, same bounded-growth reasoning as MAX_GA4_NETWORK_EVENTS above.
+ * Distinct from MAX_DATA_LAYER_RAW_ENTRIES_PER_SNAPSHOT, which bounds one per-step
+ * full-array snapshot, not this continuous, per-push capture.
+ */
+export const MAX_DATA_LAYER_PUSH_EVENTS_PER_RUN = 500;
+
+/** Per dataLayer.push(...) call, how many of the pushed arguments are captured -- bounds a single call that (unusually) pushes many arguments at once. */
+export const MAX_DATA_LAYER_PUSH_ARGS_PER_CALL = 50;
+
+/**
+ * Bounded wait after adopting a popup/new-tab context (see
+ * capture-modules/popupCapture.ts) before it is closed -- long enough for an
+ * already-in-flight analytics beacon/dataLayer push to land, short enough not to
+ * meaningfully slow down a run that opens several such contexts. Not env-configurable
+ * (unlike the evidence-retention limits below): this is a capture-timing budget, not an
+ * operational how-much-to-retain choice.
+ */
+export const POPUP_ADOPTION_WINDOW_MS = 1500;
+
 // --- Evidence-retention limits (configurable) -----------------------------------------
 //
 // Unlike the three constants above, these three bound response evidence that a journey

@@ -16,6 +16,8 @@ import { runStep, type TerminalStatus } from "./loop.js";
 import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
+import { attachDataLayerPushCapture } from "../capture-modules/dataLayer.js";
+import { MAIN_CONTEXT_ID } from "../capture-modules/captureContext.js";
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
@@ -198,7 +200,16 @@ export async function runTask(params: {
   // requests) can fire on the very first page load, so listeners must be attached before
   // that first navigation, and only when the task actually asked for them.
   const detachGa4Capture = task.captureModules.includes("ga4_network_events")
-    ? attachGa4NetworkCapture(page, captures, () => state.stepCount)
+    ? attachGa4NetworkCapture(page, captures, () => state.stepCount, { contextId: MAIN_CONTEXT_ID })
+    : undefined;
+  // Real-time dataLayer.push observer (see capture-modules/dataLayer.ts): attached before
+  // the first navigation too, for the same reason -- a push can happen on the very first
+  // page, and this is what recovers a click handler's own push that would otherwise be
+  // lost to a same-tab navigation race (see docs/architecture.md "Generic action-attributed
+  // analytics capture"). Additive alongside the existing per-step full-snapshot capture in
+  // core/loop.ts, never a replacement for it.
+  const detachDataLayerPushCapture = task.captureModules.includes("data_layer_evidence")
+    ? await attachDataLayerPushCapture(page, captures, () => state.stepCount, { contextId: MAIN_CONTEXT_ID })
     : undefined;
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
@@ -336,6 +347,7 @@ export async function runTask(params: {
     });
   } finally {
     detachGa4Capture?.();
+    detachDataLayerPushCapture?.();
     detachErrorCapture?.();
   }
 }
@@ -394,7 +406,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.11.0",
+    schemaVersion: "1.12.0",
     taskId: task.taskId,
     status,
     statusReason,

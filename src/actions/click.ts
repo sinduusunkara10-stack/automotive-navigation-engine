@@ -16,6 +16,7 @@ import {
 import { checkNavigationAllowed } from "../safety/index.js";
 import { assessNavigationRecovery, robustGoto, PAGE_SETTLE_DELAY_MS, type RobustGotoOutcome } from "../core/robustNavigation.js";
 import { recordDiagnosticError } from "../capture-modules/errors.js";
+import { adoptPopupForCapture } from "../capture-modules/popupCapture.js";
 
 const CLICK_ELEMENT_TIMEOUT_MS = 5000;
 
@@ -259,6 +260,9 @@ async function resolveUnactionableClick(params: {
   urlBeforeClick: string;
   /** Set only when a click was actually dispatched and a side-effect check already ran and found nothing -- purely for diagnostics completeness (requirement A.6/B.12). */
   clickSideEffectChecked?: boolean;
+  /** Set only when this click produced a popup/new-context event -- see popupCapture.ts. Merged verbatim into the returned ActionResult either way. */
+  openedNewContext?: boolean;
+  observedNewContext?: boolean;
 }): Promise<ActionResult> {
   const {
     page,
@@ -275,6 +279,8 @@ async function resolveUnactionableClick(params: {
     preClickSnapshot,
     urlBeforeClick,
     clickSideEffectChecked,
+    openedNewContext,
+    observedNewContext,
   } = params;
 
   const fallback = await attemptFallbackNavigation({
@@ -335,6 +341,7 @@ async function resolveUnactionableClick(params: {
       success: true,
       resultingUrl: fallback.outcome.url,
       fallbackVerified: fallbackVerification?.verified ?? true,
+      ...(openedNewContext ? { openedNewContext, observedNewContext: Boolean(observedNewContext) } : {}),
     };
   }
 
@@ -352,6 +359,7 @@ async function resolveUnactionableClick(params: {
     // core/loop.ts uses this to give Navigation Claude a bounded number of further chances
     // (a fresh observation, a new decision) instead of ending the whole run on the spot.
     ...(STALE_TARGET_CATEGORIES.has(category) ? { staleTarget: true } : {}),
+    ...(openedNewContext ? { openedNewContext, observedNewContext: Boolean(observedNewContext) } : {}),
   };
 }
 
@@ -458,8 +466,18 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   // page's main frame for that case, so without this the click below would otherwise be
   // reported an unqualified success with the URL/title left completely unchanged.
   let popupOpened: Page | undefined;
+  // Started the instant the "popup" event fires -- before returning control to the event
+  // loop for anything else -- so GA4/dataLayer capture is attached to the new context as
+  // early as possible (item A.3 of the popup/new-context capture fix), well before a fast
+  // local/CDN-hosted destination page could otherwise load and fire its own beacon/push
+  // unobserved. Whichever branch below ends up handling this click simply awaits this
+  // already-in-flight promise rather than starting adoption itself.
+  let popupAdoption: Promise<{ observed: boolean }> | undefined;
   const onPopup = (popup: Page) => {
     popupOpened = popup;
+    popupAdoption = adoptPopupForCapture({ popup, captures, stepIndex, captureModules }).catch(() => ({
+      observed: false,
+    }));
   };
   // Registered before the click so a navigation (or popup) that commits fast is never missed.
   page.on("framenavigated", onFrameNavigated);
@@ -470,10 +488,15 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   } catch (error) {
     page.off("framenavigated", onFrameNavigated);
     page.off("popup", onPopup);
-    await popupOpened?.close().catch(() => {});
+    const openedNewContext = Boolean(popupOpened);
+    const observedNewContext = popupAdoption ? (await popupAdoption).observed : false;
     const message = error instanceof Error ? error.message : String(error);
     if (!/timeout/i.test(message)) {
-      return { success: false, error: message };
+      return {
+        success: false,
+        error: message,
+        ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
+      };
     }
 
     const postFailureState = await readElementState(page, targetElementId);
@@ -519,6 +542,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
           success: true,
           resultingUrl: safePageUrl(page) ?? urlBeforeClick,
           clickSideEffectDetected: true,
+          ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
         };
       }
     }
@@ -544,6 +568,8 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       preClickSnapshot,
       urlBeforeClick,
       clickSideEffectChecked: category === "intercepted",
+      openedNewContext,
+      observedNewContext,
     });
   }
 
@@ -556,7 +582,15 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   if (!mainFrameNavigated && popupOpened) {
     const popup = popupOpened;
     const popupUrl = safePageUrl(popup);
-    await popup.close().catch(() => {});
+    // Popup/new-context capture (see capture-modules/popupCapture.ts): rather than closing
+    // this context unobserved, it was already adopted (see popupAdoption above, started the
+    // instant the "popup" event fired) for a short, bounded window so any GA4
+    // request/dataLayer push it fires (exactly the evidence a "Request a Quote"/"View
+    // Offer Details"-style CTA that opens a new tab would otherwise lose entirely) is
+    // still captured, tagged with its own popup_context/contextId provenance, before it is
+    // closed. Navigation safety/allowedDomains handling below is unchanged: the engine
+    // still only ever continues navigating the one tracked `page`.
+    const { observed: observedNewContext } = popupAdoption ? await popupAdoption : { observed: false };
     const postPopupState = await readElementState(page, targetElementId);
     return resolveUnactionableClick({
       page,
@@ -577,6 +611,8 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         `navigating the tracked page; the tracked page's URL and title are unchanged`,
       preClickSnapshot,
       urlBeforeClick,
+      openedNewContext: true,
+      observedNewContext,
     });
   }
 
