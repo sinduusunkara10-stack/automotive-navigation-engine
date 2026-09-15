@@ -521,16 +521,46 @@ test("REGRESSION: do_not_interact forbids clicking any consent/tracking-preferen
   assert.match(prompt.system, /never click any control whose semantic purpose is to manage consent/i);
 });
 
-test("REGRESSION: accept_optional is the only policy that permits granting optional consent, and only to clear a genuine blocker", () => {
+test("REGRESSION: accept_optional is the only policy that instructs the model to actually prefer granting optional consent, not merely permit it as a last resort", () => {
   const context = buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" });
   const prompt = buildReasoningPrompt(context);
   assert.match(prompt.system, /"accept_optional"/);
-  assert.match(prompt.system, /you may click a control that grants optional consent/i);
+  assert.match(prompt.system, /instruction to actually grant optional consent, not merely a last resort/i);
+  assert.match(prompt.system, /choose the accepting control even when the objective could also be reached without granting/i);
 
   // No other policy's prompt ever grants this latitude.
   for (const policy of ["reject_optional", "essential_only", "do_not_interact"] as const) {
     const otherPrompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: policy }));
-    assert.doesNotMatch(otherPrompt.system, /you may click a control that grants optional consent/i);
+    assert.doesNotMatch(otherPrompt.system, /instruction to actually grant optional consent/i);
+  }
+});
+
+// ---------------------------------------------------------------------------------------
+// FIX (this incident): accept_optional previously only permitted granting optional consent
+// "when genuinely necessary to clear a blocking overlay" and "never when the objective is
+// already reachable without it" -- since a cookie banner's necessary-only control almost
+// always dismisses the banner just as well as its accept-all counterpart, that wording made
+// accept_optional behaviourally indistinguishable from reject_optional in the exact scenario
+// it exists for (a banner offering both choices), defeating analytics-capture tasks that set
+// it precisely to allow GA4/consent-gated evidence collection. See CLAUDE.md's fix and
+// src/safety/consentPolicyGuard.ts for the accompanying deterministic enforcement.
+// ---------------------------------------------------------------------------------------
+
+test("REGRESSION (this incident): accept_optional no longer gates granting optional consent behind blocking-overlay necessity", () => {
+  const context = buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" });
+  const prompt = buildReasoningPrompt(context);
+  assert.doesNotMatch(prompt.system, /only when doing so is genuinely necessary to clear a blocking overlay/i);
+  assert.doesNotMatch(prompt.system, /never when the objective is already reachable without it/i);
+});
+
+test("buildReasoningPrompt requires every decision to self-classify consentControlIntent, generically for any policy", () => {
+  for (const policy of ["reject_optional", "accept_optional", "essential_only", "do_not_interact"] as const) {
+    const prompt = buildReasoningPrompt(buildTestReasoningContext({ consentInteractionPolicy: policy }));
+    assert.match(prompt.system, /consentControlIntent/);
+    assert.match(prompt.system, /grants_optional_consent/);
+    assert.match(prompt.system, /declines_optional_consent/);
+    assert.match(prompt.system, /opens_consent_settings/);
+    assert.match(prompt.system, /not_consent_related/);
   }
 });
 

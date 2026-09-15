@@ -1,6 +1,7 @@
 import type { ActionType, SelectedAction } from "../types/actions.js";
 import type { ReasoningContext } from "./reasoningProvider.js";
 import { checkNavigationAllowed } from "../safety/domainGuard.js";
+import { isConsentIntentCompliant } from "../safety/consentPolicyGuard.js";
 import type { ClaudeDecisionPayload } from "./claudeDecisionSchema.js";
 
 export type ClaudeDecisionRejectionReason =
@@ -8,7 +9,8 @@ export type ClaudeDecisionRejectionReason =
   | "low_confidence"
   | "missing_target_element_id"
   | "unknown_target_element_id"
-  | "navigate_not_allowed";
+  | "navigate_not_allowed"
+  | "consent_policy_violation";
 
 export type ClaudeDecisionValidation =
   | { valid: true; action: SelectedAction; reason: string; confidence: number }
@@ -50,6 +52,14 @@ export function validateClaudeDecision(
     if (!payload.navigateUrl || !checkNavigationAllowed(payload.navigateUrl, context.allowedDomains)) {
       return { valid: false, reason: "navigate_not_allowed" };
     }
+  }
+
+  // consentControlIntent is required by the decision schema, so a real structured-output
+  // response always carries it -- the "?? not_consent_related" fallback exists only as a
+  // defensive default for any caller/fixture that predates this field, never as a route to
+  // silently bypass this check.
+  if (!isConsentIntentCompliant(context.consentInteractionPolicy, payload.consentControlIntent ?? "not_consent_related")) {
+    return { valid: false, reason: "consent_policy_violation" };
   }
 
   return { valid: true, action: buildSelectedAction(payload), reason: payload.reason, confidence: payload.confidence };

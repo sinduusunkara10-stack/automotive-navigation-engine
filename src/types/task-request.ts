@@ -34,15 +34,17 @@ export interface Limits {
 }
 
 /**
- * How the reasoning layer may interact with a blocking consent/preference control when
- * one is genuinely in the way of an objective-relevant control (see docs/architecture.md
- * "Blocker recovery"). Never a license to alter granular consent settings by guesswork,
- * and never enforced by hardcoded CTA wording or a vendor-specific selector -- the engine
- * gives the model this policy as plain instruction and trusts it to apply the same
- * generic, language-agnostic semantic judgement already used elsewhere (e.g. preferring an
- * objective-matching control by accessible name/type/ariaState, not a fixed wordlist).
+ * How the reasoning layer may interact with a consent/preference control (see
+ * docs/architecture.md "Blocker recovery"). Never a license to alter granular consent
+ * settings by guesswork, and never enforced by hardcoded CTA wording or a vendor-specific
+ * selector -- the engine gives the model this policy as plain instruction AND
+ * deterministically checks every decision's own self-reported consent classification
+ * (ConsentControlIntent, types/consentControl.ts) against it before the decision is ever
+ * dispatched (see src/safety/consentPolicyGuard.ts's isConsentIntentCompliant), correcting
+ * or safely stopping a decision that contradicts the requested policy rather than ever
+ * silently applying the opposite one.
  *
- * - "reject_optional" (the default when this field is omitted): may click a control whose
+ * - "reject_optional" (the default when this field is omitted): prefer a control whose
  *   semantic purpose is to decline or continue without granting optional/non-essential
  *   data collection; must never click one whose purpose is to grant broad/optional
  *   consent.
@@ -50,9 +52,10 @@ export interface Limits {
  *   generic, non-vendor-specific way to distinguish a granular "essential only" toggle
  *   screen from a plain reject control -- offered as a distinct, explicit value for a
  *   caller whose own policy language specifically calls for it.
- * - "accept_optional": an explicit, caller-opted-in allowance to grant optional consent
- *   solely to clear a blocking control that prevents reaching the objective -- never the
- *   default, and never applied when the objective is reachable without it.
+ * - "accept_optional": an explicit, caller-opted-in instruction to actually grant optional
+ *   consent when a control for doing so is visible -- not merely a last resort for
+ *   unblocking a control that is otherwise reachable regardless of the consent choice made
+ *   (e.g. so consent-gated analytics evidence can be captured); never the default.
  * - "do_not_interact": the model must never click any control whose purpose is to manage
  *   consent/tracking preferences, even to dismiss a blocker; a control that stays blocked
  *   stays blocked.

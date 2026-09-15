@@ -32,6 +32,7 @@ test("accepts a valid, schema-conformant Claude decision", async () => {
     targetElementId: "el-0",
     reason: "Continue is the only visible path toward the objective.",
     confidence: 0.87,
+    consentControlIntent: "not_consent_related",
   };
   const client = new FakeReasoningModelClient([resultStep(payload)]);
   const { provider, log } = buildProvider(client);
@@ -53,6 +54,7 @@ test("rejects an out-of-vocabulary/disallowed action and stops safely after exha
     targetElementId: "el-0",
     reason: "Attempting a disallowed action.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
   const context = buildTestReasoningContext({ allowedActions: ["stop_failure", "stop_blocked"] });
   const client = new FakeReasoningModelClient([resultStep(payload), resultStep(payload)]);
@@ -73,6 +75,7 @@ test("rejects a click targeting an unknown targetElementId", async () => {
     targetElementId: "el-not-real",
     reason: "Clicking an element that was never observed.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
   const client = new FakeReasoningModelClient([resultStep(payload), resultStep(payload)]);
   const { provider, log } = buildProvider(client);
@@ -101,6 +104,7 @@ test("low-confidence output is rejected per the documented minimum-confidence po
     targetElementId: "el-0",
     reason: "Not very sure about this one.",
     confidence: 0.1,
+    consentControlIntent: "not_consent_related",
   };
   const client = new FakeReasoningModelClient([resultStep(payload), resultStep(payload)]);
   const { provider, log } = buildProvider(client);
@@ -117,12 +121,14 @@ test("a rejected first attempt can succeed on the single allowed retry", async (
     targetElementId: "el-not-real",
     reason: "First attempt targets an unknown element.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
   const validPayload: ClaudeDecisionPayload = {
     action: "click",
     targetElementId: "el-0",
     reason: "Second attempt targets the real Continue control.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
   const client = new FakeReasoningModelClient([resultStep(invalidPayload), resultStep(validPayload)]);
   const { provider, log } = buildProvider(client);
@@ -257,6 +263,7 @@ function correctivePayload(): ClaudeDecisionPayload {
     targetElementId: "el-0",
     reason: "Corrected: Continue is the visible path toward the objective.",
     confidence: 0.9,
+    consentControlIntent: "not_consent_related",
   };
 }
 
@@ -374,4 +381,141 @@ test("FIX (corrective retry): retryCount and provider call counts are accurate f
   assert.equal(exhaustedDiagnostics.retryCount, 1);
   assert.equal(exhaustedDiagnostics.rejectedDecisionCount, 2, "both the original error and the failed corrective retry count as rejected/error attempts");
   assert.equal(exhaustedDiagnostics.fallbackDecisionCount, 1);
+});
+
+// ---------------------------------------------------------------------------------------
+// FIX (this incident, root cause "conflicting prompt instruction" + "missing deterministic
+// enforcement"): a real Nissan-UK run set consentInteractionPolicy "accept_optional" but the
+// model chose the necessary-only cookie control anyway, reasoning that minimal consent was
+// preferred -- the prompt alone never guaranteed the opposite couldn't happen. Every
+// decision now self-reports consentControlIntent (types/consentControl.ts), and
+// validateClaudeDecision.ts deterministically rejects one that contradicts
+// consentInteractionPolicy via src/safety/consentPolicyGuard.ts's isConsentIntentCompliant
+// -- reusing the exact same bounded-one-corrective-retry machinery as a schema/parse
+// failure (CORRECTIVE_RETRY_CATEGORIES), so the model gets one chance to reconsider before
+// the run falls back to a safe stop rather than ever silently dispatching the non-compliant
+// choice.
+// ---------------------------------------------------------------------------------------
+
+function consentPayload(intent: ClaudeDecisionPayload["consentControlIntent"]): ClaudeDecisionPayload {
+  return {
+    action: "click",
+    targetElementId: "el-1",
+    reason: "Choosing the visible cookie-banner control.",
+    confidence: 0.9,
+    consentControlIntent: intent,
+  };
+}
+
+test("FIX (consent policy): a decision that declines optional consent under accept_optional is rejected and corrected on retry", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep(consentPayload("declines_optional_consent")),
+    resultStep(consentPayload("grants_optional_consent")),
+  ]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" }));
+
+  assert.deepEqual(decision.action, { type: "click", target: "el-1" });
+  assert.equal(decision.consentControlIntent, "grants_optional_consent");
+  assert.equal(client.requests.length, 2, "expected exactly one corrective retry (2 calls total)");
+  assert.equal(log[0]?.reason, "consent_policy_violation");
+  assert.equal(log[0]?.consentPolicyCompliant, false);
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+  assert.equal(log[log.length - 1]?.correctiveRetry, true);
+  assert.equal(log[log.length - 1]?.consentPolicyCompliant, true);
+});
+
+test("FIX (consent policy): a decision that grants optional consent under reject_optional is rejected and corrected on retry", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep(consentPayload("grants_optional_consent")),
+    resultStep(consentPayload("declines_optional_consent")),
+  ]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext({ consentInteractionPolicy: "reject_optional" }));
+
+  assert.deepEqual(decision.action, { type: "click", target: "el-1" });
+  assert.equal(decision.consentControlIntent, "declines_optional_consent");
+  assert.equal(client.requests.length, 2);
+  assert.equal(log[0]?.reason, "consent_policy_violation");
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+});
+
+test("FIX (consent policy): a decision that clicks any consent control under do_not_interact is rejected and corrected on retry", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep(consentPayload("declines_optional_consent")),
+    resultStep({
+      action: "wait",
+      reason: "Consent controls are off-limits under this policy; waiting instead.",
+      confidence: 0.8,
+      consentControlIntent: "not_consent_related",
+    }),
+  ]);
+  const { provider, log } = buildProvider(client);
+  const context = buildTestReasoningContext({
+    consentInteractionPolicy: "do_not_interact",
+    allowedActions: ["click", "wait", "stop_blocked"],
+  });
+
+  const decision = await provider.decide(context);
+
+  assert.deepEqual(decision.action, { type: "wait" });
+  assert.equal(log[0]?.reason, "consent_policy_violation");
+  assert.equal(log[log.length - 1]?.outcome, "accepted");
+});
+
+test("FIX (consent policy): two consecutive policy-contradicting decisions stop safely at stop_blocked with a consent_policy_violation reason, never silently dispatching the non-compliant choice", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep(consentPayload("declines_optional_consent")),
+    resultStep(consentPayload("declines_optional_consent")),
+  ]);
+  const { provider, log } = buildProvider(client);
+
+  const decision = await provider.decide(buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" }));
+
+  assert.deepEqual(decision.action, { type: "stop_blocked" });
+  assert.match(decision.rationale, /consent_policy_violation/);
+  assert.equal(client.requests.length, 2, "expected exactly the original attempt plus its one corrective retry, nothing more");
+  // Both real attempts (rejected) plus the final fallback entry all carry this reason.
+  assert.equal(log.filter((e) => e.reason === "consent_policy_violation").length, 3);
+  assert.equal(log.filter((e) => e.outcome === "rejected").length, 2);
+  assert.equal(log.filter((e) => e.correctiveRetry === true).length, 1);
+  assert.equal(log[log.length - 1]?.outcome, "fallback");
+});
+
+test("FIX (consent policy): the corrective system prompt for a consent violation names the actual policy, never the generic schema/parse wording", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep(consentPayload("declines_optional_consent")),
+    resultStep(consentPayload("grants_optional_consent")),
+  ]);
+  const { provider } = buildProvider(client);
+
+  await provider.decide(buildTestReasoningContext({ consentInteractionPolicy: "accept_optional" }));
+
+  const originalSystem = client.requests[0]?.system ?? "";
+  const correctiveSystem = client.requests[1]?.system ?? "";
+
+  assert.ok(correctiveSystem.startsWith(originalSystem));
+  assert.match(correctiveSystem, /consentControlIntent contradicts this run's consentInteractionPolicy \("accept_optional"\)/);
+  assert.doesNotMatch(correctiveSystem, /previous response could not be used: it was not valid JSON/i);
+});
+
+test("FIX (consent policy): non-consent decisions (consentControlIntent \"not_consent_related\") are never affected by any consentInteractionPolicy", async () => {
+  for (const policy of ["reject_optional", "accept_optional", "essential_only", "do_not_interact"] as const) {
+    const payload: ClaudeDecisionPayload = {
+      action: "click",
+      targetElementId: "el-0",
+      reason: "Continue is the only visible path toward the objective.",
+      confidence: 0.9,
+      consentControlIntent: "not_consent_related",
+    };
+    const client = new FakeReasoningModelClient([resultStep(payload)]);
+    const { provider } = buildProvider(client);
+
+    const decision = await provider.decide(buildTestReasoningContext({ consentInteractionPolicy: policy }));
+
+    assert.deepEqual(decision.action, { type: "click", target: "el-0" }, `expected an unaffected accepted decision under policy "${policy}"`);
+    assert.equal(client.requests.length, 1, `expected no retry under policy "${policy}"`);
+  }
 });

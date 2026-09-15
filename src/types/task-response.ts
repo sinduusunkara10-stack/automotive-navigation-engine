@@ -1,4 +1,6 @@
 import type { ActionType, SelectedAction } from "./actions.js";
+import type { ConsentControlIntent } from "./consentControl.js";
+import type { ConsentInteractionPolicy } from "./task-request.js";
 
 export type RunStatus =
   | "success"
@@ -497,6 +499,19 @@ export interface ReasoningProviderDecisionSummary {
   outputTokens?: number;
   latencyMs: number;
   elementSelection?: PromptElementSelectionDiagnostic;
+  /**
+   * This decision's self-reported consent semantics (see types/consentControl.ts), present
+   * whenever the provider produced a parseable response -- on acceptance and on a
+   * consent_policy_violation rejection alike, so the full attempt-by-attempt consent history
+   * is auditable even when nothing was ultimately dispatched.
+   */
+  consentControlIntent?: ConsentControlIntent;
+  /**
+   * Whether consentControlIntent (above) complied with this run's consentInteractionPolicy,
+   * per src/safety/consentPolicyGuard.ts's deterministic check. Present alongside
+   * consentControlIntent.
+   */
+  consentPolicyCompliant?: boolean;
 }
 
 /**
@@ -508,7 +523,7 @@ export interface ReasoningProviderDecisionSummary {
  * monetary cost) so cost can be computed downstream against whatever pricing applies later.
  */
 export interface ReasoningProviderDiagnostics {
-  version: "1.1.0";
+  version: "1.2.0";
   provider: string;
   model?: string;
   callCount: number;
@@ -519,6 +534,13 @@ export interface ReasoningProviderDiagnostics {
   totalOutputTokens: number;
   totalLatencyMs: number;
   retryCount: number;
+  /**
+   * The resolved consentInteractionPolicy (task-request.ts) this run actually enforced --
+   * present so a caller can audit which policy applied even when the request itself omitted
+   * the field and the documented default ("reject_optional") applied instead. Absent only
+   * for a provider (e.g. MockReasoningProvider) that never resolved a policy.
+   */
+  consentInteractionPolicy?: ConsentInteractionPolicy;
   decisions?: ReasoningProviderDecisionSummary[];
 }
 

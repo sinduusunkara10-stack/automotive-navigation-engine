@@ -32,6 +32,7 @@ function acceptedPayload(overrides: Partial<ClaudeDecisionPayload> = {}): Claude
     targetElementId: "el-0",
     reason: "Continue is the only visible path toward the objective.",
     confidence: 0.87,
+    consentControlIntent: "not_consent_related",
     ...overrides,
   };
 }
@@ -43,7 +44,7 @@ test("one accepted fake Claude decision produces callCount 1 and zero retries", 
   await provider.decide(buildTestReasoningContext());
   const diagnostics = provider.getUsageDiagnostics();
 
-  assert.equal(diagnostics.version, "1.1.0");
+  assert.equal(diagnostics.version, "1.2.0");
   assert.equal(diagnostics.provider, "claude");
   assert.equal(diagnostics.model, TEST_CONFIG.model);
   assert.equal(diagnostics.callCount, 1);
@@ -183,6 +184,7 @@ test("diagnostics contain no prompts, raw responses, observations, page HTML, se
   assert.deepEqual(topLevelKeys, [
     "acceptedDecisionCount",
     "callCount",
+    "consentInteractionPolicy",
     "decisions",
     "fallbackDecisionCount",
     "model",
@@ -197,9 +199,18 @@ test("diagnostics contain no prompts, raw responses, observations, page HTML, se
   const decisionKeys = new Set(diagnostics.decisions?.flatMap((d) => Object.keys(d)) ?? []);
   for (const key of decisionKeys) {
     assert.ok(
-      ["stepIndex", "attempt", "outcome", "confidence", "inputTokens", "outputTokens", "latencyMs", "elementSelection"].includes(
-        key,
-      ),
+      [
+        "stepIndex",
+        "attempt",
+        "outcome",
+        "confidence",
+        "inputTokens",
+        "outputTokens",
+        "latencyMs",
+        "elementSelection",
+        "consentControlIntent",
+        "consentPolicyCompliant",
+      ].includes(key),
       `unexpected key "${key}" in a per-decision summary`,
     );
   }

@@ -1,5 +1,6 @@
 import type { ActionType, RecordedAction, SelectedAction } from "../types/actions.js";
 import type { ConsentInteractionPolicy, SuccessCriterion } from "../types/task-request.js";
+import type { ConsentControlIntent } from "../types/consentControl.js";
 import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
 import type { RouteMemoryCandidateSummary } from "../types/routeMemory.js";
 import type { BranchPromptContext, MilestoneRollup } from "../types/branch.js";
@@ -7,14 +8,26 @@ import type { BranchPromptContext, MilestoneRollup } from "../types/branch.js";
 // Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
 // implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
 // independent of TaskResponse.schemaVersion.
-// Bumped from "1.0.0" to "1.1.0" for the additive, optional
+// Bumped from "1.1.0" to "1.2.0" for the consent-policy-enforcement audit trail: the
+// additive, optional consentInteractionPolicy (the resolved policy for this run) and
+// per-decision decisions[].consentControlIntent/consentPolicyCompliant fields -- see
+// src/safety/consentPolicyGuard.ts and CLAUDE.md's consent-policy fix. No existing field
+// removed or renamed. Bumped from "1.0.0" to "1.1.0" earlier for the additive, optional
 // decisions[].elementSelection diagnostic (see PromptElementSelectionDiagnostic in
 // ../types/task-response.js) -- no existing field removed or renamed.
-export const REASONING_PROVIDER_DIAGNOSTICS_VERSION = "1.1.0" as const;
+export const REASONING_PROVIDER_DIAGNOSTICS_VERSION = "1.2.0" as const;
 
 export interface Decision {
   action: SelectedAction;
   rationale: string;
+  /**
+   * Self-reported classification of this decision's consent semantics (see
+   * types/consentControl.ts), propagated from whatever provider produced it. Optional
+   * because not every ReasoningProvider implementation classifies this (e.g.
+   * MockReasoningProvider never does) -- absence is always treated as "not_consent_related"
+   * by src/safety/consentPolicyGuard.ts, never as a silent bypass.
+   */
+  consentControlIntent?: ConsentControlIntent;
 }
 
 export interface ReasoningContextLimits {

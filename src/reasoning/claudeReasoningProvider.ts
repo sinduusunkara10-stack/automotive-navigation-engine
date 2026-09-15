@@ -4,6 +4,7 @@ import { ReasoningModelError, type ReasoningModelClient } from "./reasoningModel
 import { buildClaudeDecisionSchema, type ClaudeDecisionPayload } from "./claudeDecisionSchema.js";
 import { buildReasoningPrompt, type PromptElementSelectionDiagnostic } from "./promptBuilder.js";
 import { validateClaudeDecision } from "./validateClaudeDecision.js";
+import { isConsentIntentCompliant } from "../safety/consentPolicyGuard.js";
 import { readClaudeReasoningConfig, type ClaudeReasoningConfig } from "./config.js";
 import {
   createAnthropicReasoningModelClient,
@@ -12,6 +13,14 @@ import {
 } from "./anthropicReasoningModelClient.js";
 import type { ReasoningProviderDiagnostics, ReasoningProviderDecisionSummary } from "../types/task-response.js";
 import type { ActionType } from "../types/actions.js";
+import type { ConsentInteractionPolicy } from "../types/task-request.js";
+import type { ConsentControlIntent } from "../types/consentControl.js";
+
+// See validateClaudeDecision.ts: the one non-transport rejection reason that means "the
+// response was structurally valid but its consentControlIntent contradicted this run's
+// consentInteractionPolicy" -- distinct from CORRECTIVE_RETRY_CATEGORIES's other two
+// members, which mean the response itself was unusable.
+const CONSENT_POLICY_VIOLATION_REASON = "consent_policy_violation";
 
 export interface ClaudeDecisionLogEntry {
   timestamp: string;
@@ -33,23 +42,43 @@ export interface ClaudeDecisionLogEntry {
   elementSelection?: PromptElementSelectionDiagnostic;
   /**
    * True only for the one bounded corrective retry issued after a response_schema_invalid/
-   * response_parse_failed failure (see decide() below). Internal-only -- never forwarded to
+   * response_parse_failed/consent_policy_violation failure (see decide() below and
+   * CORRECTIVE_RETRY_CATEGORIES). Internal-only -- never forwarded to
    * ReasoningProviderDecisionSummary/the response schema -- exists purely so a caller of
    * getDecisionLog() (e.g. a test) can distinguish this attempt from an ordinary retry
    * without having to infer it from the attempt number.
    */
   correctiveRetry?: boolean;
+  /**
+   * The decision's self-reported consent semantics (see types/consentControl.ts), recorded
+   * whenever the model produced a parseable response -- both on acceptance and on a
+   * consent_policy_violation rejection -- so the full attempt-by-attempt consent history is
+   * auditable even when nothing was ultimately dispatched (task requirement #11).
+   */
+  consentControlIntent?: ConsentControlIntent;
+  /**
+   * Whether consentControlIntent (above) complies with this run's consentInteractionPolicy,
+   * computed via the same deterministic src/safety/consentPolicyGuard.ts check
+   * validateClaudeDecision.ts itself used. Present alongside consentControlIntent.
+   */
+  consentPolicyCompliant?: boolean;
 }
 
-// The two sanitised categories that indicate the model's response itself was unusable
-// (not valid JSON, or JSON that failed the decision schema) rather than a transport/HTTP
-// failure -- see anthropicReasoningModelClient.ts's sanitizeError. Only these two ever
-// trigger the bounded corrective retry below; every other error category (auth, rate
-// limit, timeout, connection, bad request, etc.) is left to whatever the existing
-// maxRetries policy already does, unchanged.
+// The categories that get one bounded corrective retry instead of falling straight to a
+// safe stop_blocked fallback: the two sanitised categories meaning the model's response
+// itself was unusable (not valid JSON, or JSON that failed the decision schema -- see
+// anthropicReasoningModelClient.ts's sanitizeError), plus consent_policy_violation, meaning
+// the response WAS structurally valid but its self-reported consentControlIntent
+// contradicted this run's consentInteractionPolicy (see validateClaudeDecision.ts /
+// src/safety/consentPolicyGuard.ts) -- giving the model one chance to reconsider before the
+// engine falls back to a safe stop rather than ever silently dispatching a non-compliant
+// consent choice (task requirement #4/#5). Every other error category (auth, rate limit,
+// timeout, connection, bad request, etc.) is left to whatever the existing maxRetries
+// policy already does, unchanged.
 const CORRECTIVE_RETRY_CATEGORIES: ReadonlySet<string> = new Set([
   RESPONSE_PARSE_FAILED_CATEGORY,
   RESPONSE_SCHEMA_INVALID_CATEGORY,
+  CONSENT_POLICY_VIOLATION_REASON,
 ]);
 
 type AttemptOutcome =
@@ -60,13 +89,38 @@ type AttemptOutcome =
  * Builds the one-shot corrective retry's system prompt: the original system prompt
  * (unchanged, so every other instruction -- objective handling, safety wording, consent
  * policy, etc. -- still applies) plus a short, fully generic addendum appended at the end.
- * The addendum states only that the previous response was invalid and restates the exact
- * allowed-action vocabulary -- never the raw invalid response, never a provider payload,
- * never brand/site-specific wording (item 2/5/6/12 of the fix). The actual JSON schema
- * itself is unchanged and still passed structurally via outputSchema on every attempt
- * (including this one) -- this addendum only reinforces it in plain language.
+ * Never the raw invalid response, never a provider payload, never brand/site-specific
+ * wording (item 2/5/6/12 of the fix). The actual JSON schema itself is unchanged and still
+ * passed structurally via outputSchema on every attempt (including this one) -- the
+ * addendum only reinforces it in plain language.
+ *
+ * Branches on `failureReason` (see CORRECTIVE_RETRY_CATEGORIES): a schema/parse failure gets
+ * the original generic "your response was unusable" wording, while
+ * consent_policy_violation gets a distinct addendum naming the actual problem (the response
+ * was usable, but its consentControlIntent contradicted this run's consentInteractionPolicy)
+ * so the model is pointed at reconsidering its consent choice specifically, never at
+ * guessing what was structurally wrong with a response that wasn't.
  */
-function buildCorrectiveSystemPrompt(baseSystem: string, allowedActions: readonly ActionType[]): string {
+function buildCorrectiveSystemPrompt(
+  baseSystem: string,
+  allowedActions: readonly ActionType[],
+  failureReason: string,
+  consentInteractionPolicy: ConsentInteractionPolicy,
+): string {
+  if (failureReason === CONSENT_POLICY_VIOLATION_REASON) {
+    return (
+      baseSystem +
+      " Your previous response chose an action whose self-reported consentControlIntent contradicts this " +
+      `run's consentInteractionPolicy ("${consentInteractionPolicy}"). This is a one-time corrective retry -- ` +
+      "reconsider the currently visible controls and this policy's instructions above, then respond with " +
+      "exactly one JSON object choosing a consent-related action (and consentControlIntent) that actually " +
+      "complies with this policy when a compliant control is genuinely visible, or a different, " +
+      "non-consent-related action from this exact allowed vocabulary when it is not: " +
+      `${JSON.stringify(allowedActions)}. Classify consentControlIntent honestly for whatever you choose -- ` +
+      "never report \"not_consent_related\" for a control whose purpose is actually consent-related just to " +
+      "pass this check."
+    );
+  }
   return (
     baseSystem +
     " Your previous response could not be used: it was not valid JSON, or it did not conform to the " +
@@ -102,6 +156,8 @@ function toDecisionSummary(entry: ClaudeDecisionLogEntry): ReasoningProviderDeci
     ...(entry.usage?.outputTokens !== undefined ? { outputTokens: entry.usage.outputTokens } : {}),
     latencyMs: entry.latencyMs,
     ...(entry.elementSelection ? { elementSelection: entry.elementSelection } : {}),
+    ...(entry.consentControlIntent ? { consentControlIntent: entry.consentControlIntent } : {}),
+    ...(entry.consentPolicyCompliant !== undefined ? { consentPolicyCompliant: entry.consentPolicyCompliant } : {}),
   };
 }
 
@@ -119,6 +175,10 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
   private readonly modelClient: ReasoningModelClient;
   private readonly onDecisionLogged: ((entry: ClaudeDecisionLogEntry) => void) | undefined;
   private readonly decisionLog: ClaudeDecisionLogEntry[] = [];
+  // Captured on the first decide() call and surfaced via getUsageDiagnostics() (task
+  // requirement #11's "requested consent policy" audit field) -- constant for the whole
+  // run, since a task's consentInteractionPolicy never changes between steps.
+  private consentInteractionPolicy: ConsentInteractionPolicy | undefined;
 
   constructor(options: ClaudeReasoningProviderOptions = {}) {
     this.config = options.config ?? readClaudeReasoningConfig();
@@ -132,6 +192,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
 
   async decide(context: ReasoningContext): Promise<Decision> {
     const stepIndex = context.limits.stepsUsed;
+    this.consentInteractionPolicy = context.consentInteractionPolicy;
 
     if (context.allowedActions.length === 0) {
       return this.fallback("no_allowed_actions", stepIndex);
@@ -179,7 +240,12 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
           schema,
           stepIndex,
           attempt: attempt + 1,
-          systemPrompt: buildCorrectiveSystemPrompt(prompt.system, context.allowedActions),
+          systemPrompt: buildCorrectiveSystemPrompt(
+            prompt.system,
+            context.allowedActions,
+            outcome.reason,
+            context.consentInteractionPolicy,
+          ),
           userPrompt: prompt.user,
           elementSelection: prompt.elementSelection,
           correctiveRetry: true,
@@ -240,6 +306,8 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
       }
 
       const validation = validateClaudeDecision(result.parsedOutput, context, this.config.minConfidence);
+      const consentControlIntent = result.parsedOutput.consentControlIntent;
+      const consentPolicyCompliant = isConsentIntentCompliant(context.consentInteractionPolicy, consentControlIntent);
       if (!validation.valid) {
         this.log({
           stepIndex,
@@ -250,6 +318,8 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
           latencyMs,
           usage: result.usage,
           elementSelection,
+          consentControlIntent,
+          consentPolicyCompliant,
           ...(correctiveRetry ? { correctiveRetry } : {}),
         });
         return { kind: "failure", reason: validation.reason };
@@ -263,6 +333,8 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
         latencyMs,
         usage: result.usage,
         elementSelection,
+        consentControlIntent,
+        consentPolicyCompliant,
         ...(correctiveRetry ? { correctiveRetry } : {}),
       });
       return {
@@ -270,6 +342,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
         decision: {
           action: validation.action,
           rationale: `${validation.reason} (Claude confidence ${validation.confidence.toFixed(2)})`,
+          consentControlIntent,
         },
       };
     } catch (error) {
@@ -313,6 +386,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
       totalOutputTokens: entries.reduce((sum, entry) => sum + (entry.usage?.outputTokens ?? 0), 0),
       totalLatencyMs: entries.reduce((sum, entry) => sum + entry.latencyMs, 0),
       retryCount: retries.length,
+      ...(this.consentInteractionPolicy ? { consentInteractionPolicy: this.consentInteractionPolicy } : {}),
       ...(entries.length > 0 ? { decisions: entries.map(toDecisionSummary) } : {}),
     };
   }

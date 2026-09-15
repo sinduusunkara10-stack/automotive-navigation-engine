@@ -1,5 +1,6 @@
 import type { ReasoningContext } from "./reasoningProvider.js";
 import type { ConsentInteractionPolicy } from "../types/task-request.js";
+import { CONSENT_CONTROL_INTENTS } from "../types/consentControl.js";
 import type { InteractiveElement, PromptElementSelectionDiagnostic } from "../types/task-response.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
 
@@ -12,6 +13,12 @@ import { objectiveRelevanceScore } from "../discovery/relevance.js";
  * enforces the vocabulary/domain/safety boundaries; which specific control best fits a
  * semantic description is left to the model, exactly like every other action choice in
  * this prompt.
+ *
+ * This instruction alone is never the sole enforcement of the policy (see
+ * consentControlIntentClause below and src/safety/consentPolicyGuard.ts): every decision
+ * must also self-classify its own consentControlIntent, which the engine checks
+ * deterministically against this same policy before the action is ever dispatched, and
+ * corrects via one bounded retry (or a safe stop) when the two disagree.
  */
 function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): string {
   switch (policy) {
@@ -24,10 +31,15 @@ function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): strin
       );
     case "accept_optional":
       return (
-        "This run's consent-interaction policy is \"accept_optional\": you may click a control that grants " +
-        "optional consent, but only when doing so is genuinely necessary to clear a blocking overlay that " +
-        "prevents reaching the objective -- never when the objective is already reachable without it, and " +
-        "never for a control whose purpose is unrelated to consent/tracking preferences."
+        "This run's consent-interaction policy is \"accept_optional\": this is an explicit, caller-opted-in " +
+        "instruction to actually grant optional consent, not merely a last resort for unblocking. When a " +
+        "currently visible control's purpose is to grant optional/broad consent, prefer clicking it over a " +
+        "control whose purpose is to decline optional consent or keep only necessary/essential functionality " +
+        "-- choose the accepting control even when the objective could also be reached without granting " +
+        "consent at all, because accepting optional consent is itself the desired outcome under this policy, " +
+        "not something to avoid until forced. Never click a control whose purpose is unrelated to " +
+        "consent/tracking preferences just to satisfy this policy, and never guess at or alter a granular " +
+        "settings screen when a direct accept-optional control is already visible."
       );
     case "essential_only":
       return (
@@ -48,6 +60,30 @@ function consentInteractionPolicyClause(policy: ConsentInteractionPolicy): strin
         "to grant broad or optional consent."
       );
   }
+}
+
+/**
+ * Instruction for the decision schema's required consentControlIntent field (see
+ * types/consentControl.ts and claudeDecisionSchema.ts): every decision, not only ones the
+ * model already recognises as consent-related, must self-classify honestly so the engine
+ * can deterministically check it against consentInteractionPolicy before dispatch. Same
+ * generic, language-agnostic judgement as consentInteractionPolicyClause above -- no CTA
+ * wordlist, no vendor/CMP-specific attribute.
+ */
+function consentControlIntentClause(): string {
+  return (
+    "Every decision must also set \"consentControlIntent\" to exactly one of " +
+    `${JSON.stringify(CONSENT_CONTROL_INTENTS)}, classifying the action you are choosing (judged the same ` +
+    "way as any other control's semantic purpose -- accessibleName/type/ariaState, never a fixed wordlist, " +
+    "regardless of language): \"grants_optional_consent\" when its purpose is to accept/allow optional, " +
+    "non-essential, or broad consent/tracking; \"declines_optional_consent\" when its purpose is to decline " +
+    "optional consent, keep only necessary/essential functionality, or continue without granting broad " +
+    "consent; \"opens_consent_settings\" when its purpose is to open a granular consent/preferences screen " +
+    "without itself granting or declining anything; and \"not_consent_related\" for every other action -- " +
+    "the correct value for the overwhelming majority of decisions. Classify honestly: never report " +
+    "\"not_consent_related\" for a control whose purpose is actually consent-related, and never report a " +
+    "granting/declining intent for a control that is not actually a consent/tracking-preference control."
+  );
 }
 
 export type { PromptElementSelectionDiagnostic } from "../types/task-response.js";
@@ -435,6 +471,8 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "while it stays open; close or dismiss it only when doing so is itself necessary to " +
     "reach the objective. " +
     consentInteractionPolicyClause(consentInteractionPolicy) +
+    " " +
+    consentControlIntentClause() +
     " When more than one visible control could " +
     "plausibly apply, choose the one whose semantic purpose most specifically matches the " +
     "objective/successCriteria wording (for example: prefer whichever of a " +

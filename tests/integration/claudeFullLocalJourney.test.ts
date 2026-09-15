@@ -30,17 +30,20 @@ const START_CLICK: ClaudeDecisionPayload = {
   targetElementId: "el-0",
   reason: "Continue is the only visible path toward the objective.",
   confidence: 0.92,
+  consentControlIntent: "not_consent_related",
 };
 const STEP2_CLICK: ClaudeDecisionPayload = {
   action: "click",
   targetElementId: "el-1",
   reason: "The second Continue control advances toward the success page.",
   confidence: 0.9,
+  consentControlIntent: "not_consent_related",
 };
 const STOP_SUCCESS: ClaudeDecisionPayload = {
   action: "stop_success",
   reason: "The success page has been reached and its criteria are satisfied.",
   confidence: 0.95,
+  consentControlIntent: "not_consent_related",
 };
 
 test("ClaudeReasoningProvider (fake model client) completes the full local journey in 3 decisions", async () => {
@@ -113,6 +116,7 @@ test("a journey that cannot complete within 3 decisions fails safely without a 4
       action: "stop_blocked",
       reason: "Uncertain how to proceed.",
       confidence: 0.6,
+      consentControlIntent: "not_consent_related",
     };
     const client = new FakeReasoningModelClient([
       resultStep(stallPayload, { usage: { inputTokens: 100, outputTokens: 10 } }),

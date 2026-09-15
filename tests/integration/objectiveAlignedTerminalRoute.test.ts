@@ -87,7 +87,12 @@ class RouteAwareModelClient implements ReasoningModelClient {
     const requiredIds = payload.successCriteria.filter((c) => c.required).map((c) => c.id);
     const allRequiredSatisfied = requiredIds.every((id) => payload.satisfiedCriteriaIds.includes(id));
     if (allRequiredSatisfied && payload.allowedActions.includes("stop_success")) {
-      return this.result({ action: "stop_success", reason: "Required criteria satisfied.", confidence: 0.95 });
+      return this.result({
+        action: "stop_success",
+        reason: "Required criteria satisfied.",
+        confidence: 0.95,
+        consentControlIntent: "not_consent_related",
+      });
     }
 
     const alreadyClicked = new Set(payload.recentActions.filter((a) => a.type === "click" && a.target).map((a) => a.target as string));
@@ -105,13 +110,24 @@ class RouteAwareModelClient implements ReasoningModelClient {
         targetElementId: candidate.id,
         reason: `Selected "${candidate.accessibleName}" as it matches the requested route.`,
         confidence: 0.9,
+        consentControlIntent: "not_consent_related",
       });
     }
 
     if (payload.allowedActions.includes("scroll")) {
-      return this.result({ action: "scroll", reason: "No matching visible control yet; scrolling.", confidence: 0.6 });
+      return this.result({
+        action: "scroll",
+        reason: "No matching visible control yet; scrolling.",
+        confidence: 0.6,
+        consentControlIntent: "not_consent_related",
+      });
     }
-    return this.result({ action: "stop_failure", reason: "No permitted action available.", confidence: 0.5 });
+    return this.result({
+      action: "stop_failure",
+      reason: "No permitted action available.",
+      confidence: 0.5,
+      consentControlIntent: "not_consent_related",
+    });
   }
 
   private result<TPayload>(payload: ClaudeDecisionPayload): ReasoningModelResult<TPayload> {
