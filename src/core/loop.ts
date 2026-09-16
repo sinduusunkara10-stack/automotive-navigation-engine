@@ -17,6 +17,7 @@ import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
+import { PAGE_SETTLE_DELAY_MS } from "./robustNavigation.js";
 import {
   computeEstimatedCompletion,
   computeMilestoneRollup,
@@ -65,6 +66,20 @@ const MAX_STALE_TARGET_RECOVERY_ATTEMPTS = 3;
 // through the normal state.recordAction path any other go_back uses, so those ceilings
 // (checked again at the very top of the next runStep call regardless) remain the actual stop.
 const MAX_JOURNEY_REPLANNING_ATTEMPTS = 2;
+
+/**
+ * PR 1C (Alternative Route Exploration): a trivial, dedicated reader for
+ * RunState.pendingAlternativeExploration, called instead of reading the property
+ * directly at its one read-after-clear use site below. TypeScript's control-flow
+ * narrowing of a `state.foo`-shaped expression can otherwise persist across the many
+ * intervening statements between where this field is cleared (unconditionally, inside an
+ * `if (state.pendingAlternativeExploration) { ... state.pendingAlternativeExploration =
+ * undefined; }` block) and where it is next read here -- a fresh parameter binding avoids
+ * that entirely, since it carries no narrowing history of its own.
+ */
+function readPendingAlternativeExploration(state: RunState): RunState["pendingAlternativeExploration"] {
+  return state.pendingAlternativeExploration;
+}
 
 export interface LoopStepOutcome {
   stepLog: StepLog;
@@ -471,6 +486,98 @@ export async function runStep(params: {
 
   let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
 
+  // PR 1C: Low-confidence recovery (see docs/architecture.md "Low-confidence recovery").
+  // A stop_blocked decision caused specifically by the reasoning layer's own confidence
+  // falling below its configured threshold (Decision.fallbackReason === "low_confidence")
+  // is diagnosed as the Nissan-investigation failure mode specifically when the
+  // immediately preceding dispatched action showed evidence of a newly-opened surface
+  // (RecordedAction.surfaceChangeType, PR 1C-a) -- the model may simply not have had
+  // enough settle time, or explicit framing, to recognise what it was looking at. Rather
+  // than immediately falling through to journey replanning's retreat-only recovery, give
+  // the run one bounded, fingerprint-scoped chance to settle further and re-observe.
+  // Bounded to once per decision-point fingerprint (state.lowConfidenceRetriedFingerprints)
+  // so a recurring ambiguous surface can never spend unbounded extra reasoning-provider
+  // calls, and deliberately never engaged for a low-confidence result with no preceding
+  // surface change -- this stays scoped to the diagnosed failure mode, not a blanket extra
+  // retry for every low-confidence case.
+  const lastRecordedActionBeforeThisDecision = state.actionHistory[state.actionHistory.length - 1];
+  const isLowConfidenceFallback = effectiveAction.type === "stop_blocked" && decision.fallbackReason === "low_confidence";
+  state.consecutiveLowConfidenceCount = isLowConfidenceFallback ? state.consecutiveLowConfidenceCount + 1 : 0;
+  if (isLowConfidenceFallback && lastRecordedActionBeforeThisDecision?.surfaceChangeType) {
+    const lowConfidenceFingerprint = computeDecisionPointFingerprint(observation);
+    if (!state.lowConfidenceRetriedFingerprints.has(lowConfidenceFingerprint)) {
+      state.lowConfidenceRetriedFingerprints.add(lowConfidenceFingerprint);
+      await page.waitForTimeout(PAGE_SETTLE_DELAY_MS).catch(() => {});
+      const freshObservation = await buildObservation(page);
+      const lowConfidenceRetry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
+      observation = freshObservation;
+      decision = lowConfidenceRetry.decision;
+      safetyResult = lowConfidenceRetry.safetyResult;
+      effectiveAction = lowConfidenceRetry.effectiveAction;
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "safety_guard_stop",
+          severity: "info",
+          pageUrl: observation.url,
+          message:
+            `Low-confidence decision followed an action that opened a new surface ` +
+            `(${lastRecordedActionBeforeThisDecision.surfaceChangeType}); re-observed and asked the ` +
+            `reasoning layer again before considering journey replanning.`,
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
+    }
+  }
+
+  // PR 1C: Alternative Route Exploration -- exhausted-candidate protection (see
+  // docs/architecture.md "Alternative route exploration"). state.pendingAlternativeExploration
+  // is set (below, at the point a journey-replanning go_back substitution actually fires)
+  // for exactly one decision: the one immediately following that substitution. Consulted,
+  // and always cleared regardless of outcome, right here -- never a persistent blacklist
+  // across the run. The reasoning layer's own prompt already carries the same nudge (see
+  // obtainDecision's alternativeExploration context / promptBuilder.ts) before this check
+  // ever runs, so a genuinely different, better-informed choice is the common case; this is
+  // the bounded backstop for when it isn't. Gives one corrective retry (asking again, same
+  // observation, same nudge) before hard-blocking the repeated candidate for this one
+  // decision point -- blocking here always falls through to the existing, already-bounded
+  // stop_blocked/journey-replanning handling further below, so it can never itself create a
+  // deadlock: worst case, this run's fixed journey-replanning/step budget is what ends it,
+  // exactly as it would if the model had proposed stop_blocked directly.
+  if (state.pendingAlternativeExploration) {
+    const exhaustedIds = state.pendingAlternativeExploration.exhaustedCandidateIds;
+    const proposedCandidate = computeCandidateIdentity(decision.action, observation);
+    if (proposedCandidate && exhaustedIds.includes(proposedCandidate.id)) {
+      const exhaustedRetry = await obtainDecision({ task, state, observation, reasoning });
+      decision = exhaustedRetry.decision;
+      safetyResult = exhaustedRetry.safetyResult;
+      effectiveAction = exhaustedRetry.effectiveAction;
+      const retriedCandidate = computeCandidateIdentity(decision.action, observation);
+      if (retriedCandidate && exhaustedIds.includes(retriedCandidate.id)) {
+        safetyResult = { allowed: false, flags: [...safetyResult.flags, "repeated_exhausted_candidate"] };
+        effectiveAction = { type: "stop_blocked" };
+        if (task.captureModules.includes("errors")) {
+          recordDiagnosticError(captures, {
+            stepIndex,
+            category: "safety_guard_stop",
+            severity: "warning",
+            pageUrl: observation.url,
+            actionType: decision.action.type,
+            ...(decision.action.target ? { targetElementId: decision.action.target } : {}),
+            message:
+              `The reasoning layer re-proposed a candidate that already failed to advance the objective ` +
+              `(${retriedCandidate.label}), even after one corrective retry with an explicit nudge toward ` +
+              `an alternative; forcing stop_blocked for this decision point rather than dispatching it again.`,
+            recoverable: true,
+            stoppedRun: false,
+          });
+        }
+      }
+    }
+    state.pendingAlternativeExploration = undefined;
+  }
+
   // Before dispatching a click, revalidate the target against the *live* page rather than
   // trusting the (possibly now-stale) observation the decision was made from -- the async
   // round trip to the reasoning provider is enough time for an SPA to re-render, an
@@ -635,6 +742,29 @@ export async function runStep(params: {
   if (journeyReplanningAttempted) {
     state.journeyReplanningAttempts += 1;
     effectiveAction = { type: "go_back" };
+
+    // PR 1C: Alternative Route Exploration -- seeds the one-shot nudge/guard consumed at
+    // the top of the *next* runStep call (see the exhausted-candidate-protection block
+    // earlier in this function, and docs/architecture.md "Alternative route exploration").
+    // Uses whichever click/navigate candidate this run most recently actually dispatched
+    // (state.lastDispatchedRouteCandidate) as "the thing that apparently didn't lead
+    // anywhere" -- never *this* step's own decision, since a stop_blocked/low-confidence
+    // step never itself dispatches a route candidate. Accumulates across more than one
+    // journey-replanning attempt within the same run (bounded by
+    // MAX_JOURNEY_REPLANNING_ATTEMPTS regardless), so a sibling that is tried and also
+    // fails is not re-offered either.
+    if (state.lastDispatchedRouteCandidate) {
+      const { candidate } = state.lastDispatchedRouteCandidate;
+      const existingPending = readPendingAlternativeExploration(state);
+      const existingIds = existingPending?.exhaustedCandidateIds ?? [];
+      const existingLabels = existingPending?.exhaustedCandidateLabels ?? [];
+      state.pendingAlternativeExploration = {
+        exhaustedCandidateIds: existingIds.includes(candidate.id) ? existingIds : [...existingIds, candidate.id],
+        exhaustedCandidateLabels: existingLabels.includes(candidate.label)
+          ? existingLabels
+          : [...existingLabels, candidate.label],
+      };
+    }
   }
 
   // Element attributes must be read before the click executes: a click can navigate
@@ -802,6 +932,15 @@ export async function runStep(params: {
       state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "blocked");
     } else if (!actionResult.success) {
       state.recordRouteMemoryOutcome(preDispatchDecisionPointFingerprint, routeCandidate, "failed");
+    }
+    // PR 1C (Alternative Route Exploration): remembers whichever candidate was actually
+    // dispatched (genuinely allowed past the safety layer, whether or not it ultimately
+    // succeeded) as "the last real route choice this run made" -- seeded into
+    // pendingAlternativeExploration below if a later step needs bounded journey replanning,
+    // since that step's own stop_blocked/low-confidence decision never itself dispatches a
+    // route candidate.
+    if (safetyResult.allowed) {
+      state.lastDispatchedRouteCandidate = { fingerprint: preDispatchDecisionPointFingerprint, candidate: routeCandidate };
     }
     // A successful dispatch's own outcome ("advanced" vs "no_change") is classified
     // synchronously further below, once newlySatisfied (milestone progress) and this
@@ -1242,6 +1381,9 @@ async function obtainDecision(params: {
     ...(triedCandidates.length > 0 ? { routeMemory: triedCandidates } : {}),
     milestones: milestoneRollup,
     ...(branchContext ? { branch: branchContext } : {}),
+    ...(state.pendingAlternativeExploration
+      ? { alternativeExploration: { justFailedLabels: state.pendingAlternativeExploration.exhaustedCandidateLabels } }
+      : {}),
   });
 
   const safetyResult = validateDecision({
