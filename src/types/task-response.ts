@@ -498,6 +498,18 @@ export interface EngineAssessment {
   summary: string;
   satisfiedSuccessCriteriaIds?: string[];
   notes?: string;
+  /**
+   * PR 1D (truthful milestone evaluation, see docs/architecture.md §21): a rollup of
+   * diagnostics.milestoneEvidence[].evidenceTier across every milestone this run satisfied,
+   * so a caller can see at a glance whether this run's outcome rests entirely on hard
+   * observed evidence or partly on inferred (semantic/model) judgement, without walking the
+   * full evidence list by hand. assumedCount is always 0 -- see MilestoneEvidenceRecord.
+   * evidenceTier's own doc comment -- present so that absence is auditable from the response
+   * itself rather than merely asserted in documentation. Present only when at least one
+   * criterion was satisfied during the run (i.e. whenever diagnostics.milestoneEvidence is
+   * itself non-empty).
+   */
+  evidenceTierSummary?: { observedCount: number; inferredCount: number; assumedCount: number };
 }
 
 export type ReasoningProviderDecisionOutcome = "accepted" | "rejected" | "error" | "fallback";
@@ -771,8 +783,30 @@ export interface MilestoneEvidenceRecord {
    * "data_layer_event", "network_event".
    */
   evidenceSource: string;
-  /** Deterministic vocabulary-overlap score or semanticVerifier confidence, when applicable (semantic_page_match only). */
-  score?: number;
+  /**
+   * PR 1D (truthful milestone evaluation, see docs/architecture.md §21): a deterministic
+   * classification of *how* evidenceSource established this criterion, computed by
+   * src/core/successEvaluator.ts's computeEvidenceTier -- never a separate judgement call.
+   * "observed": a direct mechanical DOM/URL/event read with no reasoning-layer or
+   * model involvement at all (url_pattern, element_present, data_layer_event,
+   * network_event). "inferred": a vocabulary-overlap score or model judgement
+   * (semantic_page_match, either its deterministic lexical path or its optional
+   * semanticVerifier fallback) -- real evidence, but over textual/semantic similarity
+   * rather than a literal fact. "assumed": reserved for a milestone satisfied with no
+   * independent corroborating evidence at all; structurally unreachable from this
+   * evaluator's own code today (every code path that can append a MilestoneEvidenceRecord
+   * requires either "observed" or "inferred" evidenceSource) -- see
+   * tests/unit/milestoneEvidenceTiers.test.ts for the test enforcing this as an invariant,
+   * not merely a convention.
+   */
+  evidenceTier: "observed" | "inferred" | "assumed";
+  /**
+   * Deterministic vocabulary-overlap score or semanticVerifier confidence for an "inferred"
+   * entry; always 1.0 (unambiguous) for an "observed" entry. Always present (uniform
+   * across every evidenceTier) so a caller can sort/filter diagnostics.milestoneEvidence by
+   * confidence without special-casing which criterion type happened to produce it.
+   */
+  score: number;
   /** The literal pattern/selector/match object that satisfied this criterion, when applicable. */
   matchedValue?: string;
   /** Short human-readable explanation of why the criterion was judged satisfied. */
@@ -828,7 +862,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.14.0";
+  schemaVersion: "1.15.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

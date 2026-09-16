@@ -33,13 +33,13 @@ const REACHED_OBJECTIVE_CRITERION = {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.15.0",
+    schemaVersion: "1.16.0",
     taskId: "journey-replanning",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 10, maxBacktracks: 5, maxRepeatedActions: 8 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.14.0",
+    outputSchemaVersion: "1.15.0",
     ...overrides,
   };
 }

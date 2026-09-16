@@ -56,6 +56,22 @@ export interface SemanticPageSignals {
   progressText?: string[];
 }
 
+export interface GatherSemanticPageSignalsOptions {
+  /**
+   * PR 1D (truthful milestone evaluation, "Surface-scoped evidence" -- see
+   * docs/architecture.md §21): when true, both headings and interactive elements are
+   * further filtered to exclude anything currently covered by another element at its own
+   * centre point -- the same generic elementFromPoint hit-test
+   * observation/observationBuilder.ts already uses to compute InteractiveElement.covered.
+   * Background page content sitting underneath a newly-opened drawer/modal/panel is
+   * excluded from the evidence pool, so a semantic_page_match criterion cannot be satisfied
+   * by leftover text from a page state a just-opened surface has visually covered over.
+   * Off by default -- omitting this (every pre-existing caller) reproduces the exact prior
+   * whole-page evidence pool.
+   */
+  scopeToUncoveredOnly?: boolean;
+}
+
 /**
  * Reads only visible, already-rendered text off the live page -- title, heading text, and
  * the accessible names of visible interactive elements outside persistent navigation/menu/
@@ -63,7 +79,10 @@ export interface SemanticPageSignals {
  * builder exposes to the reasoning layer. Never reads raw HTML, cookies, storage, or
  * headers.
  */
-export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPageSignals> {
+export async function gatherSemanticPageSignals(
+  page: Page,
+  options: GatherSemanticPageSignalsOptions = {},
+): Promise<SemanticPageSignals> {
   const title = await page.title();
   // Every visibility check below is inlined (never a shared named helper function) --
   // esbuild/tsx's dev transform can wrap a const-bound arrow function in a `__name()`
@@ -72,12 +91,34 @@ export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPag
   // browser -- a real `ReferenceError: __name is not defined` this pattern avoids. See
   // src/observation/observationBuilder.ts for the same established, all-inline style.
   const { headings, interactiveText, ariaState, progressText } = await page.evaluate(
-    ({ headingSelector, interactiveSelector, navigationChromeSelector }) => {
+    ({ headingSelector, interactiveSelector, navigationChromeSelector, scopeToUncoveredOnly }) => {
+      // Same elementFromPoint hit-test observation/observationBuilder.ts's own `covered`
+      // field already uses -- deliberately duplicated inline at each use site below (never
+      // factored into one shared local const/function, even within this one evaluate()
+      // callback) for the same reason every other in-page scan function in this repo does:
+      // esbuild/tsx's dev transform can wrap a const-bound arrow function in a `__name()`
+      // helper call for stack-trace naming, and that helper only exists in the Node module
+      // scope, not in this callback's serialized source once it runs in the browser -- a
+      // real `ReferenceError: __name is not defined` this inline-only style avoids.
       const headings = Array.from(document.querySelectorAll<HTMLElement>(headingSelector))
         .filter((el) => {
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
-          return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+          if (!(rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none")) {
+            return false;
+          }
+          if (scopeToUncoveredOnly) {
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
+              const topEl = document.elementFromPoint(cx, cy);
+              const covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
+              if (covered) {
+                return false;
+              }
+            }
+          }
+          return true;
         })
         .map((el) => el.textContent?.trim() ?? "")
         .filter(Boolean);
@@ -88,7 +129,21 @@ export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPag
         if (!(rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none")) {
           return false;
         }
-        return el.closest(navigationChromeSelector) === null;
+        if (el.closest(navigationChromeSelector) !== null) {
+          return false;
+        }
+        if (scopeToUncoveredOnly) {
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
+            const topEl = document.elementFromPoint(cx, cy);
+            const covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
+            if (covered) {
+              return false;
+            }
+          }
+        }
+        return true;
       });
       const interactiveText = interactiveEls
         .map((el) => el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || "")
@@ -125,6 +180,7 @@ export async function gatherSemanticPageSignals(page: Page): Promise<SemanticPag
       headingSelector: HEADING_SELECTOR,
       interactiveSelector: INTERACTIVE_SELECTOR,
       navigationChromeSelector: NAVIGATION_CHROME_SELECTOR,
+      scopeToUncoveredOnly: options.scopeToUncoveredOnly === true,
     },
   );
   return {

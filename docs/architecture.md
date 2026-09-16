@@ -2244,5 +2244,177 @@ neither is part of either wire schema.
   so a panel that introduces exactly one new control is not recognised by this signal alone,
   matching the existing limitation already documented for `"elements_appeared"` above.
 - This PR is detection/timing only — it does not yet change what the reasoning layer *does* with
-  a `low_confidence` result, and does not yet add any alternative-route exploration. Both are
-  separate, subsequent PRs (1C-b, 1C-c) per `docs/phase-2-design.md`'s implementation order.
+  a `low_confidence` result, and does not yet add any alternative-route exploration. See
+  `docs/phase-2-design.md` and PR 1C (a separate, consolidated PR on top of this one) for both.
+
+## 21. Truthful milestone evaluation (PR 1D)
+
+*Numbering note: this section is written as §21 to stay consistent with PR 1C's own §20 (a
+separate, independently-reviewable PR on top of this one, per the revised consolidated Phase 2
+implementation strategy) — on a branch that hasn't yet merged PR 1C, §20 is briefly absent; once
+both PRs are merged in their intended order the numbering is contiguous.*
+
+### Problem
+
+Milestone evaluation (`src/core/successEvaluator.ts`, §17's objective milestone rollup,
+`MilestoneEvidenceRecord`) is already evidence-based in shape — `evidenceSource`, `score`, and
+`matchedValue` are all recorded per satisfied criterion — but:
+
+1. There is no explicit, enforced distinction between a **mechanically observed** fact
+   (`url_pattern`, `element_present`, a `data_layer_event`/`network_event`) and an **inferred**
+   judgement (`semantic_page_match`, whether its deterministic lexical path or its optional
+   `semanticVerifier` fallback). Both look identical to a caller reading
+   `diagnostics.milestoneEvidence`.
+2. Nothing formalises or tests the invariant that a milestone can never be satisfied by mere
+   model self-report/confidence with no independent corroborating evidence (an "assumed" tier) —
+   true today by construction, but not stated or enforced anywhere.
+3. A `semantic_page_match` criterion evaluated immediately after PR 1C-a's surface-change
+   detection has no way to scope its evidence to the newly-appeared surface specifically — it
+   could be satisfied by leftover background-page vocabulary that a just-opened drawer/panel now
+   visually covers, producing a false milestone completion indistinguishable, in the response,
+   from a real one.
+4. `score` is populated only for the semantic path today; there is no uniform confidence signal
+   across every evidence type for a caller to audit.
+
+### Design
+
+All changes are additive and **observability-only**: no criterion that would have satisfied
+before this change is newly withheld, and none that would not have satisfied now does. Tightening
+actual satisfaction behaviour (e.g. a stricter required-milestone semantic threshold, tuned
+against production data once this observability has run against real traffic) is deliberately
+deferred as explicit future work, not part of this PR — the same deliberate-deferral discipline
+§16/§17/§18/§19 already established.
+
+1. **`MilestoneEvidenceRecord.evidenceTier: "observed" | "inferred" | "assumed"`**
+   (`src/types/task-response.ts`) — computed deterministically from the already-existing
+   `evidenceSource` string by `computeEvidenceTier` (`src/core/successEvaluator.ts`), never a new
+   judgement call:
+   - `"observed"`: `url_pattern`, `element_present`, `data_layer_event`, `network_event` — a
+     direct mechanical DOM/URL/event read, no reasoning-layer or model involvement at all.
+   - `"inferred"`: `semantic_page_match:deterministic` (lexical vocabulary-overlap — a
+     deterministic algorithm, but over fuzzy textual similarity, not a literal fact) and
+     `semantic_page_match:verifier` (an actual model judgement call).
+   - `"assumed"`: reserved, structurally unused by this evaluator today.
+2. **Enforced invariant, not just documentation**: `tests/unit/milestoneEvidenceTiers.test.ts`
+   asserts that every evidence-source string this evaluator's own code can actually produce for a
+   *satisfied* criterion maps to `"observed"` or `"inferred"`, never `"assumed"` — "a milestone is
+   never satisfied on assumption alone" is a codified, tested property of `evaluateSuccessCriteria`
+   and its sub-evaluators, not merely a convention documented in a comment.
+3. **Uniform confidence score across tiers**: `MilestoneEvidenceRecord.score` (now required,
+   previously optional and populated only for `semantic_page_match`) is populated for every
+   satisfied criterion — `1.0` for every `"observed"` entry (a mechanical match is unambiguous),
+   and the existing deterministic-overlap/verifier-confidence value for an `"inferred"` entry.
+4. **Surface-scoped evidence** (`src/core/semanticPageMatch.ts`'s `gatherSemanticPageSignals`,
+   depends on PR 1C-a's `ActionResult.surfaceChangeDetected`): when a `semantic_page_match`
+   criterion is evaluated in the same step as a detected surface change, its candidate evidence
+   pool (headings and interactive elements alike) is scoped to elements not currently covered by
+   another element — the same generic `elementFromPoint` hit-test
+   `observation/observationBuilder.ts`'s own `covered` field already uses — so background page
+   content sitting underneath a newly-opened drawer/panel is excluded. `src/core/loop.ts` passes
+   this as a new, trailing optional `surfaceScoped` parameter through
+   `evaluateSuccessCriteria`/`evaluateSingle`/`evaluateSemanticPageMatch`, sourced from the POST-
+   action `ActionResult` of the step's own dispatched action. Every pre-existing caller (every one
+   that doesn't pass this new parameter) gets byte-for-byte the same whole-page evidence pool as
+   before.
+5. **`EngineAssessment.evidenceTierSummary`** (`src/core/engine.ts`) — an additive rollup
+   (`observedCount`/`inferredCount`/`assumedCount`) computed from `state.milestoneEvidence` once a
+   run ends, so a caller can audit at a glance whether a run's outcome rests entirely on hard
+   observed evidence or partly on inferred judgement. `assumedCount` is always `0` today — its
+   presence in the schema is what makes that absence auditable from the response itself, rather
+   than merely asserted in this document. Omitted (not a zeroed object) when no criterion was ever
+   satisfied, matching this repo's existing optional-field convention.
+6. **Explicit future work, out of scope for this PR**: a stricter
+   `MIN_SEMANTIC_MILESTONE_SCORE_FOR_REQUIRED` threshold (a required milestone needing a higher
+   overlap/confidence score than an optional one before being marked satisfied, mirroring the
+   existing `MIN_DOMINANT_RELEVANCE_SCORE` = 0.5 pattern already used for branch-entry ambiguity in
+   `src/discovery/relevance.ts`) — deferred until this PR's own observability surfaces real
+   production evidence of where false-positive semantic matches actually cluster, so any such
+   threshold is tuned against data rather than guessed.
+
+### Flow diagram
+
+```
+evaluateSuccessCriteria() called (pre_action / post_action phase)
+   |
+   v
+for each eligible criterion (ordered milestone constraint unchanged, §17):
+   |
+   +-- url_pattern / element_present / data_layer_event / network_event
+   |        |
+   |        v
+   |   satisfied? --yes--> MilestoneEvidenceRecord { evidenceTier: "observed", score: 1.0 }
+   |
+   +-- semantic_page_match
+            |
+            v
+       was surfaceScoped passed as true this call? (core/loop.ts, from PR 1C-a's
+       ActionResult.surfaceChangeDetected on the step's own dispatched action)
+            |
+            +-- yes --> gatherSemanticPageSignals() scoped to uncovered elements only
+            +-- no  --> gatherSemanticPageSignals() scoped to the whole page (unchanged)
+            |
+            v
+       deterministic lexical overlap score computed
+            |
+            +-- clears minScore --> MilestoneEvidenceRecord
+            |                          { evidenceTier: "inferred",
+            |                            evidenceSource: "semantic_page_match:deterministic",
+            |                            score: <overlap> }
+            |
+            +-- falls short, semanticVerifier configured -->
+                     |
+                     v
+               SemanticCriterionVerifier.verify() (existing, unchanged)
+                     |
+                     +-- satisfied --> MilestoneEvidenceRecord
+                     |                   { evidenceTier: "inferred",
+                     |                     evidenceSource: "semantic_page_match:verifier",
+                     |                     score: <verifier confidence> }
+                     +-- not satisfied --> criterion remains unsatisfied (unchanged)
+
+run ends
+   |
+   v
+EngineAssessment.evidenceTierSummary = rollup of state.milestoneEvidence[].evidenceTier
+   (assumedCount structurally always 0 -- enforced by tests/unit/milestoneEvidenceTiers.test.ts)
+```
+
+### Files impacted
+
+- `src/core/successEvaluator.ts` — `computeEvidenceTier`, `evidenceTier`/uniform `score`
+  population in the `evaluateSuccessCriteria` sink-push, `surfaceScoped` threading.
+- `src/core/semanticPageMatch.ts` — `GatherSemanticPageSignalsOptions.scopeToUncoveredOnly`.
+- `src/core/loop.ts` — passes `actionResult.surfaceChangeDetected` as `surfaceScoped` to the
+  post-action `evaluateSuccessCriteria` call.
+- `src/core/engine.ts` — `evidenceTierSummary` rollup.
+- `src/types/task-response.ts` — `MilestoneEvidenceRecord.evidenceTier`, `score` now required;
+  `EngineAssessment.evidenceTierSummary`.
+- `schemas/task-response.schema.json` / `schemas/task-request.schema.json` — additive fields,
+  `score` now required within `milestoneEvidenceRecord`, `schemaVersion`/`outputSchemaVersion`
+  bumps per this repo's existing versioning convention.
+- `tests/unit/milestoneEvidenceTiers.test.ts` (new) — the enforced invariant.
+- `tests/unit/successEvaluator.test.ts` — `evidenceTier`/`score`/`surfaceScoped` coverage.
+- `tests/integration/orderedMilestoneEnforcement.test.ts` — end-to-end `evidenceTierSummary`
+  assertion on a real five-milestone engine run.
+
+### Schema impact
+
+Additive, with one narrowing exception, both covered by an additive `schemaVersion`/
+`outputSchemaVersion` bump: `MilestoneEvidenceRecord.evidenceTier` (new, required) and
+`EngineAssessment.evidenceTierSummary` (new, optional) are purely additive. The one non-additive
+change is `MilestoneEvidenceRecord.score`, previously optional and populated only for
+`semantic_page_match`, now required and always populated — every existing consumer that only reads
+it when present is unaffected; nothing reads its *absence* as meaningful. No other existing field
+was removed, renamed, or had its meaning changed.
+
+### Known limitations
+
+- Surface-scoped evidence depends on PR 1C-a's `ActionResult.surfaceChangeDetected`; a run using a
+  provider/task path that never triggers a detected surface change simply never engages the
+  scoping (falls back to whole-page evidence, today's behaviour) — this is expected, not a defect.
+- `evidenceTier` classifies *how* evidence was obtained, never whether it is *correct* — an
+  `"inferred"` entry must not be over-trusted merely because it now carries a formal label; the
+  underlying `semanticVerifier`/lexical-overlap mechanism's own known limitations (see §6's
+  `SemanticCriterionVerifier` section) are unchanged by this PR.
+- The stricter required-milestone threshold that would actually change satisfaction behaviour is
+  explicitly deferred (see Design, item 6) — this PR only makes existing behaviour auditable.

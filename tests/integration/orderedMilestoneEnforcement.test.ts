@@ -66,7 +66,7 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.15.0",
+    schemaVersion: "1.16.0",
     taskId: "ordered-milestone-enforcement",
     objective: "",
     allowedDomains: ["127.0.0.1"],
@@ -79,7 +79,7 @@ function baseTask(
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.14.0",
+    outputSchemaVersion: "1.15.0",
     ...overrides,
   };
 }
@@ -180,7 +180,21 @@ test("REGRESSION (reproduces the reported Nissan UK homepage false-success bug's
       assert.ok(record.pageUrl.length > 0);
       assert.ok(record.reason.length > 0);
       assert.ok(typeof record.score === "number");
+      // PR 1D (truthful milestone evaluation): every one of these five milestones is a
+      // semantic_page_match criterion, so every evidenceTier must be "inferred" -- never
+      // "assumed", and never misclassified as "observed" (no mechanical DOM/URL/event read
+      // was ever involved in satisfying any of them).
+      assert.equal(record.evidenceTier, "inferred");
     }
+
+    // engineAssessment.evidenceTierSummary: a real end-to-end rollup, not just the per-
+    // record classification above -- confirms the five inferred milestones are correctly
+    // tallied, and that assumedCount is genuinely 0 on a real, full engine run.
+    assert.deepEqual(response.engineAssessment.evidenceTierSummary, {
+      observedCount: 0,
+      inferredCount: 5,
+      assumedCount: 0,
+    });
   } finally {
     await page.close();
     await browser.close();

@@ -1359,6 +1359,119 @@ test("milestoneEvidenceContext records one evidence entry per newly satisfied cr
 });
 
 // ---------------------------------------------------------------------------------------
+// PR 1D (truthful milestone evaluation, see CLAUDE.md and docs/architecture.md §21):
+// evidenceTier/score are always populated on MilestoneEvidenceRecord, and surfaceScoped
+// excludes covered (background) content from semantic_page_match evidence.
+// ---------------------------------------------------------------------------------------
+
+test("MilestoneEvidenceRecord.evidenceTier is 'observed' with score 1.0 for a mechanical (non-semantic) criterion type", async () => {
+  const html = page_('<button id="goal">Goal reached</button>', "Fixture");
+  const criteria: SuccessCriterion[] = [
+    { id: "goal-present", type: "element_present", description: "Goal control present.", config: { selector: "#goal" } },
+  ];
+  await withPage(html, async (page) => {
+    const sink: MilestoneEvidenceRecord[] = [];
+    const context: MilestoneEvidenceContext = { sink, stepIndex: 0, phase: "post_action" };
+    const satisfied = await evaluateSuccessCriteria(page, criteria, "", undefined, new Set(), undefined, undefined, context);
+    assert.deepEqual(satisfied, ["goal-present"]);
+    assert.equal(sink[0]?.evidenceSource, "element_present");
+    assert.equal(sink[0]?.evidenceTier, "observed");
+    assert.equal(sink[0]?.score, 1.0);
+  });
+});
+
+test("MilestoneEvidenceRecord.evidenceTier is 'inferred' with the deterministic overlap score for a semantic_page_match criterion", async () => {
+  const html = page_("<h1>Configuration Controls Visible</h1>", "Vehicle Configurator");
+  const criteria: SuccessCriterion[] = [
+    {
+      id: "reached-configurator",
+      type: "semantic_page_match",
+      description: "Vehicle configuration controls are visible on the page.",
+    },
+  ];
+  await withPage(html, async (page) => {
+    const sink: MilestoneEvidenceRecord[] = [];
+    const context: MilestoneEvidenceContext = { sink, stepIndex: 0, phase: "post_action" };
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      criteria,
+      "Reach the vehicle configurator.",
+      undefined,
+      new Set(),
+      undefined,
+      undefined,
+      context,
+    );
+    assert.deepEqual(satisfied, ["reached-configurator"]);
+    assert.equal(sink[0]?.evidenceSource, "semantic_page_match:deterministic");
+    assert.equal(sink[0]?.evidenceTier, "inferred");
+    assert.ok((sink[0]?.score ?? 0) > 0 && (sink[0]?.score ?? 0) <= 1, "expected the deterministic overlap score, not a placeholder");
+  });
+});
+
+test("surfaceScoped=true excludes covered background content from semantic_page_match evidence, while still matching a newly-appeared, uncovered surface's own content", async () => {
+  // A full-viewport overlay (simulating a newly-opened drawer/panel) covers a pre-existing
+  // background heading entirely, and itself contains a different heading of its own -- the
+  // exact shape a surface-scoped evaluation must tell apart: background content that is now
+  // hidden underneath the surface must never satisfy a milestone, while the surface's own
+  // visible content still can.
+  const html = page_(
+    '<h1 id="background">Old Offer Details</h1>' +
+      '<div style="position:fixed;top:0;left:0;width:100%;height:100%;background:#fff;">' +
+      '<h2 id="drawer">Drawer Content Visible</h2>' +
+      "</div>",
+    "Fixture",
+  );
+  const backgroundCriterion: SuccessCriterion = {
+    id: "background-match",
+    type: "semantic_page_match",
+    description: "Old offer details are shown.",
+    config: { minScore: 0.1 },
+  };
+  const drawerCriterion: SuccessCriterion = {
+    id: "drawer-match",
+    type: "semantic_page_match",
+    description: "Drawer content is visible.",
+    config: { minScore: 0.1 },
+  };
+
+  await withPage(html, async (page) => {
+    // Without surfaceScoped (the default, unchanged behaviour): both the covered background
+    // heading and the drawer's own heading are part of the evidence pool.
+    const withoutScoping = await evaluateSuccessCriteria(page, [backgroundCriterion], "", undefined, new Set());
+    assert.deepEqual(withoutScoping, ["background-match"], "unscoped evaluation must still see covered background content, unchanged from before this fix");
+
+    // With surfaceScoped=true: the covered background heading is excluded...
+    const scopedBackground = await evaluateSuccessCriteria(
+      page,
+      [backgroundCriterion],
+      "",
+      undefined,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    assert.deepEqual(scopedBackground, [], "a milestone must not be satisfied by background content a newly-opened surface has covered over");
+
+    // ...while the drawer's own, uncovered content still satisfies normally.
+    const scopedDrawer = await evaluateSuccessCriteria(
+      page,
+      [drawerCriterion],
+      "",
+      undefined,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    assert.deepEqual(scopedDrawer, ["drawer-match"], "the newly-opened surface's own visible content must still satisfy a milestone when surface-scoped");
+  });
+});
+
+// ---------------------------------------------------------------------------------------
 // Navigational-chrome exclusion (docs/n8n-integration.md §9, the other half of the fix): a
 // link/CTA/menu item living in persistent site-wide navigation/header/footer chrome renders
 // identically on every page of a site, so it must never by itself prove a destination

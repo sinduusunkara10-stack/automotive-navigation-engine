@@ -82,6 +82,16 @@ const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
  * satisfies -- see MilestoneEvidenceContext and docs/n8n-integration.md §9f. Purely additive
  * diagnostics: omitting it reproduces the exact prior return value/behaviour.
  *
+ * `surfaceScoped` is optional and off by default (see docs/architecture.md §21 "Surface-
+ * scoped evidence"): when true (src/core/loop.ts passes ActionResult.surfaceChangeDetected
+ * from the action just dispatched -- PR 1C-a), a semantic_page_match criterion's own
+ * evidence pool is scoped to elements not currently covered by another element (the same
+ * generic elementFromPoint hit-test observation/observationBuilder.ts already uses) --
+ * background page content sitting underneath a newly-opened drawer/panel is excluded, so a
+ * milestone cannot be satisfied by leftover text from a page state the surface change just
+ * covered over. Never affects any other criterion type, and never changes behaviour when
+ * omitted (every pre-existing caller).
+ *
  * Ordered-milestone gate (docs/n8n-integration.md §9f, the fix for the reported false-
  * success regression): every distinct criterion **group** with `required !== false` on any
  * member is one required milestone, milestones are read off `criteria` in declaration order
@@ -109,6 +119,7 @@ export async function evaluateSuccessCriteria(
   lastActionEvidence?: LastActionEvidence,
   criteriaEvidence?: SuccessCriteriaEvidence,
   milestoneEvidenceContext?: MilestoneEvidenceContext,
+  surfaceScoped?: boolean,
 ): Promise<string[]> {
   const satisfiedAtCallStart = alreadySatisfiedCriteriaIds ?? new Set<string>();
   const eligibleCriteriaIds = computeEligibleCriteriaIds(criteria, satisfiedAtCallStart);
@@ -121,7 +132,15 @@ export async function evaluateSuccessCriteria(
     if (!eligibleCriteriaIds.has(criterion.id)) {
       continue;
     }
-    const result = await evaluateSingle(page, criterion, objective, semanticVerifier, lastActionEvidence, criteriaEvidence);
+    const result = await evaluateSingle(
+      page,
+      criterion,
+      objective,
+      semanticVerifier,
+      lastActionEvidence,
+      criteriaEvidence,
+      surfaceScoped,
+    );
     if (result.satisfied) {
       satisfied.push(criterion.id);
       if (milestoneEvidenceContext) {
@@ -134,7 +153,8 @@ export async function evaluateSuccessCriteria(
           pageUrl: page.url(),
           pageTitle: await page.title().catch(() => ""),
           evidenceSource: result.evidenceSource,
-          ...(result.score !== undefined ? { score: result.score } : {}),
+          evidenceTier: computeEvidenceTier(result.evidenceSource),
+          score: result.score ?? 1.0,
           ...(result.matchedValue !== undefined ? { matchedValue: result.matchedValue } : {}),
           reason: result.reason,
         });
@@ -150,6 +170,35 @@ export interface MilestoneEvidenceContext {
   sink: MilestoneEvidenceRecord[];
   stepIndex: number;
   phase: "pre_action" | "post_action";
+}
+
+/**
+ * PR 1D (truthful milestone evaluation, see docs/architecture.md §21 and
+ * MilestoneEvidenceRecord.evidenceTier's own doc comment, types/task-response.ts): a pure,
+ * deterministic mapping from a SingleCriterionResult.evidenceSource string to its evidence
+ * tier -- never a separate judgement call, and never a value computed by a model. Kept
+ * strictly in sync with the literal evidenceSource strings evaluateSingle/its sub-evaluators
+ * actually produce below: every one of "url_pattern", "element_present", "data_layer_event",
+ * "network_event" is a direct mechanical DOM/URL/event read (observed); both
+ * "semantic_page_match:deterministic" and "semantic_page_match:verifier" involve vocabulary-
+ * overlap scoring or a model judgement over textual similarity, never a literal fact
+ * (inferred). The "assumed" fallback exists only so a genuinely new, not-yet-categorised
+ * evidenceSource string fails safe (never silently reported as "observed") -- no code path
+ * in this file produces one today, enforced by tests/unit/milestoneEvidenceTiers.test.ts.
+ */
+export function computeEvidenceTier(evidenceSource: string): "observed" | "inferred" | "assumed" {
+  if (
+    evidenceSource === "url_pattern" ||
+    evidenceSource === "element_present" ||
+    evidenceSource === "data_layer_event" ||
+    evidenceSource === "network_event"
+  ) {
+    return "observed";
+  }
+  if (evidenceSource === "semantic_page_match:deterministic" || evidenceSource === "semantic_page_match:verifier") {
+    return "inferred";
+  }
+  return "assumed";
 }
 
 /**
@@ -370,6 +419,7 @@ async function evaluateSingle(
   semanticVerifier?: SemanticCriterionVerifier,
   lastActionEvidence?: LastActionEvidence,
   criteriaEvidence?: SuccessCriteriaEvidence,
+  surfaceScoped?: boolean,
 ): Promise<SingleCriterionResult> {
   switch (criterion.type) {
     case "url_pattern": {
@@ -405,7 +455,7 @@ async function evaluateSingle(
       };
     }
     case "semantic_page_match": {
-      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier, lastActionEvidence);
+      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier, lastActionEvidence, surfaceScoped);
     }
     case "data_layer_event": {
       return evaluateDataLayerEvent(page, criterion, criteriaEvidence);
@@ -544,6 +594,7 @@ async function evaluateSemanticPageMatch(
   objective: string,
   semanticVerifier?: SemanticCriterionVerifier,
   lastActionEvidence?: LastActionEvidence,
+  surfaceScoped?: boolean,
 ): Promise<SingleCriterionResult> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
@@ -563,7 +614,7 @@ async function evaluateSemanticPageMatch(
   const signals: readonly SemanticSignalName[] =
     configuredSignals && configuredSignals.length > 0 ? configuredSignals : ALL_SEMANTIC_SIGNALS;
 
-  const pageSignals = await gatherSemanticPageSignals(page);
+  const pageSignals = await gatherSemanticPageSignals(page, { scopeToUncoveredOnly: surfaceScoped === true });
   const score = scoreSemanticPageMatch(anchorText, pageSignals, signals);
   if (score.overall >= minScore) {
     return {
