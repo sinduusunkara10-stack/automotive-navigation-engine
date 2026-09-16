@@ -104,6 +104,49 @@ export class RunState {
    */
   readonly routeMemory = new RouteMemory();
 
+  /**
+   * PR 1C (Low-confidence recovery, see docs/architecture.md): decision-point fingerprints
+   * (core/routeMemory.ts's computeDecisionPointFingerprint) that have already been given
+   * one bounded fresh-observation retry after a low-confidence fallback. Bounded to once
+   * per fingerprint per run -- a recurring ambiguous surface can never spend unbounded
+   * extra reasoning-provider calls. Never cleared within a run (a fingerprint that needed
+   * this once is unlikely to need it differently later), and small by construction (one
+   * entry per genuinely distinct decision point that ever triggered this recovery).
+   */
+  readonly lowConfidenceRetriedFingerprints = new Set<string>();
+
+  /**
+   * PR 1C (Low-confidence recovery): consecutive count of decisions whose Decision.
+   * fallbackReason was "low_confidence" -- diagnostic only, reset to 0 by any decision that
+   * isn't such a fallback. Never itself a hard ceiling (maxSteps and the existing bounded
+   * journey-replanning/stale-target-recovery mechanisms remain the actual stops); exists so
+   * a run oscillating in and out of low confidence is visible in captures.errors.
+   */
+  consecutiveLowConfidenceCount = 0;
+
+  /**
+   * PR 1C (Alternative Route Exploration): the most recent click/navigate candidate this
+   * run actually dispatched (computeCandidateIdentity, core/routeMemory.ts) and the
+   * decision-point fingerprint it was chosen from -- regardless of whether it ultimately
+   * succeeded. Used, when a bounded journey-replanning go_back substitution fires, as "the
+   * candidate that apparently didn't lead anywhere" to seed pendingAlternativeExploration
+   * below, since the step that actually triggers replanning (a stop_blocked/low-confidence
+   * decision) never itself dispatches a route candidate.
+   */
+  lastDispatchedRouteCandidate: { fingerprint: string; candidate: RouteMemoryCandidate } | undefined;
+
+  /**
+   * PR 1C (Alternative Route Exploration, "exhausted candidate protection" -- see
+   * docs/architecture.md "Alternative route exploration"): set only immediately after a
+   * bounded journey-replanning go_back substitution, naming whichever candidate(s) this run
+   * has dispatched so far that did not lead anywhere productive. Consumed -- and always
+   * cleared, whatever the outcome -- by the very next decision in core/loop.ts: rendered as
+   * a prompt nudge (see ReasoningProvider.alternativeExploration) and checked as a bounded,
+   * one-retry-then-hard-block guard against immediately re-selecting the same candidate.
+   * Never a persistent blacklist across the run.
+   */
+  pendingAlternativeExploration: { exhaustedCandidateIds: string[]; exhaustedCandidateLabels: string[] } | undefined;
+
   recordVisit(url: string): void {
     this.visitedUrls.push(url);
     this.distinctVisitedUrls.add(url);

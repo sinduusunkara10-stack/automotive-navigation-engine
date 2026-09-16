@@ -396,6 +396,7 @@ export class ClaudeReasoningProvider implements ReasoningProvider {
     return {
       action: { type: FALLBACK_ACTION_TYPE },
       rationale: `Claude reasoning provider could not produce a valid decision (${reason}); stopping safely.`,
+      fallbackReason: reason,
     };
   }
 

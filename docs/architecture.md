@@ -2222,9 +2222,9 @@ are unchanged — only the one click path where a drawer/modal is actually trigg
 
 Branch Exploration (§17), Route Memory (§16), and journey replanning (§"Bounded journey
 replanning") are entirely unchanged by this PR — it only widens what the *observation* and
-*prompt* say about a page state those systems already reason over. PR 1C-b (low-confidence
-recovery) and PR 1C-c (alternative route exploration) build on the `surfaceChangeDetected`/
-`surfaceChangeType` signal introduced here; neither is implemented by this PR.
+*prompt* say about a page state those systems already reason over. §20 (low-confidence
+recovery and alternative route exploration) builds on the `surfaceChangeDetected`/
+`surfaceChangeType` signal introduced here.
 
 ### Schema impact
 
@@ -2243,16 +2243,175 @@ neither is part of either wire schema.
   `MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE`'s existing co-occurrence guard still applies,
   so a panel that introduces exactly one new control is not recognised by this signal alone,
   matching the existing limitation already documented for `"elements_appeared"` above.
-- This PR is detection/timing only — it does not yet change what the reasoning layer *does* with
-  a `low_confidence` result, and does not yet add any alternative-route exploration. See
-  `docs/phase-2-design.md` and PR 1C (a separate, consolidated PR on top of this one) for both.
+- This section (the original PR 1C-a) is detection/timing only. §20 covers what the reasoning
+  layer's `low_confidence` result and alternative-route exploration do with the signal
+  introduced here; §21 covers truthful milestone evaluation (evidence tiers), which also builds
+  on this section's surface-change signal.
+
+## 20. Low-confidence recovery and alternative route exploration (PR 1C)
+
+### Problem
+
+The Nissan investigation's proven failure path — `View Offer Details` → `low_confidence` →
+`go_back` → `go_back` → `stop_blocked` — has two remaining gaps beyond §19's detection/timing
+fix:
+
+1. A `low_confidence` validation failure (`validateClaudeDecision.ts`) gets, at most, one
+   same-observation retry (the ordinary `attempts` loop in `ClaudeReasoningProvider.decide()`,
+   `CLAUDE_MAX_RETRIES` hard-capped at 1) before falling back to a `stop_blocked` `Decision`.
+   Nothing re-observes the page before giving up on the current candidate.
+2. `go_back` (whether proposed directly or substituted by bounded journey replanning, §"Bounded
+   journey replanning") never leads to trying a *different* candidate — only to retreating
+   further or eventually stopping, exactly the `go_back → go_back → stop_blocked` shape observed.
+
+### Design
+
+#### Low-confidence recovery
+
+`Decision` (`src/reasoning/reasoningProvider.ts`) gains an internal, non-wire `fallbackReason?:
+string`, set by `ClaudeReasoningProvider.fallback()` to whatever reason ended its attempt loop
+(e.g. `"low_confidence"`, `"malformed_output"`). `src/core/loop.ts` recognises a `stop_blocked`
+decision whose `fallbackReason` is exactly `"low_confidence"` **and** whose immediately preceding
+dispatched action carries `RecordedAction.surfaceChangeType` (§19) — i.e. the model went
+low-confidence right after a click that opened a new, possibly still-settling surface. In that
+specific case, before falling through to journey replanning, the engine gives the run one bounded
+extra cycle: a short settle wait (`PAGE_SETTLE_DELAY_MS`, the same fixed floor §19's own readiness
+wait uses), a fresh `buildObservation()`, and one more call to the reasoning layer against that new
+observation. This is capped at **once per decision-point fingerprint**
+(`RunState.lowConfidenceRetriedFingerprints`, keyed by the same `computeDecisionPointFingerprint`
+Route Memory already uses) — a recurring ambiguous surface can never spend unbounded extra
+reasoning-provider calls, and a low-confidence result with no preceding surface change never
+triggers this at all, keeping it scoped to the diagnosed failure mode rather than a blanket extra
+retry for every low-confidence case. `RunState.consecutiveLowConfidenceCount` is tracked
+alongside, purely as a diagnostic (reset on any non-fallback decision) — it is never itself a hard
+ceiling; `maxSteps` and the existing bounded mechanisms below remain the actual stops.
+
+#### Alternative route exploration and exhausted-candidate protection
+
+Reuses Route Memory's existing candidate-identity machinery (`computeCandidateIdentity`,
+`src/core/routeMemory.ts`) rather than inventing a second one. `RunState.
+lastDispatchedRouteCandidate` records whichever click/navigate candidate this run most recently
+actually dispatched (safety-layer-allowed, regardless of outcome) — set in the same place
+`src/core/loop.ts` already computes a step's `routeCandidate` for Route Memory's own bookkeeping.
+
+When bounded journey replanning substitutes `go_back` for a `stop_blocked` action (the existing,
+unmodified `MAX_JOURNEY_REPLANNING_ATTEMPTS`-bounded mechanism), it now also seeds `RunState.
+pendingAlternativeExploration` from `lastDispatchedRouteCandidate` — "the candidate that
+apparently didn't lead anywhere" — since the step that actually triggers replanning (a
+`stop_blocked`/low-confidence decision) never itself dispatches a route candidate. This
+accumulates across more than one journey-replanning attempt within the same run, so a sibling
+that is tried and also fails is not re-offered either.
+
+`pendingAlternativeExploration` is a **one-shot** signal, consumed by exactly the next decision
+and always cleared afterward regardless of outcome — never a persistent blacklist across the run:
+
+- **Nudge**: `ReasoningContext.alternativeExploration.justFailedLabels` (rendered by
+  `src/reasoning/promptBuilder.ts` into one prompt sentence) tells the reasoning layer which
+  candidate(s) already failed and asks it to prefer a different, plausible sibling (the task's own
+  examples — a Finance Calculator, Book Test Drive, Value My Car, or Brochure control in place of
+  a Request a Quote control that didn't work out — are exactly this kind of generic,
+  objective-driven alternative; nothing in the engine hardcodes any of those labels).
+- **Guard**: if the reasoning layer's decision still resolves (via `computeCandidateIdentity`) to
+  one of the just-failed candidate ids, `src/core/loop.ts` asks once more (a bounded corrective
+  retry, same observation, same nudge already in its prompt) before, if it *still* matches,
+  overriding the decision to `stop_blocked` with safety flag `"repeated_exhausted_candidate"` —
+  exactly like a safety-layer rejection, so it flows through the same, already-bounded
+  `stop_blocked`/journey-replanning handling. This can never itself create a deadlock: the
+  existing `MAX_JOURNEY_REPLANNING_ATTEMPTS`/`maxSteps` ceilings are what actually end the run
+  either way.
+
+This mechanism is deliberately **not** fingerprint-gated to the exact page the failed candidate
+was originally offered on (unlike Branch Exploration's own fingerprint-verified multi-hop
+return, §17): a single `go_back` does not reliably land back at that exact decision point when
+the failed click never pushed browser history at all (e.g. a same-document drawer/panel opened
+via plain JS, §19) — it can land further back than expected. The nudge and guard apply to
+whichever decision comes next regardless, which is safe (a false-positive guard trigger on an
+unrelated page is a no-op, since the exhausted candidate's id will not match anything genuinely
+offered there) and still directly implements the requested "CTA fails → go_back → try sibling CTA
+→ continue" shape.
+
+### Flow diagram
+
+```
+low_confidence (Decision.fallbackReason)
+   |
+   +-- no preceding surfaceChangeType --------------------> existing stop_blocked handling
+   |
+   +-- preceding action had surfaceChangeType
+         |
+         v
+   fingerprint already retried this run?
+         |
+         +-- yes ------------------------------------------> existing stop_blocked handling
+         |
+         +-- no: mark fingerprint retried
+               |
+               v
+         settle wait -> fresh buildObservation() -> ask reasoning layer again
+               |
+               +-- confident decision --------------------> dispatch as normal
+               |
+               +-- still low_confidence / stop_blocked -----v
+                                                              |
+                                                              v
+                                          existing bounded journey-replanning check
+                                          (MAX_JOURNEY_REPLANNING_ATTEMPTS)
+                                                              |
+                                          +-- attempts remaining --> substitute go_back
+                                          |         |
+                                          |         v
+                                          |   seed pendingAlternativeExploration from
+                                          |   lastDispatchedRouteCandidate
+                                          |         |
+                                          |         v
+                                          |   next decision: prompt nudges toward a sibling;
+                                          |   re-selecting the exhausted candidate gets one
+                                          |   corrective retry, then a forced stop_blocked
+                                          |   (safetyFlag "repeated_exhausted_candidate") if
+                                          |   it still matches
+                                          |         |
+                                          |         +-- sibling candidate chosen --> dispatch
+                                          |         |     (may itself enter Branch Exploration)
+                                          |         +-- forced stop_blocked --> loops back to
+                                          |               the journey-replanning check above
+                                          |
+                                          +-- attempts exhausted --> honour stop_blocked (terminal)
+```
+
+### Relationship with existing systems
+
+| System | Treatment |
+|---|---|
+| **Route Memory** (§16) | Reused unchanged for its candidate-identity/fingerprint machinery (`computeCandidateIdentity`, `computeDecisionPointFingerprint`); `lastDispatchedRouteCandidate` and `lowConfidenceRetriedFingerprints` are new, separate `RunState` fields, not additions to `RouteMemory` itself. |
+| **Branch Exploration** (§17) | Entirely unmodified. Both new mechanisms are explicitly excluded while a branch is actively exploring — bounded journey replanning (which seeds `pendingAlternativeExploration`) already only fires `!branchActiveAndExploring`, matching §17's own "PR #41 remains the fallback only outside an active branch." A sibling candidate chosen via the alternative-route nudge is dispatched as an ordinary candidate and can itself trigger branch entry through the exact same, unmodified code path any other candidate would. |
+| **Journey Replanning** ("Bounded journey replanning" above) | Reused and given a second responsibility: the same `stop_blocked`→`go_back` substitution and `MAX_JOURNEY_REPLANNING_ATTEMPTS` ceiling now also seeds the alternative-route nudge/guard, rather than a separate budget — deliberately, to avoid the run acquiring two independent "give the model more chances" allowances that together could exceed what a task's `maxSteps`/`maxBacktracks` were sized for. |
+| **Safety Layer** (`src/safety`) | Unchanged hard guardrails (domain, `maxSteps`/`maxBacktracks`, payment/personal-data/form-submission locks). The exhausted-candidate guard is implemented entirely in `src/core/loop.ts` (not `src/safety/index.ts` or `validateClaudeDecision.ts`), reusing the existing `SafetyCheckResult`/`effectiveAction` override pattern a real safety-layer rejection already produces, so every downstream consumer (Route Memory outcome recording, branch-closure detection, diagnostics) treats it identically to any other guardrail rejection — no new safety-layer file or rejection-reason enum was needed. |
+
+### Schema impact
+
+None. `Decision.fallbackReason` and `ReasoningContext.alternativeExploration` are internal
+boundary types (matching Route Memory's own §16 precedent — never part of either wire schema).
+The new `"repeated_exhausted_candidate"` safety flag flows through the existing, already
+free-form `StepLog.safetyFlags: string[]` (no enum restriction in `schemas/task-response.schema.json`,
+matching every previous safety-flag addition in this repo), so no `schemaVersion` bump was needed
+for this PR.
+
+### Known limitations
+
+- The alternative-route guard is deliberately soft-bounded (one corrective retry, then a forced
+  `stop_blocked` for *this* decision point) rather than a hard, run-wide blacklist — a candidate
+  that failed for a genuinely transient reason is not permanently excluded from ever being tried
+  again later in the run (only for the one decision point immediately following the substitution
+  that flagged it).
+- Because the mechanism is not fingerprint-gated (see Design above), the nudge/guard can
+  occasionally apply to a decision point unrelated to where the failed candidate was offered, on a
+  site whose `go_back` overshoots past it. This is a deliberate, documented trade-off: the
+  alternative is Branch Exploration's own more expensive fingerprint-verified multi-hop return,
+  which this mechanism intentionally does not duplicate.
+- The low-confidence recovery's extra reasoning-provider call is real cost/latency, strictly
+  bounded to once per fingerprint per run.
 
 ## 21. Truthful milestone evaluation (PR 1D)
-
-*Numbering note: this section is written as §21 to stay consistent with PR 1C's own §20 (a
-separate, independently-reviewable PR on top of this one, per the revised consolidated Phase 2
-implementation strategy) — on a branch that hasn't yet merged PR 1C, §20 is briefly absent; once
-both PRs are merged in their intended order the numbering is contiguous.*
 
 ### Problem
 

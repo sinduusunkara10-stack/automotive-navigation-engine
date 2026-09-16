@@ -28,6 +28,18 @@ export interface Decision {
    * by src/safety/consentPolicyGuard.ts, never as a silent bypass.
    */
   consentControlIntent?: ConsentControlIntent;
+  /**
+   * PR 1C (low-confidence recovery): present only when `action` is a provider-internal
+   * safe fallback (e.g. ClaudeReasoningProvider.fallback()), naming why no valid decision
+   * could be produced this attempt -- e.g. "low_confidence", "malformed_output",
+   * "no_allowed_actions". Absent for an ordinary, non-fallback decision. core/loop.ts uses
+   * this to recognise a fallback stop_blocked caused specifically by the reasoning layer's
+   * own confidence falling below its configured threshold, distinct from every other
+   * reason a provider might fall back to a safe stop -- see "Low-confidence recovery" in
+   * docs/architecture.md. Never surfaced on either wire schema; purely an internal signal
+   * between a ReasoningProvider and the core loop.
+   */
+  fallbackReason?: string;
 }
 
 export interface ReasoningContextLimits {
@@ -74,6 +86,18 @@ export interface ReasoningContext {
    * repo's existing convention for optional context fields.
    */
   branch?: BranchPromptContext;
+  /**
+   * PR 1C (Alternative Route Exploration, see docs/architecture.md "Alternative route
+   * exploration"): present only for the single decision immediately following a bounded
+   * journey-replanning go_back substitution (core/loop.ts), naming the label(s) of
+   * whichever candidate route choice(s) this run has already dispatched and that did not
+   * lead anywhere productive -- a nudge toward a different, sibling control (e.g. a
+   * different call-to-action plausibly serving the same objective) rather than
+   * immediately re-proposing the same one. One-shot: cleared the instant this one decision
+   * is made, whatever it turns out to be. Omitted entirely otherwise, matching this repo's
+   * existing convention for optional context fields.
+   */
+  alternativeExploration?: { justFailedLabels: string[] };
 }
 
 export interface ReasoningProvider {

@@ -422,6 +422,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     routeMemory,
     milestones,
     branch,
+    alternativeExploration,
   } = context;
 
   const system =
@@ -504,7 +505,13 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "permanently established regardless of what a later branch does -- a branch that fails " +
     "never undoes an already-completed milestone -- and focus on \"activeSubGoal\". Never " +
     "assert that a milestone or the objective itself is complete yourself; only the " +
-    "engine's own evaluation of \"successCriteria\" decides that.";
+    "engine's own evaluation of \"successCriteria\" decides that. When \"alternativeExploration\" " +
+    "is present, its \"justFailedLabels\" name one or more controls this run already tried " +
+    "that did not lead to progress -- do not re-select any of them; instead choose a " +
+    "different visible control that could plausibly serve the same objective (for example a " +
+    "sibling call-to-action offering a related path -- a finance/valuation/test-drive/" +
+    "brochure-style control when a quote-style control did not work out, or vice versa), " +
+    "before concluding the objective is unreachable from this page.";
 
   const { selected: interactiveElements, diagnostic: elementSelection } = selectPromptInteractiveElements(
     observation.interactiveElements,
@@ -578,6 +585,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
         }
       : {}),
     ...(branch ? { branch } : {}),
+    ...(alternativeExploration ? { alternativeExploration } : {}),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };
