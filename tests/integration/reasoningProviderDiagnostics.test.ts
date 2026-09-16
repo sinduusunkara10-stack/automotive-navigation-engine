@@ -102,7 +102,7 @@ test("a full run through a real ClaudeReasoningProvider (fake model client) surf
     const response = await runTask({ page, task, reasoning });
 
     assert.equal(response.status, "success");
-    assert.equal(response.schemaVersion, "1.13.0");
+    assert.equal(response.schemaVersion, "1.14.0");
 
     const diagnostics = response.diagnostics.reasoningProvider;
     assert.ok(diagnostics, "expected diagnostics.reasoningProvider to be present");
