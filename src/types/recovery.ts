@@ -78,6 +78,83 @@ export interface AlternativeCandidateAttemptDiagnostic {
 }
 
 /**
+ * Explicit candidate-route lifecycle states (corrective pass, see CLAUDE.md and
+ * docs/architecture.md "Alternative route exploration -- complete route following"). A
+ * candidate route is genuinely *followed*, not merely clicked once: these states are
+ * reported at every transition a route attempt goes through, reusing the exact same
+ * multi-step, fingerprint-verified tracking Goal-Directed Bounded Branch Exploration
+ * (core/branchExploration.ts) already implements for its own (unrelated, ambiguity-
+ * triggered) entry path -- see BranchRecord.entryReason.
+ *
+ * - "candidate_selected": a fresh, non-exhausted candidate was chosen at the recovery
+ *   anchor's own decision point, about to be dispatched.
+ * - "route_active": the candidate's own action was dispatched and the route is now being
+ *   followed downstream (bounded by the branch's own depth budget).
+ * - "route_progressing": at least one further in-route action produced generic,
+ *   evidence-backed progress (a milestone/success criterion newly satisfied, or the route's
+ *   own accumulated evidence otherwise judged non-dead-end) without yet reaching the
+ *   targeted milestone.
+ * - "route_succeeded": the specific milestone this route was pursuing became satisfied
+ *   within the route -- the route is never reset back to its recovery anchor after this,
+ *   even if it later continues (toward a further milestone) and that continuation itself
+ *   eventually winds down.
+ * - "route_blocked": the route reached a verified dead end (a revisited decision point,
+ *   repeated no-progress actions, a safety rejection, or its own depth budget exhausted
+ *   with no progress at all) -- distinct from "candidate_exhausted", which is the
+ *   *consequence* recorded once the engine has verified restoration back at the anchor.
+ * - "anchor_restore_required": the route closed unproductively and a bounded,
+ *   fingerprint-verified return toward the recovery anchor is in progress.
+ * - "anchor_restored": the return completed and was verified (fingerprint match confirmed)
+ *   -- or was never needed at all, because the route had already achieved its targeted
+ *   milestone before winding down.
+ * - "candidate_exhausted": recorded once restoration is verified after a "route_blocked"
+ *   closure -- this candidate will not be re-offered at this decision point.
+ */
+export type RouteStatus =
+  | "candidate_selected"
+  | "route_active"
+  | "route_progressing"
+  | "route_succeeded"
+  | "route_blocked"
+  | "anchor_restore_required"
+  | "anchor_restored"
+  | "candidate_exhausted";
+
+/**
+ * One record per route-lifecycle transition (TaskResponse.diagnostics.recovery.routeAttempts)
+ * -- see RouteStatus above. Unlike AlternativeCandidateAttemptDiagnostic (one summary entry
+ * per candidate), this is the full transition-by-transition trace proving the engine
+ * genuinely followed and evaluated a multi-step route rather than only dispatching a click
+ * and checking for immediate progress.
+ */
+export interface RouteAttemptDiagnostic {
+  anchorFingerprint: string;
+  anchorCriterionId: string;
+  candidateId: string;
+  candidateLabel: string;
+  /** 1-based rank among the candidates tried at this anchor (1 = first tried, up to the bounded budget). */
+  candidateRank: number;
+  routeStartStepIndex: number;
+  routeStartUrl: string;
+  stepIndex: number;
+  status: RouteStatus;
+  /** Distinct URLs observed since the route started, in order, deduplicated. */
+  urlsVisited: string[];
+  /** ActionResult.surfaceChangeType values observed since the route started (dialog_appeared, layer_panel_appeared, etc.). */
+  surfacesOpened: string[];
+  /** state.satisfiedCriteriaIds snapshot immediately before this route started. */
+  milestoneStateBefore: string[];
+  /** state.satisfiedCriteriaIds snapshot as of this transition. */
+  milestoneStateAtTransition: string[];
+  /** Short, generic explanation of what evidence produced this transition -- never a raw page-content dump. */
+  progressEvidence?: string;
+  /** How many proactive consent interruptions (accept_optional) this route has absorbed so far, without being reset. */
+  consentInterruptionsHandled: number;
+  /** Present on a terminal transition (route_succeeded, candidate_exhausted). */
+  terminationReason?: string;
+}
+
+/**
  * One bounded diagnostic record per genuine consent surface the engine detected via its
  * own independent, deterministic DOM classification (src/observation/consentSurface.ts) --
  * never solely the model's self-reported ConsentControlIntent. See docs/architecture.md
@@ -95,6 +172,25 @@ export interface ConsentSurfaceDiagnostic {
   engineActionVerified?: boolean;
   /** The model's own self-reported intent for this same control, when available, for comparison against the deterministic classification. */
   modelReportedIntent?: ConsentControlIntent;
+  /**
+   * Multilingual consent handling (corrective pass, see CLAUDE.md "Consent behaviour --
+   * unsupported/ambiguous languages"): true when the accept-all control was identified via
+   * the bounded, independently-verified model-assist fallback (consentClassifier.ts's
+   * resolveAmbiguousConsentSurface) rather than the deterministic, configured-language
+   * wording table -- i.e. the page's own wording matched none of the configured languages.
+   * Absent (never false) for the ordinary, deterministic case.
+   */
+  resolvedViaModelAssist?: boolean;
+  /**
+   * True when this surface showed genuine consent-context evidence but the deterministic,
+   * configured-language wording table could not resolve a confident accept/decline-or-
+   * settings choice shape from it -- see ConsentSurfaceAssessment.languageAmbiguous
+   * (consentClassifier.ts). Absent (never false) when a language was resolved (or no
+   * evidence existed at all).
+   */
+  languageAmbiguous?: boolean;
+  /** Observation.pageLanguage at this step, when the page declared one -- see that field's own doc comment. */
+  pageLanguage?: string;
 }
 
 /**
@@ -102,9 +198,11 @@ export interface ConsentSurfaceDiagnostic {
  * recovery". Present only when at least one recovery-anchor restore was attempted this run.
  */
 export interface RecoveryDiagnostics {
-  version: "1.0.0";
+  version: "1.1.0";
   anchorsRecorded: number;
   attempts: RecoveryAttemptDiagnostic[];
+  /** Full route-lifecycle transition trace -- see RouteAttemptDiagnostic above. */
+  routeAttempts: RouteAttemptDiagnostic[];
 }
 
 /**

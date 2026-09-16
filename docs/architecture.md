@@ -2722,16 +2722,17 @@ this situation — the production trace's actual failure mode.
 
 ### Relationship with existing systems
 
-Deliberately layered alongside, not replacing, §17's proactive "Goal-Directed Bounded Branch
-Exploration": branch exploration remains the mechanism for a decision point recognised as
+Originally layered alongside, not replacing, §17's proactive "Goal-Directed Bounded Branch
+Exploration": branch exploration remained the mechanism for a decision point recognised as
 *ambiguous* (no candidate is a dominant lexical match) at the moment a candidate is about to be
-dispatched; milestone-anchored recovery is the mechanism for *reactive* recovery once a decision has
+dispatched; milestone-anchored recovery was the mechanism for *reactive* recovery once a decision had
 already been rejected or fallen back — triggered from the same `journeyReplanningEligible` gate §20
-already established, and, like §20's original substitution, still never engaged while a branch is
-actively exploring or returning (`!branchActiveAndExploring`, unchanged). The two systems can
-interact on the same run (a branch's own dead-end return still uses its own fingerprint-verified
-hop sequence, unaffected by this pass) but do not share exhaustion/budget state — a known, narrow
-gap noted below.
+already established, and, like §20's original substitution, never engaged while a branch is actively
+exploring or returning (`!branchActiveAndExploring`, unchanged). **This pass's own corrective
+follow-up (§23) unified the two**: a milestone-recovery candidate now enters the exact same bounded
+branch-tracking machinery an ambiguity-triggered candidate always has, through a second,
+independently-budgeted entry path (`BranchRecord.entryReason`) that never contends for the other's
+counter — see §23 for the full design and the two correctness fixes the unification required.
 
 ### Schema impact
 
@@ -2755,22 +2756,181 @@ matching `BranchRecord`'s own precedent (§17) — never part of either wire sch
   re-checked could in principle cause a spurious fingerprint mismatch, falling back to a (still
   safe, still bounded) hop attempt rather than the cheaper zero-hop path. Not observed in testing;
   noted as a theoretical edge case.
-- Milestone-anchored recovery and Goal-Directed Bounded Branch Exploration (§17) do not share
-  exhausted-candidate or budget state — a candidate a branch already proved a dead end is visible to
-  the *reasoning layer's* prompt via `routeMemory[].branchResult` (unchanged, §17), but is not
-  automatically added to milestone-anchored recovery's own persistent exhausted set. In practice the
-  two systems are rarely both eligible for the same decision point in the same run; unifying them is
-  deferred as a follow-up rather than risked in this pass.
 - `consentInteractionPolicy` values other than `"accept_optional"` remain advisory-only by design
   (see Design above) — the engine still only ever *rejects* a self-reported violation for those
   policies, never proactively selects a decline/settings control on the model's behalf.
-- The proactive consent step's own deterministic classifier (`src/safety/consentClassifier.ts`) is
-  English-centric today (see its own doc comment on why, and how it is structured to extend) — a
-  consent surface phrased entirely in another language will not be proactively resolved by the
-  engine, only (still) reactively guarded against a non-compliant self-reported choice.
-- A pre-existing, unrelated edge case in `observation/observationBuilder.ts`'s per-scan element-id
-  assignment was discovered while building this pass's integration test (a freshly-scanned element
-  can be assigned the same `data-nav-engine-id` as an *earlier*-tagged element that left the DOM
-  between scans, since index-based fallback ids are computed per-scan rather than globally
-  deduplicated against already-issued ids) — out of this pass's scope; tracked as a follow-up rather
-  than fixed under time pressure in a file this pass otherwise left untouched.
+
+The remaining three items originally noted here (branch/recovery exhaustion state not shared,
+English-centric consent, and the `observationBuilder.ts` element-id edge case) were all resolved in
+the corrective follow-up pass — see §23.
+
+## 23. Complete route-exploration lifecycle, multilingual consent, and the element-identity fix (corrective follow-up pass)
+
+### Problem
+
+A further audit of §22's own shipped behaviour found three specific gaps still short of the actual
+production requirement:
+
+1. **Alternative Route Exploration only ever *dispatched* a candidate and checked immediately** —
+   §22's own "known limitations" already flagged that it shared no state with §17's Goal-Directed
+   Bounded Branch Exploration; the deeper problem was that a milestone-recovery candidate was never
+   *followed* as a multi-step route the way an ambiguity-triggered branch already was, so a
+   candidate needing more than one downstream action to prove itself a dead end (or a success) was
+   never actually given the chance.
+2. **The consent classifier was English-only**, with no path at all for a genuine surface phrased in
+   another language, and no signal exposed when a page's own wording didn't match anything the
+   engine understood.
+3. **`observation/observationBuilder.ts`'s per-scan element-id assignment could silently reuse a
+   removed element's own id** for a brand-new, unrelated element (§22's own noted edge case) —
+   letting a stale reference from an earlier observation resolve to the wrong live control.
+
+### Design
+
+**Unifying milestone-anchored recovery with Goal-Directed Bounded Branch Exploration
+(`src/core/loop.ts`, `src/core/branchExploration.ts`, `src/core/state.ts`, `src/types/recovery.ts`).**
+Rather than build a fourth bespoke state machine, a milestone-recovery candidate now enters the
+*exact same* bounded-branch tracking §17 already implements (depth budget, dead-end/revisit/
+no-progress detection, fingerprint-verified return), through a second, independently-budgeted entry
+path tagged on the branch record itself (`BranchRecord.entryReason: "ambiguity" | "milestone_recovery"`).
+The two paths never contend for the same counter: `"ambiguity"` still counts against
+`MAX_CANDIDATE_BUDGET_PER_DECISION_POINT` (2, unchanged); `"milestone_recovery"` counts against the
+task's own `alternativeCandidateBudget` (`Safety.maxAlternativeCandidatesPerDecisionPoint`, default
+3, §22). A `"milestone_recovery"` branch additionally records
+`recoveryAnchorCriterionId`/`targetMilestoneCriterionIds` (the specific required-criterion group it
+was entered to pursue — `computeTargetMilestoneCriterionIds`, `src/core/recoveryAnchors.ts`) and
+`hasBranchAchievedTargetMilestone` lets a branch that has already satisfied *that* milestone continue
+toward a *later* one without ever being forced back to its own recovery anchor, even if its own
+later, downstream outcome would otherwise have closed it unproductively — directly answering "do not
+return to the earlier anchor merely because the route needs more than one step."
+
+Every lifecycle transition is reported as its own `RouteAttemptDiagnostic`
+(`diagnostics.recovery.routeAttempts`, `RecoveryDiagnostics.version` `"1.0.0"` → `"1.1.0"` for this
+new required field) with an explicit `RouteStatus`: `candidate_selected` → `route_active` →
+(any number of) `route_progressing` → either `route_succeeded` or `route_blocked` →
+`anchor_restore_required` (zero or more, one per return hop) → `anchor_restored` →
+`candidate_exhausted`. Each record carries the route's own `urlsVisited`/`surfacesOpened` (proving a
+route was genuinely followed downstream, not only dispatched once), `milestoneStateBefore`/
+`milestoneStateAtTransition`, and `consentInterruptionsHandled` (see below). A coarser, one-row-per-
+candidate summary (`diagnostics.alternativeExploration.candidates`, unchanged shape from §22) is
+still populated alongside it, pushed once a candidate's outcome is final.
+
+Two correctness fixes were needed to make this unification behave correctly, both found via the
+combined-sequence integration test (`tests/integration/milestoneAnchoredRecovery.test.ts`) once it
+was rewritten to prove genuine multi-step routes (see Testing below) rather than single clicks:
+
+- **Zero-hop restore for a branch closed via a direct `stop_blocked`.** A branch closed because the
+  reasoning layer itself proposed (or the safety layer substituted) `stop_blocked` mid-branch
+  previously *always* dispatched a `go_back` to begin its return sequence, even when the branch's own
+  decision point required zero hops (a same-document drawer/half-window the candidate action never
+  actually navigated away from) — retreating the *real* browser history one entry too far. Fixed by
+  checking `computeDecisionPointFingerprint(observation) === branch.decisionPointId` first, exactly
+  like the pre-existing `anchorAlreadyAtTarget` zero-hop path this mirrors, before ever falling back
+  to a hop.
+- **The milestone-recovery entry gate fired for an ordinary, unambiguous dispatch, not just a genuine
+  recovery attempt.** A recorded recovery anchor existing at a fingerprint is not, by itself,
+  evidence that *this specific* dispatch is a recovery attempt — an entirely ordinary, first-ever,
+  single-candidate click (e.g. the one link on a freshly-loaded page) can coincidentally be
+  dispatched from a fingerprint an *earlier* milestone happened to anchor, since every satisfied
+  criterion gets one. Without a further check, that ordinary click would start being tracked as a
+  bounded candidate route, leaving it vulnerable to being hijacked by a later, unrelated
+  `stop_blocked` as if it were the route that had failed. Fixed with `RunState.markAnchorRecovered`/
+  `wasAnchorRecoveredThisStep`: a fingerprint is only eligible for `"milestone_recovery"` entry on the
+  exact step a genuine anchor-recovery event (a zero-hop retry, a verified hop-based restoration, or
+  the already-achieved-target bypass) happened there, never carried over to a later, ordinary revisit
+  of the same fingerprint.
+
+**Multilingual consent handling (`src/safety/consentClassifier.ts`,
+`src/observation/observationBuilder.ts`, `src/core/loop.ts`, `src/core/engine.ts`).** The wording
+table (`CONSENT_LANGUAGES`) is now a small, independent, appendable array of per-language token sets
+— English, French, German, Spanish, Italian, and Dutch today — each checked in table order (English
+first) for accept-all/decline/settings phrases and single words. English's own classification and
+evidence text is byte-for-byte unchanged by the languages added alongside it. `Observation.pageLanguage`
+(new, optional — the page's own `<html lang>`, normalised to its primary subtag) is threaded through
+as one further signal, alongside structural surface shape (an accept-shaped control coexisting with a
+decline- or settings-shaped one, §22's own conservative gate, unchanged) and consent-context evidence.
+Never claims "any language" support from the table alone: when a genuine surface's own wording
+matches none of the configured languages, `assessConsentSurface` reports `languageAmbiguous: true`
+instead of silently reporting no surface at all. A caller may supply an optional, bounded
+`ConsentAmbiguityResolver` (structurally the same optional-callback shape
+`SemanticCriterionVerifier` already established, §21) — invoked only in that ambiguous case, given
+the exact bounded candidate list already observed, and its answer independently verified against
+that same list (a resolution naming an element that was never actually offered, or falling below a
+conservative confidence bar, resolves to nothing — fail closed, never guessed at). `resolveAmbiguousConsentSurface`
+performs that verification; `core/loop.ts`'s consent-handling block tries the deterministic
+`acceptAllCandidate` first and falls back to the resolver only when it is undefined. Every consent
+surface, in any language, still pauses the current candidate route without resetting or exhausting
+it, preserves every existing budget (`state.activeBranch` is left completely untouched; only
+`consentInterruptionsHandled` is incremented, purely for visibility), and confirms/verifies the click
+exactly as before — see `tests/integration/multilingualConsent.test.ts` for the proof across all six
+languages at six distinct journey stages (initial load, after milestone 1, after milestone 3, while a
+candidate route is active, while progressing 4→5, and after a real navigation to a further page).
+`MAX_CONSENT_RETRIES` (`core/loop.ts`) moved from 2 to 8 to comfortably cover a real multi-surface
+journey's own worth of distinct consent interruptions — still a small, fixed, non-task-configurable
+ceiling, never unbounded.
+
+A related fix was needed in `computeDecisionPointFingerprint` (`src/core/routeMemory.ts`): a
+genuinely-detected consent surface's own accept/decline/settings controls are now excluded from the
+fingerprint signature. Without this, a milestone satisfied in the very same observation a consent
+surface first appears in (a realistic shape: a new component opening both a required marker and its
+own cookie banner at once) baked that soon-to-be-dismissed banner into a recovery anchor's own
+fingerprint — permanently preventing the anchor from ever being recognised as restored again once the
+engine's own proactive handling removed the banner on a later step. A consent banner is transient by
+nature and never a meaningful part of "which decision point is this," so it is excluded from every
+fingerprint computation (ambiguity detection, route-memory candidate keys, revisit detection, branch/
+anchor return-sequence matching), not only the anchor-recording path — one principled fix rather than
+a narrower, anchor-only special case.
+
+**Element-identity fix (`src/observation/observationBuilder.ts`, `src/core/routeMemory.ts`).** The
+root cause behind §22's own noted edge case: a fallback `data-nav-engine-id` was assigned from the
+element's own position (`el-${index}`) in that scan's array — stable for an element that keeps its
+own already-issued attribute across scans, but for a *brand-new* element never scanned before, its
+fallback id depended on the current array's own length/ordering. Once an earlier-scanned element left
+the DOM (a closed drawer, a dismissed banner) and a later, unrelated new element happened to land at
+that same freed array position, it received that now-unused id string — letting a stale reference
+from an earlier observation silently resolve to the wrong live control. Fixed with a monotonically
+increasing counter stored on `window` (naturally frame-scoped: each frame has its own global, zero
+extra bookkeeping), never decremented or reused, so a freshly-assigned id can never coincide with one
+ever handed out before in that frame. An already-scanned element (one that already carries the
+attribute) is entirely unaffected — its identity remains exactly as stable as before this fix.
+Alongside it, `buildClickIdentityKey` (`src/core/routeMemory.ts`) gained `frameOrigin` as a further,
+always-applied disambiguating layer (on top of, not instead of, the existing `destinationUrl`/
+`nearestHeadingText` context) — a control living inside a same-origin child frame was not previously
+distinguished from an otherwise-identical main-document control at all when neither had a
+`destinationUrl` or nearby heading. See `tests/unit/elementIdentity.test.ts` for the nine required
+identity scenarios (duplicate labels on different cards/surfaces, correct dispatch resolution,
+re-observation after a drawer opens, exhaustion isolation, anchor-candidate correctness, frame
+isolation, DOM-reorder stability, and diagnostic context) — no test in this repo works around the
+collision any more; `milestoneAnchoredRecovery.test.ts`'s own fixture now genuinely removes its
+cookie banner from the DOM (`.remove()`, not `style.display = 'none'`) and passes unmodified.
+
+### Testing
+
+`tests/integration/milestoneAnchoredRecovery.test.ts` was fully rewritten (not merely extended) to
+prove the complete 16-point required sequence with genuine multi-step routes: both candidates' routes
+are real, same-document `location.hash` navigation sequences (a small client-side router keyed off
+the hash), so the browser's own history genuinely backs each downstream step and a bounded `go_back`
+return sequence is a real, verifiable restoration rather than a same-document no-op the engine could
+get away with faking. Candidate A is followed for more than one downstream action before being judged
+a verified dead end (proven via `routeAttempts` showing ≥2 `route_progressing` transitions and ≥2
+distinct `urlsVisited`); the engine restores and verifies the exact milestone-3 anchor with exactly
+two `go_back` hops; candidate A is marked exhausted; candidate B's own route reaches milestone 4 (a
+`route_succeeded` transition recorded the moment it happens) and continues, unreset, on to milestone 5
+— the run never returns to the milestone-3 anchor or to milestones 1/2 after that point.
+
+### Schema impact
+
+Additive only, `schemaVersion` `"1.16.0"` → `"1.17.0"` (`outputSchemaVersion` `"1.16.0"` →
+`"1.17.0"`, request `schemaVersion` `"1.17.0"` → `"1.18.0"`): `diagnostics.recovery.routeAttempts`
+(new required field, `RecoveryDiagnostics.version` `"1.0.0"` → `"1.1.0"`, `$defs/routeAttemptDiagnostic`
+new), `observation.pageLanguage` (new, optional), and three new optional fields on
+`$defs/consentSurfaceDiagnostic` (`resolvedViaModelAssist`, `languageAmbiguous`, `pageLanguage`). No
+existing field removed, renamed, or had its meaning changed.
+
+### Known limitations
+
+- `consentInteractionPolicy` values other than `"accept_optional"` remain advisory-only, unchanged
+  from §22 — the ambiguity/model-assist fallback is itself also scoped to `"accept_optional"` only.
+- The configured-language table (six languages) is a starting set, not an exhaustive one — a genuine
+  surface in a further language is reported as `languageAmbiguous` and handled only if a caller
+  supplies its own `ConsentAmbiguityResolver`; with none supplied, behaviour degrades to the
+  pre-existing reactive `consentPolicyGuard` backstop only, same as an undetected surface always did.

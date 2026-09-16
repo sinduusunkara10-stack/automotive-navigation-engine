@@ -748,8 +748,14 @@ test("buildReasoningPrompt omits routeMemory entirely when the context field is 
 test("buildReasoningPrompt forwards routeMemory candidates (type/label/attempts/lastOutcome) to the prompt payload", () => {
   const context = buildTestReasoningContext({
     routeMemory: [
-      { actionType: "click", label: 'button "Stay"', attempts: 2, lastOutcome: "no_change" },
-      { actionType: "navigate", label: "https://example-fictional-oem.test/off-domain", attempts: 1, lastOutcome: "blocked" },
+      { id: "click::button::Stay", actionType: "click", label: 'button "Stay"', attempts: 2, lastOutcome: "no_change" },
+      {
+        id: "navigate::https://example-fictional-oem.test/off-domain",
+        actionType: "navigate",
+        label: "https://example-fictional-oem.test/off-domain",
+        attempts: 1,
+        lastOutcome: "blocked",
+      },
     ],
   });
 
@@ -780,6 +786,7 @@ test("buildReasoningPrompt forwards routeMemory candidates (type/label/attempts/
 
 test("buildReasoningPrompt bounds routeMemory candidates, keeping the most-attempted ones when truncating", () => {
   const manyCandidates = Array.from({ length: 20 }, (_, i) => ({
+    id: `click::button::Option ${i}`,
     actionType: "click" as const,
     label: `button "Option ${i}"`,
     attempts: 1,
@@ -787,7 +794,13 @@ test("buildReasoningPrompt bounds routeMemory candidates, keeping the most-attem
   }));
   // The single most-attempted candidate, appended last -- getTriedCandidates in real usage
   // already sorts most-attempted-first, so this fixture mirrors that pre-sorted order.
-  const heavilyTried = { actionType: "click" as const, label: 'button "Dead end"', attempts: 9, lastOutcome: "failed" as const };
+  const heavilyTried = {
+    id: "click::button::Dead end",
+    actionType: "click" as const,
+    label: 'button "Dead end"',
+    attempts: 9,
+    lastOutcome: "failed" as const,
+  };
 
   const context = buildTestReasoningContext({ routeMemory: [heavilyTried, ...manyCandidates] });
   const prompt = buildReasoningPrompt(context);

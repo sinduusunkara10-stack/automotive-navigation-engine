@@ -93,6 +93,14 @@ export interface Observation {
    * from interactiveElements[].covered alone.
    */
   activeDialog?: { role: string; accessibleName: string };
+  /**
+   * Multilingual consent handling (see CLAUDE.md and docs/architecture.md "Consent
+   * behaviour -- multilingual"): the page's own declared language (`<html lang>`),
+   * normalised to its primary subtag only (e.g. "fr-FR" -> "fr") -- one signal among
+   * several src/safety/consentClassifier.ts combines, never a translation and never used
+   * on its own to decide anything. Absent when the page declares no language.
+   */
+  pageLanguage?: string;
 }
 
 /**
@@ -896,7 +904,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.16.0";
+  schemaVersion: "1.17.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

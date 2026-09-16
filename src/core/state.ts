@@ -6,6 +6,7 @@ import type {
   ConsentSurfaceDiagnostic,
   RecoveryAnchor,
   RecoveryAttemptDiagnostic,
+  RouteAttemptDiagnostic,
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
@@ -182,27 +183,26 @@ export class RunState {
   activeAnchorRestore: { anchor: RecoveryAnchor; hopsAttempted: number; hopsBudget: number } | undefined;
 
   /**
-   * Alternative Route Exploration (corrective pass): persistent, per-decision-point-
-   * fingerprint record of which candidates have already been tried and did not lead to
-   * progress -- unlike pendingAlternativeExploration above, this survives across more than
-   * one decision, so a bounded budget of distinct candidates (MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR,
-   * core/loop.ts) can genuinely be enforced per decision point rather than only guarding
-   * against one immediate repeat.
+   * Alternative Route Exploration (corrective pass): a candidate is "exhausted" at a given
+   * decision-point fingerprint exactly when Route Memory (core/routeMemory.ts) already
+   * recorded a *branch* result for it there (dead_end/blocked/unsafe) -- i.e. it was not
+   * merely dispatched once, but genuinely followed as a multi-step route and found not to
+   * progress (see core/branchExploration.ts's assessBranchProgress and
+   * classifyClosureFromSafetyFlags). Derived directly from state.routeMemory -- never a
+   * second, separately-maintained set that could drift out of sync with it (a real gap in
+   * an earlier version of this mechanism, since fixed: a candidate id alone, without its
+   * label, could not be told apart from a different card's identically-labelled control --
+   * see core/routeMemory.ts's buildClickIdentityKey, which already disambiguates by
+   * destinationUrl/nearestHeadingText when available).
    */
-  private readonly exhaustedCandidatesByFingerprint = new Map<string, Map<string, string>>();
-
-  /** Map of exhausted candidate id -> label at this decision point -- never a bare id set, so the reasoning prompt can always name what already failed. */
   getExhaustedCandidates(fingerprint: string): ReadonlyMap<string, string> {
-    return this.exhaustedCandidatesByFingerprint.get(fingerprint) ?? new Map<string, string>();
-  }
-
-  markCandidateExhausted(fingerprint: string, candidateId: string, candidateLabel: string): void {
-    let map = this.exhaustedCandidatesByFingerprint.get(fingerprint);
-    if (!map) {
-      map = new Map<string, string>();
-      this.exhaustedCandidatesByFingerprint.set(fingerprint, map);
+    const exhausted = new Map<string, string>();
+    for (const candidate of this.routeMemory.getTriedCandidates(fingerprint)) {
+      if (candidate.branchResult === "dead_end" || candidate.branchResult === "blocked" || candidate.branchResult === "unsafe") {
+        exhausted.set(candidate.id, candidate.label);
+      }
     }
-    map.set(candidateId, candidateLabel);
+    return exhausted;
   }
 
   private readonly alternativeExplorationAttemptsByFingerprint = new Map<string, number>();
@@ -217,11 +217,47 @@ export class RunState {
     return next;
   }
 
+  /**
+   * Milestone-anchored recovery entry-gate fix (corrective pass, see CLAUDE.md "Fix the
+   * element-ID collision at its source" -- discovered alongside it, from the same
+   * multilingual-consent fixture): a decision point having a recorded recovery anchor is
+   * not, by itself, evidence that *this specific dispatch* is a recovery attempt -- an
+   * entirely ordinary, unambiguous, first-ever click (e.g. the one link on a freshly-loaded
+   * page) can coincidentally be dispatched from a fingerprint some *earlier* milestone
+   * happened to anchor. Without this check, core/loop.ts's viaMilestoneRecoveryEntry gate
+   * would start tracking that ordinary click as a bounded candidate route, and a later,
+   * completely unrelated stop_blocked could then hijack it as if it were the route that had
+   * failed. Marked, per fingerprint, only at the exact step a genuine anchor-recovery event
+   * happens there (a zero-hop anchor retry, a verified hop-based restoration, or the
+   * already-achieved-target bypass -- see this file's own call sites) -- entry is eligible
+   * only on that *same* step, never carried over to a later, ordinary revisit of the same
+   * fingerprint.
+   */
+  private readonly anchorRecoveredAtStep = new Map<string, number>();
+
+  markAnchorRecovered(fingerprint: string, stepIndex: number): void {
+    this.anchorRecoveredAtStep.set(fingerprint, stepIndex);
+  }
+
+  wasAnchorRecoveredThisStep(fingerprint: string, stepIndex: number): boolean {
+    return this.anchorRecoveredAtStep.get(fingerprint) === stepIndex;
+  }
+
   /** Full diagnostic history for TaskResponse.diagnostics.recovery/alternativeExploration/consent -- see src/types/recovery.ts. */
   readonly recoveryAttemptDiagnostics: RecoveryAttemptDiagnostic[] = [];
   readonly alternativeCandidateDiagnostics: AlternativeCandidateAttemptDiagnostic[] = [];
+  readonly routeAttemptDiagnostics: RouteAttemptDiagnostic[] = [];
   readonly consentSurfaceDiagnostics: ConsentSurfaceDiagnostic[] = [];
   consentRetriesUsed = 0;
+
+  /** 1-based rank counter of distinct candidates tried per recovery-anchor fingerprint, for RouteAttemptDiagnostic.candidateRank -- reset is never needed (a monotonically increasing rank across this anchor's own bounded budget is exactly what "1st/2nd/3rd candidate tried here" means). */
+  private readonly candidateRankByFingerprint = new Map<string, number>();
+
+  nextCandidateRank(fingerprint: string): number {
+    const next = (this.candidateRankByFingerprint.get(fingerprint) ?? 0) + 1;
+    this.candidateRankByFingerprint.set(fingerprint, next);
+    return next;
+  }
 
   /** Total go_back hops spent restoring toward any recovery anchor this run -- bounded independently of journeyReplanningAttempts (core/loop.ts's MAX_ANCHOR_RESTORE_HOPS_TOTAL), so anchored recovery has its own dedicated, generous-but-bounded budget rather than sharing the small no-anchor fallback allowance. */
   anchorRestoreHopsAttempted = 0;
@@ -322,13 +358,25 @@ export class RunState {
     return `branch-${this.branchCounter}`;
   }
 
-  /** Begins tracking a new active branch and counts it against its decision point's candidate budget. Caller (core/loop.ts) is responsible for confirming no branch is already active and that the budget/depth preconditions hold before calling this. */
+  /**
+   * Begins tracking a new active branch. For entryReason "ambiguity" (unchanged from
+   * before this corrective pass), counts it against MAX_CANDIDATE_BUDGET_PER_DECISION_POINT
+   * via branchAttemptsByDecisionPoint. For entryReason "milestone_recovery", that counter is
+   * deliberately left untouched -- its own, independent budget
+   * (alternativeExplorationAttemptsByFingerprint, incremented by the caller via
+   * incrementAlternativeExplorationAttempts) applies instead, so the two entry paths can
+   * never contend for or drain each other's budget at the same decision point. Caller
+   * (core/loop.ts) is responsible for confirming no branch is already active and that the
+   * relevant budget/depth preconditions hold before calling this.
+   */
   startBranch(record: BranchRecord): void {
     this.activeBranch = record;
-    this.branchAttemptsByDecisionPoint.set(
-      record.decisionPointId,
-      this.getBranchAttempts(record.decisionPointId) + 1,
-    );
+    if (record.entryReason === "ambiguity") {
+      this.branchAttemptsByDecisionPoint.set(
+        record.decisionPointId,
+        this.getBranchAttempts(record.decisionPointId) + 1,
+      );
+    }
   }
 
   /** Moves the active branch into bounded history and clears it, once it has fully finished (either succeeded, or its return sequence has resolved to restored/restore_failed). No-op if no branch is active. */

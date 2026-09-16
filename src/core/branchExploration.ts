@@ -53,6 +53,57 @@ export interface BranchRecord {
   returnStatus?: "not_attempted" | "restored" | "restore_failed";
   returnHopsAttempted: number;
   returnHopsBudget: number;
+  /**
+   * Milestone-anchored recovery / Alternative Route Exploration (corrective pass, see
+   * docs/architecture.md "Alternative route exploration"): which mechanism entered this
+   * branch. "ambiguity" is the original, unchanged trigger
+   * (isAmbiguousMultiCandidateDecisionPoint, proactive, at the moment a candidate is about
+   * to be dispatched). "milestone_recovery" is the corrective-pass addition: entered
+   * reactively, once a decision has already been rejected/fallen back and a recovery anchor
+   * exists for this exact decision point -- see core/loop.ts's entry-detection block. Both
+   * reuse the identical downstream depth/progress/return machinery below; only their entry
+   * gate and budget accounting differ (MAX_CANDIDATE_BUDGET_PER_DECISION_POINT for
+   * "ambiguity", the task's own alternativeCandidateBudget for "milestone_recovery" --
+   * intentionally separate counters so the two never share or contend for the same budget).
+   */
+  entryReason: "ambiguity" | "milestone_recovery";
+  /** Present only for entryReason "milestone_recovery": the recovery anchor's own criterionId this branch was entered to pursue. */
+  recoveryAnchorCriterionId?: string;
+  /**
+   * Present only for entryReason "milestone_recovery": every member id of the first
+   * unresolved required milestone group at the moment this branch was entered (see
+   * core/recoveryAnchors.ts's computeTargetMilestoneCriterionIds) -- i.e. what
+   * milestone-anchored recovery was actually trying to progress. Captured once, at entry,
+   * and never recomputed -- see hasBranchAchievedTargetMilestone below, which is what lets
+   * a branch that has already satisfied this specific milestone continue toward a *later*
+   * one without ever being forced back to its own recovery anchor, even if a later
+   * downstream action's own outcome would otherwise have closed the branch unproductively.
+   */
+  targetMilestoneCriterionIds?: string[];
+  /**
+   * How many times the engine's own proactive consent-interruption handling (accept_optional)
+   * fired while this branch was active -- diagnostic only, never itself a budget check (see
+   * MAX_CONSENT_RETRIES in core/loop.ts, which is enforced independently of any branch).
+   */
+  consentInterruptionsHandled: number;
+  /** Page url at branch entry -- for RouteAttemptDiagnostic.routeStartUrl (src/types/recovery.ts). */
+  routeStartUrl: string;
+  /** Distinct page urls observed since entry (including routeStartUrl), in order -- for RouteAttemptDiagnostic.urlsVisited. */
+  urlsVisited: string[];
+  /** ActionResult.surfaceChangeType values observed since entry -- for RouteAttemptDiagnostic.surfacesOpened. */
+  surfacesOpened: string[];
+  /** 1-based rank of this candidate among every candidate tried at this decision point (state.nextCandidateRank) -- for RouteAttemptDiagnostic.candidateRank. */
+  candidateRank: number;
+}
+
+/**
+ * True once a "milestone_recovery" branch has satisfied the specific milestone it was
+ * entered to pursue (targetMilestoneCriterionId) -- see that field's own doc comment. A
+ * branch with no targetMilestoneCriterionId (i.e. an "ambiguity"-entered branch) always
+ * returns false here, unchanged from this function not existing at all for that path.
+ */
+export function hasBranchAchievedTargetMilestone(branch: BranchRecord): boolean {
+  return Boolean(branch.targetMilestoneCriterionIds?.length) && branch.newlySatisfiedCriteriaIds.some((id) => branch.targetMilestoneCriterionIds?.includes(id));
 }
 
 /**

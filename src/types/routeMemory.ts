@@ -19,6 +19,8 @@ export interface RouteMemoryCandidate {
 }
 
 export interface RouteMemoryCandidateSummary {
+  /** Stable candidate identity (see RouteMemoryCandidate.id) -- engine-internal use (exhausted-candidate matching, core/loop.ts); never mapped into the reasoning prompt payload itself (src/reasoning/promptBuilder.ts explicitly whitelists which fields reach the model). */
+  id: string;
   actionType: ActionType;
   label: string;
   attempts: number;

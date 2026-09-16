@@ -71,6 +71,33 @@ export function buildRecoveryAnchor(params: {
 }
 
 /**
+ * The specific required criterion id(s) a candidate route entered *right now* would
+ * actually be pursuing -- the first unresolved required group in declaration order (the
+ * same ordered-milestone convention core/successEvaluator.ts's ordered-milestone gate
+ * already enforces, and the same "first unresolved group" computeMilestoneRollup's own
+ * activeSubGoal already represents as a single field). Returns every member of that one
+ * group (not just its first member) so an alternative (`group`-sharing) milestone is
+ * correctly recognised as achieved however it ends up being satisfied -- see
+ * BranchRecord.targetMilestoneCriterionIds / hasBranchAchievedTargetMilestone
+ * (core/branchExploration.ts).
+ */
+export function computeTargetMilestoneCriterionIds(
+  criteria: readonly SuccessCriterion[],
+  missingRequiredCriteriaIds: readonly string[],
+): string[] {
+  const firstMissingId = missingRequiredCriteriaIds[0];
+  if (firstMissingId === undefined) {
+    return [];
+  }
+  const first = criteria.find((c) => c.id === firstMissingId);
+  const groupKey = first?.group;
+  if (!groupKey) {
+    return [firstMissingId];
+  }
+  return criteria.filter((c) => c.group === groupKey).map((c) => c.id);
+}
+
+/**
  * Selects the nearest useful recovery anchor: the anchor for the *highest-order* satisfied
  * milestone that is still strictly before the lowest-order currently-unresolved required
  * milestone -- i.e. "the decision point that produced the most recent proven progress",

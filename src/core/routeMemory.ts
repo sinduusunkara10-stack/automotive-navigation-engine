@@ -2,6 +2,7 @@ import type { SelectedAction } from "../types/actions.js";
 import type { Observation } from "../types/task-response.js";
 import type { RouteMemoryCandidate, RouteMemoryCandidateSummary, RouteMemoryOutcome } from "../types/routeMemory.js";
 import type { BranchResult } from "../types/branch.js";
+import { assessConsentSurface } from "../safety/consentClassifier.js";
 
 export type { RouteMemoryCandidate, RouteMemoryCandidateSummary, RouteMemoryOutcome } from "../types/routeMemory.js";
 
@@ -46,10 +47,29 @@ interface RouteMemoryEntry {
  * fingerprint, and so two independently-taken observations of the genuinely same decision
  * point (e.g. before and after a go_back that reloads the page) still fingerprint
  * identically even though every element's own ephemeral id has been reassigned.
+ *
+ * A genuinely-detected consent surface's own accept/decline/settings controls (see
+ * src/safety/consentClassifier.ts's own conservative surfaceDetected gate -- never a bare
+ * label guess) are excluded from the signature: a consent banner is transient by nature
+ * (present until the engine's own proactive handling removes it, absent afterward), never a
+ * meaningful part of "which decision point is this". Without this exclusion, a milestone
+ * satisfied in the very same observation a consent surface first appears in (e.g. a new
+ * component that opens both a required marker and its own cookie banner at once) would bake
+ * that soon-to-be-dismissed banner into a recovery anchor's own fingerprint, permanently
+ * preventing the anchor from ever being recognised as restored again once the banner is
+ * gone -- see docs/architecture.md "Consent behaviour -- consent at any journey stage".
  */
 export function computeDecisionPointFingerprint(observation: Observation): string {
+  const consentAssessment = assessConsentSurface(observation);
+  const consentElementIds = consentAssessment.surfaceDetected
+    ? new Set(
+        [consentAssessment.acceptAllCandidate, consentAssessment.declineCandidate, consentAssessment.settingsCandidate]
+          .filter((c): c is NonNullable<typeof c> => Boolean(c))
+          .map((c) => c.elementId),
+      )
+    : undefined;
   const elementSignatures = observation.interactiveElements
-    .filter((el) => el.visible !== false)
+    .filter((el) => el.visible !== false && !consentElementIds?.has(el.id))
     .map((el) => `${el.role}::${el.accessibleName}`);
   const uniqueSorted = [...new Set(elementSignatures)].sort();
   return JSON.stringify({ url: observation.url, elements: uniqueSorted });
@@ -70,6 +90,12 @@ export function computeDecisionPointFingerprint(observation: Observation): strin
  * Disambiguating context is added in priority order, using only fields
  * observation/observationBuilder.ts already captures generically (no new DOM scan is
  * introduced by this function itself):
+ *   0. frameOrigin -- browsing-context identity (element-identity fix, see CLAUDE.md "Fix
+ *      the element-ID collision at its source"): a control living inside a same-origin
+ *      child frame is never the same candidate as an otherwise-identical main-document
+ *      control, however deep it is folded into the key below -- always applied first, on
+ *      top of whichever of the two signals below also applies, since frame and per-card
+ *      context are independent facts that can both be true at once.
  *   1. destinationUrl -- when the element is a real <a href>, its own destination (e.g. a
  *      distinct product/offer id in the URL or its hash) is the strongest, most stable
  *      per-card signal available, and is already present on Observation today.
@@ -77,23 +103,25 @@ export function computeDecisionPointFingerprint(observation: Observation): strin
  *      entirely by a click handler), the nearest enclosing heading's text is a generic,
  *      markup-agnostic proxy for "which card/section this control belongs to".
  * Falls back to the bare role+accessibleName identity (unchanged, pre-existing behaviour)
- * when neither is available -- genuinely indistinguishable from the data this engine
- * generically captures, same as before this fix.
+ * when none apply -- genuinely indistinguishable from the data this engine generically
+ * captures, same as before this fix.
  */
 export function buildClickIdentityKey(element: {
   role: string;
   accessibleName: string;
   destinationUrl?: string;
   nearestHeadingText?: string;
+  frameOrigin?: string;
 }): string {
   const base = `${element.role}::${element.accessibleName}`;
+  const frameScoped = element.frameOrigin ? `${base}::frame:${element.frameOrigin}` : base;
   if (element.destinationUrl) {
-    return `${base}::url:${element.destinationUrl}`;
+    return `${frameScoped}::url:${element.destinationUrl}`;
   }
   if (element.nearestHeadingText) {
-    return `${base}::ctx:${element.nearestHeadingText}`;
+    return `${frameScoped}::ctx:${element.nearestHeadingText}`;
   }
-  return base;
+  return frameScoped;
 }
 
 /**
@@ -216,8 +244,8 @@ export class RouteMemory {
     if (!candidates) {
       return [];
     }
-    return [...candidates.values()]
-      .map((entry) => ({ ...entry }))
+    return [...candidates.entries()]
+      .map(([id, entry]) => ({ ...entry, id }))
       .sort((a, b) => b.attempts - a.attempts || a.label.localeCompare(b.label));
   }
 }
