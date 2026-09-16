@@ -2229,7 +2229,7 @@ recovery and alternative route exploration) builds on the `surfaceChangeDetected
 ### Schema impact
 
 Additive only (`schemaVersion`/`outputSchemaVersion` "1.13.0" → "1.14.0"; `task-request.schema.json`'s
-own `schemaVersion` "1.14.0" → "1.15.0" to track `outputSchemaVersion`'s moved pin, per this repo's
+own `schemaVersion` "1.14.0" → "1.16.0" to track `outputSchemaVersion`'s moved pin, per this repo's
 existing versioning convention): `ActionResult.surfaceChangeDetected`/`surfaceChangeType`. No
 existing field was removed, renamed, or had its meaning changed. `RecordedAction.surfaceChangeType`
 and `ReasoningContext` are internal boundary types (matching Route Memory's own §16 precedent) —
@@ -2577,3 +2577,200 @@ was removed, renamed, or had its meaning changed.
   `SemanticCriterionVerifier` section) are unchanged by this PR.
 - The stricter required-milestone threshold that would actually change satisfaction behaviour is
   explicitly deferred (see Design, item 6) — this PR only makes existing behaviour auditable.
+
+## 22. Milestone-anchored recovery, bounded alternative route exploration, deterministic consent behaviour, and candidate-selection redesign (corrective pass)
+
+### Problem
+
+A production audit of a real Nissan UK run (see the corrective-pass investigation report; not
+reproduced here) traced a failed journey to gaps in exactly the mechanisms §20/§21 built: PR 1D's
+milestone evidence (§21) was recorded truthfully but never read by recovery; PR 1C's "Alternative
+Route Exploration" (§20) was, in the code that actually shipped, a single corrective retry plus a
+one-shot exhausted-candidate guard, not bounded multi-candidate exploration; bounded journey
+replanning (§20, "PR #41") retreats via an unconstrained `go_back`, with no concept of *which*
+decision point it is trying to return to, so it can — and in the traced run, did — overshoot a
+same-document half-window state straight back past the browser-history entries that actually exist
+toward the homepage; the reasoning layer's own self-reported `consentControlIntent` (§ various) was
+never independently verified against DOM evidence, and the engine never proactively pursued an
+accept-all control under `consentInteractionPolicy: "accept_optional"`; and the intercepted-click
+recovery path in `actions/click.ts` (the overlay-click-detection fix, §18) reported
+`clickSideEffectDetected` without ever computing `classifyObservedSurfaceChange`, silently
+starving §20's own low-confidence recovery of the one signal it is gated on.
+
+### Design
+
+**Milestone-anchored recovery (`src/core/recoveryAnchors.ts`, `src/types/recovery.ts`,
+`src/core/state.ts`, `src/core/loop.ts`).** The moment a required success criterion is first
+satisfied, `RunState.recoveryAnchors` gains one `RecoveryAnchor`: the criterion id, its declaration
+order (the same milestone-order convention §17's `computeMilestoneRollup` already uses), the step
+index, a *freshly re-observed* page url/title/decision-point fingerprint, the candidate identities
+visible there, and the evidence tier PR 1D already computed for that same criterion. The
+re-observation is deliberate: the criterion may have been satisfied as a direct side effect of the
+very action that also revealed the anchor's own useful candidates (a click that both selects an
+item and opens its own half-window is exactly this repo's own production trace) — anchoring to the
+stale pre-action observation would silently miss everything the action just revealed.
+
+When a decision would otherwise fall through to bounded journey replanning (§20's unconstrained
+`go_back` substitution), `selectRecoveryAnchor` picks the *highest-order* recorded anchor not
+already excluded (own doc comment: descending usefulness order, never an automatic jump to the
+very first/homepage anchor while a closer one is untried). Two outcomes:
+
+- **The current decision point already *is* the anchor** (`computeDecisionPointFingerprint`
+  match) — the common case for a same-document drawer/half-window that added no browser-history
+  entry at all (see "One-step-back requirement" below). No `go_back` is dispatched; the reasoning
+  layer is simply asked again, with this anchor's own persistent exhausted-candidate history
+  guaranteed visible (see Alternative Route Exploration below).
+- **It is not** — a single bounded `go_back` hop is dispatched toward it (`MAX_ANCHOR_RESTORE_HOPS_TOTAL`
+  = 6 across the whole run, a per-anchor ceiling of 3 hops), and the next step's fresh fingerprint
+  check confirms whether it landed on the anchor. An anchor that cannot be reached within its own
+  hop ceiling is excluded (`RunState.exhaustedAnchorFingerprints`) so the *next* trigger reaches for
+  the next-older anchor instead of retrying a known-unreachable one — never an automatic fallback
+  straight to the homepage while a closer anchor remains untried. Only when every recorded anchor is
+  exhausted does behaviour degrade to §20's original, unconstrained `go_back` substitution
+  (`journeyReplanningAttempted`), which remains entirely unchanged as the fallback for a task that
+  has not yet satisfied any required criterion at all — zero behavioural change for that case.
+
+**One-step-back requirement.** "Go back one step" means "return to the immediately preceding
+*useful logical decision point*", not "call `page.goBack()` once" and not "keep calling
+`page.goBack()` until the homepage." A recovery anchor's own decision-point fingerprint (url plus
+the deduplicated, sorted set of visible interactive elements' role+accessibleName — §17's
+`computeDecisionPointFingerprint`, reused unchanged) is what actually answers "is this the same
+logical state", independent of whether the browser's own history stack grew a new entry to reach
+it — the zero-hop restore path above is precisely what lets a same-document drawer/filter/selection
+be recognised and returned to without over-retreating through browser history that was never
+actually as deep as the logical journey.
+
+**Bounded, persistent Alternative Route Exploration (`src/core/loop.ts`,
+`RunState.exhaustedCandidatesByFingerprint`/`alternativeExplorationAttemptsByFingerprint`).**
+Distinct from, and a genuine multi-attempt upgrade over, §20's original one-shot
+`pendingAlternativeExploration` nudge (kept only as the no-anchor fallback's own context — never
+removed, since some tasks legitimately never satisfy a criterion before needing to recover). Each
+time an anchor-recovery cycle fires, the candidate that just failed (`RunState.lastDispatchedRouteCandidate`)
+is recorded into a *persistent*, fingerprint-keyed exhausted-candidate map — surfaced on every
+subsequent decision at that fingerprint via `ReasoningContext.alternativeExploration.justFailedLabels`
+(§20's existing prompt field, now fed from this persistent store first, falling back to the
+one-shot nudge only when the persistent store is empty), and enforced by the pre-existing
+exhausted-candidate-protection block (one corrective retry, then a hard `repeated_exhausted_candidate`
+block — unchanged mechanism, now checking the persistent set too). A bounded budget
+(`MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR` = 3, configurable per task via
+`Safety.maxAlternativeCandidatesPerDecisionPoint`) caps how many *distinct* candidates one anchor's
+decision point may be given before it is considered exhausted; exploration stops when a candidate
+produces progress, the budget is exhausted, the anchor cannot safely be restored, or a hard
+safety/journey limit is reached — never by inventing an irrelevant click merely to reach the budget
+count.
+
+**Deterministic consent classification and proactive accept-all
+(`src/safety/consentClassifier.ts`, `src/core/loop.ts`).** `assessConsentSurface` independently
+classifies a *genuine* consent surface from the same generic `Observation` evidence already
+captured (visible text/accessibleName/role, plus notableText headings for page-level context) —
+never a selector, vendor/CMP attribute, or single brand-specific string. Deliberately conservative:
+a lone control whose label happens to contain a short polarity word (e.g. "Allow location access")
+is never enough on its own — `surfaceDetected` requires both independent consent-context evidence
+(a small, appendable, English-centric token list: cookie/consent/privacy/tracking/gdpr/etc., checked
+against page headings and candidate labels) *and* a genuine accept/decline-or-settings choice shape
+(an accept-all-shaped control coexisting with a decline- or settings-shaped one). Engine-*enforced*
+only for `consentInteractionPolicy: "accept_optional"` (an explicit, caller-opted-in instruction to
+actually grant optional consent): a dedicated pre-decision block in `runStep`, checked before the
+existing branch/anchor-recovery handling on every step, detects a genuine surface and — bounded by
+`MAX_CONSENT_RETRIES` (2), entirely separate from every navigation-exploration budget above —
+dispatches the accept-all click directly, verifies the surface closed or changed via a fresh
+`assessConsentSurface` re-check, records the outcome (`ConsentSurfaceDiagnostic`), and resumes the
+existing journey state completely untouched. Every other consent policy remains **advisory only** —
+plain prompt instruction (`consentInteractionPolicyClause`) plus the pre-existing reactive
+`consentPolicyGuard`/`isConsentIntentCompliant` backstop against the model's own self-report — since
+the engine has no safe, generic way to independently decide *which* narrower action (decline vs a
+specific settings choice) a caller wants without guessing; this asymmetry (engine-enforced
+acceptance, advisory-only decline/settings) is deliberate, not an oversight.
+
+**Candidate-selection redesign (`src/reasoning/promptBuilder.ts`).** Two additive changes to
+`selectPromptInteractiveElements`, evaluated against the three options the requirement asked to be
+weighed (send-everything-active-surface-plus-a-sample; separate bounded pools per category;
+adaptive-limit-on-truncation-loss) — the implemented approach is the third, deliberately: (1) a
+bounded **guaranteed-inclusion top-up** (`MAX_GUARANTEED_INCLUSION_ADDITIONS` = 10,
+`GUARANTEED_INCLUSION_MIN_SCORE` = 0.5, the same magnitude-threshold reasoning §17's
+`isAmbiguousMultiCandidateDecisionPoint` already established for "genuinely strong, not incidental"
+lexical matches) adds any element strongly matching the *currently-unresolved milestone specifically*
+(`milestones.activeSubGoal.description`, not the whole objective+every-criterion blob the existing
+`relevant` tier already uses) that the ordinary relevance/structural budgets still dropped — applied
+on top of, never in place of, the existing selection, so it can only add elements, never remove one
+already chosen for another reason; (2) `consentControls`, a separately labelled category in the
+prompt payload, populated only when `assessConsentSurface` confirms a genuine surface (never a bare
+per-element label scan — see the false-positive risk above) so consent controls are visible to the
+model as a distinct, corroborating category rather than mixed anonymously into `interactiveElements`.
+Diagnostics (`PromptElementSelectionDiagnostic`) gained `guaranteedInclusionCount`,
+`truncationStrategy`, and `omissionReason` — additive, alongside the pre-existing `candidateCount`/
+`selectedCount`/`excludedRelevantCount`. Option (2) from the task's own list (fully separate bounded
+pools per category: active surface / milestone / alternatives / consent / global nav) was not
+implemented as a wholesale restructure — the existing relevance+structural-reserve+container-group
+algorithm already does most of that work implicitly (lexical relevance dominated by milestone-
+relevant text, `hasActiveDialog` already excludes covered background chrome from the structural
+pool, `MAX_ROUTE_MEMORY_CANDIDATES`/`alternativeExploration` already carry alternatives-specific
+context) — a full rewrite was judged higher-risk than the two additive, independently-testable
+changes actually shipped, for equivalent effect on the reported failure mode.
+
+**Half-window settle/surface-signal fix (`src/actions/click.ts`).** The intercepted-click recovery
+path (§18's overlay-click-detection fix) is the one most likely to be the click that opens a
+delayed, non-ARIA half-window (a target becoming newly covered by the very surface it opened is
+exactly `detectTargetAttributableSideEffect`'s `targetNewlyCovered` signal), yet it previously
+returned success with only `clickSideEffectDetected: true` set — never running the same bounded,
+DOM-mutation-quiet settle wait (`waitForPostClickReadiness`) or computing the same
+`classifyObservedSurfaceChange` signal the *other* click-success path already does. Both gaps are
+fixed together, since they compound: without the settle wait, the very next observation can be
+taken before the surface's own content has finished rendering; without `surfaceChangeType` being
+set, §20's own low-confidence recovery (gated on exactly that field) never engages for precisely
+this situation — the production trace's actual failure mode.
+
+### Relationship with existing systems
+
+Deliberately layered alongside, not replacing, §17's proactive "Goal-Directed Bounded Branch
+Exploration": branch exploration remains the mechanism for a decision point recognised as
+*ambiguous* (no candidate is a dominant lexical match) at the moment a candidate is about to be
+dispatched; milestone-anchored recovery is the mechanism for *reactive* recovery once a decision has
+already been rejected or fallen back — triggered from the same `journeyReplanningEligible` gate §20
+already established, and, like §20's original substitution, still never engaged while a branch is
+actively exploring or returning (`!branchActiveAndExploring`, unchanged). The two systems can
+interact on the same run (a branch's own dead-end return still uses its own fingerprint-verified
+hop sequence, unaffected by this pass) but do not share exhaustion/budget state — a known, narrow
+gap noted below.
+
+### Schema impact
+
+Additive only. `schemas/task-request.schema.json`: new optional `safety.maxAlternativeCandidatesPerDecisionPoint`
+(`schemaVersion` `1.16.0` → `1.17.0`; `outputSchemaVersion` `1.15.0` → `1.16.0`).
+`schemas/task-response.schema.json` (`schemaVersion` `1.15.0` → `1.16.0`): new optional
+`diagnostics.recovery` (`$defs/recoveryDiagnostics`/`recoveryAttemptDiagnostic`), new optional
+`diagnostics.alternativeExploration` (`$defs/alternativeExplorationDiagnostics`/
+`alternativeCandidateAttemptDiagnostic`), new optional `diagnostics.consent`
+(`$defs/consentDiagnostics`/`consentSurfaceDiagnostic`), and two new required-when-present fields
+(`guaranteedInclusionCount`, `truncationStrategy`) plus one new optional field (`omissionReason`) on
+the existing `$defs/promptElementSelectionDiagnostic`. No existing field removed, renamed, or had
+its meaning changed. `RecoveryAnchor` itself (`src/types/recovery.ts`) is engine-internal only,
+matching `BranchRecord`'s own precedent (§17) — never part of either wire schema.
+
+### Known limitations
+
+- The zero-hop anchor-restore path assumes a recovery anchor's own fingerprint, once matched, is
+  stable for the duration of one exploration cycle — a page that continues mutating in the
+  background (an unrelated timer-driven widget) between the anchor being recorded and being
+  re-checked could in principle cause a spurious fingerprint mismatch, falling back to a (still
+  safe, still bounded) hop attempt rather than the cheaper zero-hop path. Not observed in testing;
+  noted as a theoretical edge case.
+- Milestone-anchored recovery and Goal-Directed Bounded Branch Exploration (§17) do not share
+  exhausted-candidate or budget state — a candidate a branch already proved a dead end is visible to
+  the *reasoning layer's* prompt via `routeMemory[].branchResult` (unchanged, §17), but is not
+  automatically added to milestone-anchored recovery's own persistent exhausted set. In practice the
+  two systems are rarely both eligible for the same decision point in the same run; unifying them is
+  deferred as a follow-up rather than risked in this pass.
+- `consentInteractionPolicy` values other than `"accept_optional"` remain advisory-only by design
+  (see Design above) — the engine still only ever *rejects* a self-reported violation for those
+  policies, never proactively selects a decline/settings control on the model's behalf.
+- The proactive consent step's own deterministic classifier (`src/safety/consentClassifier.ts`) is
+  English-centric today (see its own doc comment on why, and how it is structured to extend) — a
+  consent surface phrased entirely in another language will not be proactively resolved by the
+  engine, only (still) reactively guarded against a non-compliant self-reported choice.
+- A pre-existing, unrelated edge case in `observation/observationBuilder.ts`'s per-scan element-id
+  assignment was discovered while building this pass's integration test (a freshly-scanned element
+  can be assigned the same `data-nav-engine-id` as an *earlier*-tagged element that left the DOM
+  between scans, since index-based fallback ids are computed per-scan rather than globally
+  deduplicated against already-issued ids) — out of this pass's scope; tracked as a follow-up rather
+  than fixed under time pressure in a file this pass otherwise left untouched.

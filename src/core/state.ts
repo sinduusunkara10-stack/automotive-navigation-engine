@@ -1,6 +1,12 @@
 import type { RecordedAction, SelectedAction } from "../types/actions.js";
 import type { RouteMemoryCandidate, RouteMemoryOutcome } from "../types/routeMemory.js";
 import type { MilestoneEvidenceRecord } from "../types/task-response.js";
+import type {
+  AlternativeCandidateAttemptDiagnostic,
+  ConsentSurfaceDiagnostic,
+  RecoveryAnchor,
+  RecoveryAttemptDiagnostic,
+} from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 
@@ -144,8 +150,84 @@ export class RunState {
    * a prompt nudge (see ReasoningProvider.alternativeExploration) and checked as a bounded,
    * one-retry-then-hard-block guard against immediately re-selecting the same candidate.
    * Never a persistent blacklist across the run.
+   *
+   * Superseded, for a decision point that has a recovery anchor, by the persistent,
+   * fingerprint-keyed exhaustedCandidatesByFingerprint below -- this field remains as the
+   * fallback for the no-anchor case (e.g. before any milestone has been satisfied yet),
+   * where behaviour is unchanged from before this corrective pass.
    */
   pendingAlternativeExploration: { exhaustedCandidateIds: string[]; exhaustedCandidateLabels: string[] } | undefined;
+
+  /**
+   * Milestone-anchored recovery (see core/recoveryAnchors.ts and docs/architecture.md
+   * "Milestone-anchored recovery"): one anchor per required success criterion, appended the
+   * moment it is first satisfied -- bounded implicitly by successCriteria.length, the same
+   * way milestoneEvidence above is.
+   */
+  readonly recoveryAnchors: RecoveryAnchor[] = [];
+  private recoveryAnchorSequenceCounter = 0;
+
+  nextRecoveryAnchorSequence(): number {
+    this.recoveryAnchorSequenceCounter += 1;
+    return this.recoveryAnchorSequenceCounter;
+  }
+
+  /**
+   * Milestone-anchored recovery: bounded, fingerprint-verified go_back sequence currently
+   * restoring toward a recovery anchor -- mirrors activeBranch's own return-sequence shape
+   * (core/branchExploration.ts) so core/loop.ts's top-of-function handling for both stays
+   * consistent. Cleared the moment the target fingerprint is confirmed restored, or the
+   * bounded hop budget is exhausted.
+   */
+  activeAnchorRestore: { anchor: RecoveryAnchor; hopsAttempted: number; hopsBudget: number } | undefined;
+
+  /**
+   * Alternative Route Exploration (corrective pass): persistent, per-decision-point-
+   * fingerprint record of which candidates have already been tried and did not lead to
+   * progress -- unlike pendingAlternativeExploration above, this survives across more than
+   * one decision, so a bounded budget of distinct candidates (MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR,
+   * core/loop.ts) can genuinely be enforced per decision point rather than only guarding
+   * against one immediate repeat.
+   */
+  private readonly exhaustedCandidatesByFingerprint = new Map<string, Map<string, string>>();
+
+  /** Map of exhausted candidate id -> label at this decision point -- never a bare id set, so the reasoning prompt can always name what already failed. */
+  getExhaustedCandidates(fingerprint: string): ReadonlyMap<string, string> {
+    return this.exhaustedCandidatesByFingerprint.get(fingerprint) ?? new Map<string, string>();
+  }
+
+  markCandidateExhausted(fingerprint: string, candidateId: string, candidateLabel: string): void {
+    let map = this.exhaustedCandidatesByFingerprint.get(fingerprint);
+    if (!map) {
+      map = new Map<string, string>();
+      this.exhaustedCandidatesByFingerprint.set(fingerprint, map);
+    }
+    map.set(candidateId, candidateLabel);
+  }
+
+  private readonly alternativeExplorationAttemptsByFingerprint = new Map<string, number>();
+
+  getAlternativeExplorationAttempts(fingerprint: string): number {
+    return this.alternativeExplorationAttemptsByFingerprint.get(fingerprint) ?? 0;
+  }
+
+  incrementAlternativeExplorationAttempts(fingerprint: string): number {
+    const next = this.getAlternativeExplorationAttempts(fingerprint) + 1;
+    this.alternativeExplorationAttemptsByFingerprint.set(fingerprint, next);
+    return next;
+  }
+
+  /** Full diagnostic history for TaskResponse.diagnostics.recovery/alternativeExploration/consent -- see src/types/recovery.ts. */
+  readonly recoveryAttemptDiagnostics: RecoveryAttemptDiagnostic[] = [];
+  readonly alternativeCandidateDiagnostics: AlternativeCandidateAttemptDiagnostic[] = [];
+  readonly consentSurfaceDiagnostics: ConsentSurfaceDiagnostic[] = [];
+  consentRetriesUsed = 0;
+
+  /** Total go_back hops spent restoring toward any recovery anchor this run -- bounded independently of journeyReplanningAttempts (core/loop.ts's MAX_ANCHOR_RESTORE_HOPS_TOTAL), so anchored recovery has its own dedicated, generous-but-bounded budget rather than sharing the small no-anchor fallback allowance. */
+  anchorRestoreHopsAttempted = 0;
+
+  /** Anchor fingerprints whose own bounded restore-and-explore budget has already been exhausted this run -- excluded from selectRecoveryAnchor so a later trigger tries the next-older anchor instead of retrying a known-unrestorable one. */
+  readonly exhaustedAnchorFingerprints = new Set<string>();
 
   recordVisit(url: string): void {
     this.visitedUrls.push(url);

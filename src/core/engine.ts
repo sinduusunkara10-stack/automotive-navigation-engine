@@ -427,7 +427,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.15.0",
+    schemaVersion: "1.16.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -448,6 +448,27 @@ function buildTerminalResponse(params: {
       ...(semanticVerifierDiagnostics ? { semanticVerifier: semanticVerifierDiagnostics } : {}),
       ...(memorySamples.length > 0 ? { memory: memorySamples } : {}),
       ...(state.milestoneEvidence.length > 0 ? { milestoneEvidence: state.milestoneEvidence } : {}),
+      ...(state.recoveryAttemptDiagnostics.length > 0
+        ? {
+            recovery: {
+              version: "1.0.0" as const,
+              anchorsRecorded: state.recoveryAnchors.length,
+              attempts: state.recoveryAttemptDiagnostics,
+            },
+          }
+        : {}),
+      ...(state.alternativeCandidateDiagnostics.length > 0
+        ? { alternativeExploration: { version: "1.0.0" as const, candidates: state.alternativeCandidateDiagnostics } }
+        : {}),
+      ...(state.consentSurfaceDiagnostics.length > 0
+        ? {
+            consent: {
+              version: "1.0.0" as const,
+              surfaces: state.consentSurfaceDiagnostics,
+              consentRetriesUsed: state.consentRetriesUsed,
+            },
+          }
+        : {}),
     },
   };
 }

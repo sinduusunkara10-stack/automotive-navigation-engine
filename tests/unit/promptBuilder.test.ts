@@ -992,3 +992,96 @@ test("no activeDialog: covered background controls compete for the structural bu
   // covered filler pool, since no activeDialog is present to trigger exclusion.
   assert.ok(payload.currentPage.interactiveElements.length > 0);
 });
+
+// ---------------------------------------------------------------------------------------
+// Candidate-selection redesign (corrective pass, see CLAUDE.md and docs/architecture.md
+// "The 40-element limit"): guaranteed-inclusion top-up for a control that strongly matches
+// the currently-unresolved milestone specifically, and the separated consentControls
+// category. Entirely synthetic fixtures, no brand/site-specific wording.
+// ---------------------------------------------------------------------------------------
+
+test("guaranteed-inclusion top-up: a control strongly matching the active milestone survives truncation even when 60+ filler elements would otherwise crowd it out", () => {
+  const fillers = buildManyElements(65);
+  const strongMatch = {
+    id: "el-goal",
+    role: "button",
+    accessibleName: "Request a personalised finance quote for this vehicle",
+    visible: true,
+  };
+
+  const context = buildTestReasoningContext({
+    objective: "Reach the vehicle offers listing.",
+    successCriteria: [
+      { id: "step-1", type: "semantic_page_match", description: "Reach the vehicle offers listing.", required: true },
+      { id: "step-2", type: "element_present", description: "Request a personalised finance quote", required: true },
+    ],
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      // The strong match is placed in the middle of a large filler run, and every filler's
+      // own label is deliberately unrelated to either milestone so it never wins a normal
+      // relevance/structural slot on its own.
+      interactiveElements: [...fillers.slice(0, 40), strongMatch, ...fillers.slice(40)],
+    },
+    satisfiedCriteriaIds: ["step-1"],
+    milestones: {
+      totalMilestones: 2,
+      completedMilestones: 1,
+      completed: [{ id: "step-1", description: "Reach the vehicle offers listing." }],
+      remaining: [{ id: "step-2", description: "Request a personalised finance quote" }],
+      activeSubGoal: { id: "step-2", description: "Request a personalised finance quote" },
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { interactiveElements: Array<{ id: string }> };
+  };
+
+  assert.ok(
+    payload.currentPage.interactiveElements.some((el) => el.id === "el-goal"),
+    "expected the strong active-milestone match to survive truncation via guaranteed inclusion",
+  );
+});
+
+test("consentControls category: a genuine consent surface's accept-all/settings controls are surfaced separately, generically (no brand-specific wording)", () => {
+  const context = buildTestReasoningContext({
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      notableText: ["We use cookies to improve your experience"],
+      interactiveElements: [
+        { id: "el-accept", role: "button", accessibleName: "Accept All Cookies", visible: true },
+        { id: "el-settings", role: "button", accessibleName: "Manage Cookie Preferences", visible: true },
+        { id: "el-unrelated", role: "button", accessibleName: "View Offer Details", visible: true },
+      ],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { consentControls?: Array<{ id: string; label: string; polarity: string }> };
+  };
+
+  assert.ok(payload.currentPage.consentControls, "expected a consentControls category for a genuine consent surface");
+  const polarities = new Map(payload.currentPage.consentControls?.map((c) => [c.id, c.polarity]));
+  assert.equal(polarities.get("el-accept"), "accept_all");
+  assert.equal(polarities.get("el-settings"), "settings");
+  assert.ok(!polarities.has("el-unrelated"));
+
+  assert.match(prompt.system, /consentControls/);
+});
+
+test("consentControls category is absent when the page shows no genuine consent-context evidence, even if a label loosely matches a short token", () => {
+  const context = buildTestReasoningContext({
+    observation: {
+      url: "https://example-fictional-oem.test/listing",
+      title: "Listing",
+      interactiveElements: [{ id: "el-allow", role: "button", accessibleName: "Allow location access", visible: true }],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as { currentPage: { consentControls?: unknown[] } };
+  assert.ok(!payload.currentPage.consentControls, "must not classify an unrelated 'Allow' control as consent-related without corroborating page context");
+});
