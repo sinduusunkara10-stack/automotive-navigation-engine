@@ -24,10 +24,27 @@ const HEADING_SELECTOR = "h1, h2, h3, h4";
 // fix -- see CLAUDE.md and docs/architecture.md "Modal-aware observation"). Native <dialog>
 // is included alongside the two ARIA signals since a page can mark up a modal either way.
 // Deliberately never widened to a heuristic "looks like an overlay" selector (fixed/absolute
-// positioning, high z-index, etc.) -- that would be far more prone to false positives from
-// cookie banners, sticky headers, or ads than the two explicit, standards-based signals a
-// page author chooses deliberately when marking up a real dialog.
+// positioning, high z-index, etc.) for *this* detection -- that would be far more prone to
+// false positives from cookie banners, sticky headers, or ads than the two explicit,
+// standards-based signals a page author chooses deliberately when marking up a real dialog,
+// and this signal directly gates click-success/route-progress attribution (see
+// detectTargetAttributableSideEffect below), where a false positive has real consequences.
+// PR 1C-a (drawer/modal/half-window detection beyond role="dialog"/aria-modal) adds a
+// *separate*, lower-stakes heuristic (see panelSignature/classifyObservedSurfaceChange
+// below) that is never used for that click-success/route-progress purpose -- only to give
+// the reasoning layer prompt-context evidence that a new surface likely appeared, where a
+// false positive costs one extra sentence of context, never a wrong success/progress call.
 export const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
+// PR 1C-a: bounded shallow scan for a visible, large, fixed/absolute/sticky-positioned
+// element -- the generic shape of a drawer/side-panel/half-window that a page author did
+// not mark up with role="dialog"/aria-modal. Deliberately bounded on two axes so this can
+// never become an expensive full-tree walk: MAX_PANEL_SCAN_DEPTH (levels below <body>) and
+// MAX_PANEL_SCAN_NODES (total elements visited), both generous enough for the common case
+// (a drawer is almost always a direct or near-direct child of <body>, often portal-rendered)
+// while bounding the cost on a large, deeply-nested, or many-sibling page.
+const MIN_PANEL_VIEWPORT_COVERAGE = 0.25;
+const MAX_PANEL_SCAN_DEPTH = 3;
+const MAX_PANEL_SCAN_NODES = 800;
 // Bounded ancestor walk used to find a repeated card/list-item's own nearby heading (see
 // nearestHeadingText below) -- kept small so this never approaches an unbounded scan of a
 // large page for an element with no nearby heading at all.
@@ -509,6 +526,16 @@ export interface InteractionSnapshot {
   dialogSignature?: string;
   /** Sorted, deduplicated role::accessibleName identities of every currently visible interactive element (same vocabulary as core/routeMemory.ts's own candidate identity) -- never raw text beyond what accessibleName already carries. */
   interactiveIdentities: string[];
+  /**
+   * PR 1C-a: a compact identity (tag|role|text, mirroring dialogSignature/coveredBySignature)
+   * for the single largest visible fixed/absolute/sticky-positioned element found by the
+   * bounded MIN_PANEL_VIEWPORT_COVERAGE/MAX_PANEL_SCAN_DEPTH/MAX_PANEL_SCAN_NODES heuristic
+   * scan above -- present only when at least one such element was found. Deliberately a
+   * *different*, lower-stakes signal from dialogSignature -- see DIALOG_SELECTOR's own doc
+   * comment on why this heuristic is never used for click-success/route-progress
+   * attribution, only for classifyObservedSurfaceChange's prompt-context evidence below.
+   */
+  panelSignature?: string;
 }
 
 // Deliberately duplicated inline in scanInteractionSnapshot below (once per .filter() call)
@@ -516,7 +543,13 @@ export interface InteractionSnapshot {
 // scanInteractiveElements's own doc comment on why a nested named function/const binding
 // inside a function passed to Playwright's evaluate() is unsafe (esbuild's dev "__name"
 // helper, undefined once evaluated standalone in the browser).
-function scanInteractionSnapshot(args: { dialogSelector: string; interactiveSelector: string }): InteractionSnapshot {
+function scanInteractionSnapshot(args: {
+  dialogSelector: string;
+  interactiveSelector: string;
+  panelMinCoverage: number;
+  panelMaxDepth: number;
+  panelMaxNodes: number;
+}): InteractionSnapshot {
   const dialogEls = Array.from(document.querySelectorAll<HTMLElement>(args.dialogSelector)).filter((el) => {
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
@@ -549,11 +582,76 @@ function scanInteractionSnapshot(args: { dialogSelector: string; interactiveSele
     ),
   ].sort();
 
-  return { hasDialog, ...(dialogSignature ? { dialogSignature } : {}), interactiveIdentities };
+  // PR 1C-a: bounded shallow scan (see MAX_PANEL_SCAN_DEPTH/MAX_PANEL_SCAN_NODES above) for
+  // the largest visible fixed/absolute/sticky element large enough to plausibly be a
+  // drawer/side-panel/half-window. Written as a flat, explicit stack walk with no nested
+  // named function/const binding -- see scanInteractiveElements's own doc comment above on
+  // why that pattern is unsafe inside a function Playwright's evaluate() serialises and
+  // runs standalone (esbuild's dev "__name" helper does not exist once evaluated in
+  // isolation).
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const viewportArea = viewportWidth * viewportHeight;
+  let panelSignature: string | undefined;
+  if (viewportArea > 0) {
+    let bestArea = 0;
+    let bestRole = "";
+    let bestText = "";
+    let visitedNodes = 0;
+    const stack: Array<{ el: Element; depth: number }> = [{ el: document.body, depth: 0 }];
+    while (stack.length > 0 && visitedNodes < args.panelMaxNodes) {
+      const frame = stack.pop();
+      if (!frame || frame.depth > args.panelMaxDepth) {
+        continue;
+      }
+      for (const child of Array.from(frame.el.children)) {
+        if (visitedNodes >= args.panelMaxNodes) {
+          break;
+        }
+        visitedNodes += 1;
+        const childStyle = window.getComputedStyle(child);
+        if (
+          childStyle.display !== "none" &&
+          childStyle.visibility !== "hidden" &&
+          (childStyle.position === "fixed" || childStyle.position === "absolute" || childStyle.position === "sticky")
+        ) {
+          const rect = child.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            const area = rect.width * rect.height;
+            const coverage = area / viewportArea;
+            const spansFullHeight = rect.height >= viewportHeight * 0.9 && rect.width < viewportWidth * 0.95;
+            const spansFullWidth = rect.width >= viewportWidth * 0.9 && rect.height < viewportHeight * 0.95;
+            if (area > bestArea && (coverage >= args.panelMinCoverage || spansFullHeight || spansFullWidth)) {
+              bestArea = area;
+              bestRole = child.getAttribute("role") ?? child.tagName.toLowerCase();
+              bestText = (child.getAttribute("aria-label")?.trim() || child.textContent?.trim() || "").slice(0, 80);
+            }
+          }
+        }
+        stack.push({ el: child, depth: frame.depth + 1 });
+      }
+    }
+    if (bestArea > 0) {
+      panelSignature = `${bestRole}|${bestText}`;
+    }
+  }
+
+  return {
+    hasDialog,
+    ...(dialogSignature ? { dialogSignature } : {}),
+    interactiveIdentities,
+    ...(panelSignature ? { panelSignature } : {}),
+  };
 }
 
 export async function captureInteractionSnapshot(page: Page): Promise<InteractionSnapshot> {
-  return page.evaluate(scanInteractionSnapshot, { dialogSelector: DIALOG_SELECTOR, interactiveSelector: INTERACTIVE_SELECTOR });
+  return page.evaluate(scanInteractionSnapshot, {
+    dialogSelector: DIALOG_SELECTOR,
+    interactiveSelector: INTERACTIVE_SELECTOR,
+    panelMinCoverage: MIN_PANEL_VIEWPORT_COVERAGE,
+    panelMaxDepth: MAX_PANEL_SCAN_DEPTH,
+    panelMaxNodes: MAX_PANEL_SCAN_NODES,
+  });
 }
 
 export type ClickSideEffectType = "dialog_appeared" | "dialog_changed" | "interactive_surface_changed";
@@ -611,6 +709,66 @@ export function detectClickSideEffect(params: {
   }
 
   return { detected: false };
+}
+
+export type ObservedSurfaceChangeType = "dialog_appeared" | "dialog_changed" | "layer_panel_appeared" | "elements_appeared" | "none";
+
+export interface SurfaceChangeAssessment {
+  type: ObservedSurfaceChangeType;
+  newElementCount: number;
+}
+
+/**
+ * PR 1C-a (post-click surface awareness): a second, deliberately separate classification
+ * from detectClickSideEffect/detectTargetAttributableSideEffect above. Those two exist to
+ * answer "did this click succeed" / "did this click's target itself produce a change" --
+ * questions with real consequences (click-success reporting, route-memory progress
+ * classification) that deliberately stay narrow and target-attributed to avoid the false-
+ * positive class a real production incident already demonstrated (see
+ * detectTargetAttributableSideEffect's own doc comment).
+ *
+ * classifyObservedSurfaceChange answers a different, lower-stakes question: "does the
+ * observation the reasoning layer is about to see reflect a newly-appeared interactive
+ * surface it should be told about" -- feeding only prompt/observation context (see
+ * ActionResult.surfaceChangeDetected, RecordedAction.surfaceChangeType,
+ * promptBuilder.ts) and the post-click readiness wait's own early-exit condition. A false
+ * positive here costs one extra sentence of prompt context and, at most, a slightly longer
+ * bounded readiness wait -- never a wrong success/progress call -- so this is deliberately
+ * allowed to use the broader, non-target-attributed panelSignature heuristic
+ * (scanInteractionSnapshot above) that DIALOG_SELECTOR's own doc comment explains is not
+ * safe for click-success/route-progress attribution. The dialog signal itself is trusted
+ * identically to detectDialogSideEffect (a standards-based, page-author-declared fact);
+ * only the weaker panel/elements-count fallback below is new.
+ */
+export function classifyObservedSurfaceChange(before: InteractionSnapshot, after: InteractionSnapshot): SurfaceChangeAssessment {
+  const beforeIdentities = new Set(before.interactiveIdentities);
+  const newElementCount = after.interactiveIdentities.filter((id) => !beforeIdentities.has(id)).length;
+
+  // detectDialogSideEffect's return type is shared with ClickSideEffectType (which also
+  // includes "interactive_surface_changed"), but this specific function only ever returns
+  // "dialog_appeared"/"dialog_changed" or {detected: false} -- narrowed explicitly here
+  // (rather than trusting that structurally) so this stays a compile-time guarantee, not
+  // just an implementation detail of detectDialogSideEffect.
+  const dialogEffect = detectDialogSideEffect(before, after);
+  if (dialogEffect.detected && (dialogEffect.type === "dialog_appeared" || dialogEffect.type === "dialog_changed")) {
+    return { type: dialogEffect.type, newElementCount };
+  }
+
+  // A newly-appeared large panel is only trusted alongside the same
+  // MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE co-occurrence guard
+  // detectClickSideEffect's own weaker fallback signal already requires -- a large fixed/
+  // sticky element appearing with no new controls at all (e.g. a loading spinner overlay) is
+  // not evidence of a new *interactive* surface worth re-prioritising the prompt around.
+  const panelAppeared = Boolean(after.panelSignature) && after.panelSignature !== before.panelSignature;
+  if (panelAppeared && newElementCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE) {
+    return { type: "layer_panel_appeared", newElementCount };
+  }
+
+  if (newElementCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE) {
+    return { type: "elements_appeared", newElementCount };
+  }
+
+  return { type: "none", newElementCount };
 }
 
 /**

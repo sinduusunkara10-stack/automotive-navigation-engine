@@ -109,8 +109,12 @@ export class RunState {
     this.distinctVisitedUrls.add(url);
   }
 
-  recordAction(action: SelectedAction, observationBefore: { url: string; title: string }): void {
-    this.actionHistory.push({ ...action });
+  recordAction(
+    action: SelectedAction,
+    observationBefore: { url: string; title: string },
+    surfaceChangeType?: string,
+  ): void {
+    this.actionHistory.push({ ...action, ...(surfaceChangeType ? { surfaceChangeType } : {}) });
     this.stepCount += 1;
     if (action.type === "go_back") {
       this.backtrackCount += 1;

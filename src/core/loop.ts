@@ -768,7 +768,7 @@ export async function runStep(params: {
     }
   }
 
-  state.recordAction(effectiveAction, { url: observation.url, title: observation.title });
+  state.recordAction(effectiveAction, { url: observation.url, title: observation.title }, actionResult.surfaceChangeType);
 
   // Goal-Directed Bounded Branch Exploration: this step's own dispatched action counts as
   // one downstream action against the active branch's depth budget, but only while a

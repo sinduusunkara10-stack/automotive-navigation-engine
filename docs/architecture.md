@@ -2132,3 +2132,117 @@ changed.
   guidance, reinforced by more accurate classification and per-card identity from this fix) but
   is never mechanically blocked from being re-selected. Broadening Route Memory into an
   enforcing mechanism was deliberately left out of this fix's scope.
+
+## 19. Non-ARIA surface-change detection and readiness-based post-click timing (PR 1C-a)
+
+Investigation into a Nissan-brand production run (never fixed for Nissan specifically — see
+`docs/phase-2-design.md` for the full Phase 2 design this PR implements the first slice of)
+established the following proven failure path: a click on an offer-details-style control was
+followed immediately by `low_confidence`, then two bounded journey-replanning `go_back`
+substitutions (§"Bounded journey replanning"), then `stop_blocked`. Neither Branch Exploration
+(§17) nor Route Memory (§16) ever activated. The most likely cause: the click opened a
+drawer/side-panel built with plain CSS (no `role="dialog"`/`aria-modal="true"` at all), which
+`Observation.activeDialog` and the existing `detectTargetAttributableSideEffect` (§18) cannot
+see — the reasoning layer was given no signal that a new surface had appeared at all, and had to
+judge an observation whose freshly-added controls looked no different from ordinary background
+page content.
+
+This is deliberately the narrowest slice of the Phase 2 design: detection and timing only, with
+zero change yet to decision-making, low-confidence recovery, or route exploration (see PR 1C-b/
+PR 1C-c for those).
+
+### Layer/panel detection, kept separate from click-success attribution
+
+`DIALOG_SELECTOR`'s own doc comment (§18) explains why dialog/overlay detection deliberately
+never widened to a CSS heuristic (fixed/absolute positioning, high z-index): that signal directly
+gates click-success/route-progress attribution, where a false positive has real consequences (a
+production incident already demonstrated exactly that false-positive class). This PR does not
+relax that — instead it adds a **second, deliberately lower-stakes** heuristic used only for
+prompt-context evidence, never for success/progress attribution:
+
+`InteractionSnapshot` (`src/observation/observationBuilder.ts`) gains `panelSignature`: a bounded,
+shallow scan (`MAX_PANEL_SCAN_DEPTH` levels below `<body>`, `MAX_PANEL_SCAN_NODES` total elements
+visited — generous for the common case of a portal-rendered or near-`<body>`-level drawer, while
+bounding cost on a large/deeply-nested page) for the largest visible, fixed/absolute/sticky-
+positioned element covering at least `MIN_PANEL_VIEWPORT_COVERAGE` (25%) of the viewport, or
+spanning a full viewport edge (the classic slide-in-drawer shape: full height, partial width, or
+vice versa). Written as a flat iterative stack walk with no nested named function/const binding,
+for the same reason `scanInteractiveElements`'s own doc comment already documents (esbuild's dev
+`__name` helper does not exist once Playwright's `evaluate()` runs the function standalone).
+
+`classifyObservedSurfaceChange(before, after)` is a new, separate classification from
+`detectClickSideEffect`/`detectTargetAttributableSideEffect`: it answers "does the observation the
+reasoning layer is about to see reflect a newly-appeared interactive surface it should be told
+about", not "did this click succeed". The dialog signal is trusted identically to
+`detectDialogSideEffect` (unconditionally, standards-based); a newly-appeared `panelSignature` is
+trusted only alongside the same `MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE` (2) co-occurrence
+guard the existing weaker fallback signal already uses (a large fixed/sticky element appearing
+with no new controls at all — e.g. a loading spinner — is not evidence of a new *interactive*
+surface). A false positive here costs one extra prompt sentence and, at most, a slightly longer
+bounded readiness wait — never a wrong success/progress call, which is what makes it safe to use
+a broader, non-target-attributed heuristic than §18's own signal.
+
+### Post-click surface awareness
+
+`actions/click.ts`'s non-navigating successful-click path computes `classifyObservedSurfaceChange`
+against the same pre/post-click `InteractionSnapshot` pair it already captures for
+`detectTargetAttributableSideEffect`, and reports the two *confident* outcomes only
+(`"dialog_appeared"`/`"dialog_changed"`/`"layer_panel_appeared"` — never the weaker
+`"elements_appeared"`, kept internal to the readiness wait's own early-exit condition, to keep
+this new prompt-context signal itself conservative) as `ActionResult.surfaceChangeDetected`/
+`surfaceChangeType`.
+
+`core/state.ts`'s `RunState.recordAction` carries this onto the corresponding `RecordedAction` as
+`surfaceChangeType`, which flows into `ReasoningContext.recentActions` exactly like
+`observedProgress` already does. `src/reasoning/promptBuilder.ts` renders it in `recentActions`
+and adds one system-prompt sentence: an action marked `surfaceChangeType` means the *current*
+`currentPage` observation reflects a newly-opened panel/drawer/overlay, so its newly-introduced
+controls should be prioritised over whatever was on the page immediately beforehand — even when
+`currentPage` has no `activeDialog` value at all. This is the direct fix for "the engine did not
+confidently understand the newly opened surface": the model is now explicitly told a surface just
+opened, rather than left to infer it (or fail to) from a raw element diff alone.
+
+### Replacing fixed timing with readiness detection
+
+Previously: `click → waitForTimeout(PAGE_SETTLE_DELAY_MS) → observe`, unconditionally, on every
+non-navigating successful click. `actions/click.ts`'s `waitForPostClickReadiness` replaces this
+with a bounded, DOM-mutation-aware settle wait (`waitForDomSettle`, run entirely in-browser via a
+single `evaluate()` call since a `MutationObserver` cannot be driven from Node): it waits at least
+`PAGE_SETTLE_DELAY_MS` (never faster than the fixed wait it replaces, so a page that settles
+instantly is never observed *earlier* than before this change), then keeps waiting — up to
+`CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS` in total, the same fixed ceiling this repo's existing
+`waitForInteractionSideEffect` settle-wait convention already uses — only while the DOM keeps
+actively mutating (a slow-animating drawer transition still in progress), exiting as soon as
+`DOM_QUIET_WINDOW_MS` (100ms) elapses with no further mutation. This directly answers requirement
+3's "click → readiness detection → observe" with an explicit, generic strategy: DOM-mutation
+quiescence, bounded on both ends, never a second unbounded wait. `navigate`/`scroll`/`wait` actions
+are unchanged — only the one click path where a drawer/modal is actually triggered.
+
+### Relationship with existing systems
+
+Branch Exploration (§17), Route Memory (§16), and journey replanning (§"Bounded journey
+replanning") are entirely unchanged by this PR — it only widens what the *observation* and
+*prompt* say about a page state those systems already reason over. PR 1C-b (low-confidence
+recovery) and PR 1C-c (alternative route exploration) build on the `surfaceChangeDetected`/
+`surfaceChangeType` signal introduced here; neither is implemented by this PR.
+
+### Schema impact
+
+Additive only (`schemaVersion`/`outputSchemaVersion` "1.13.0" → "1.14.0"; `task-request.schema.json`'s
+own `schemaVersion` "1.14.0" → "1.15.0" to track `outputSchemaVersion`'s moved pin, per this repo's
+existing versioning convention): `ActionResult.surfaceChangeDetected`/`surfaceChangeType`. No
+existing field was removed, renamed, or had its meaning changed. `RecordedAction.surfaceChangeType`
+and `ReasoningContext` are internal boundary types (matching Route Memory's own §16 precedent) —
+neither is part of either wire schema.
+
+### Known limitations
+
+- The panel heuristic is bounded (`MAX_PANEL_SCAN_DEPTH`/`MAX_PANEL_SCAN_NODES`) and can miss a
+  drawer rendered deeper than 3 levels below `<body>` on a page with many siblings at each level —
+  deliberately a generous-but-bounded scan rather than an unbounded full-tree walk.
+  `MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE`'s existing co-occurrence guard still applies,
+  so a panel that introduces exactly one new control is not recognised by this signal alone,
+  matching the existing limitation already documented for `"elements_appeared"` above.
+- This PR is detection/timing only — it does not yet change what the reasoning layer *does* with
+  a `low_confidence` result, and does not yet add any alternative-route exploration. Both are
+  separate, subsequent PRs (1C-b, 1C-c) per `docs/phase-2-design.md`'s implementation order.

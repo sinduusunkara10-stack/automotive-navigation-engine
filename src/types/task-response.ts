@@ -190,6 +190,23 @@ export interface ActionResult {
    * produced any particular evidence -- only that it was observed at all.
    */
   observedNewContext?: boolean;
+  /**
+   * PR 1C-a (drawer/modal/half-window detection beyond role="dialog"/aria-modal, post-click
+   * surface awareness): true only for a non-navigating click whose bounded post-click
+   * readiness wait found generic evidence -- via a *broader*, non-target-attributed
+   * heuristic than clickSideEffectDetected -- that a new interactive surface likely
+   * appeared: a dialog/modal appearing or changing, or a large newly-appeared fixed/
+   * absolute/sticky panel co-occurring with several new controls (the shape of a drawer/
+   * side-panel/half-window that never uses role="dialog"/aria-modal). Deliberately
+   * separate from, and never a substitute for, clickSideEffectDetected: that field alone
+   * still governs click-success/route-progress attribution. This field is purely
+   * informational context threaded into the *next* decision (see RecordedAction.
+   * surfaceChangeType, src/reasoning/promptBuilder.ts) -- never itself a success or
+   * progress signal. Absent (never false) whenever no such evidence was found.
+   */
+  surfaceChangeDetected?: boolean;
+  /** Present only when surfaceChangeDetected is true, naming which heuristic matched: "dialog_appeared", "dialog_changed", or "layer_panel_appeared". Purely explanatory. */
+  surfaceChangeType?: string;
 }
 
 export interface Progress {
@@ -811,7 +828,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.13.0";
+  schemaVersion: "1.14.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

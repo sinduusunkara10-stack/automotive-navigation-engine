@@ -444,7 +444,13 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "\"observedProgress\": false means that when that exact action last ran, the page's URL " +
     "and title were unchanged the next time it was observed -- treat that as evidence the " +
     "same action is unlikely to help if chosen again, and prefer a different action instead " +
-    "of repeating it verbatim. When present, \"routeMemory\" lists candidate actions " +
+    "of repeating it verbatim. An entry in \"recentActions\" marked \"surfaceChangeType\" " +
+    "(e.g. \"dialog_appeared\", \"layer_panel_appeared\") means that action opened a new " +
+    "panel, drawer, or overlay -- the current \"currentPage\" observation reflects that new " +
+    "surface, so prioritise its newly-introduced controls over whatever was on the page " +
+    "immediately beforehand, even when \"currentPage\" has no \"activeDialog\" value (many " +
+    "drawers/side panels are not marked up as a standards-based dialog at all). " +
+    "When present, \"routeMemory\" lists candidate actions " +
     "(click/navigate) already tried earlier at this exact decision point -- the same page " +
     "location and set of available controls, however many steps ago, including after going " +
     "back and returning here -- with how many times each was tried and its most recent " +
@@ -539,9 +545,12 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
         ...(el.covered ? { covered: el.covered } : {}),
       })),
     },
-    recentActions: recentActions
-      .slice(-MAX_RECENT_ACTIONS)
-      .map((a) => ({ type: a.type, target: a.target, observedProgress: a.observedProgress })),
+    recentActions: recentActions.slice(-MAX_RECENT_ACTIONS).map((a) => ({
+      type: a.type,
+      target: a.target,
+      observedProgress: a.observedProgress,
+      ...(a.surfaceChangeType ? { surfaceChangeType: a.surfaceChangeType } : {}),
+    })),
     ...(routeMemory && routeMemory.length > 0
       ? {
           routeMemory: routeMemory.slice(0, MAX_ROUTE_MEMORY_CANDIDATES).map((c) => ({
