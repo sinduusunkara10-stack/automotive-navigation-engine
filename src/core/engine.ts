@@ -388,6 +388,26 @@ function buildTerminalResponse(params: {
   const missingRequiredCriteriaIds = getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds);
   const objectiveAchieved = status === "success" && missingRequiredCriteriaIds.length === 0;
 
+  // PR 1D (truthful milestone evaluation, docs/architecture.md §21): a rollup of
+  // state.milestoneEvidence[].evidenceTier, letting a caller see at a glance whether this
+  // run's outcome rests entirely on hard observed evidence or partly on inferred
+  // (semantic/model) judgement -- never itself a new evaluation, purely a tally of the
+  // already-computed per-criterion evidence tiers. Omitted (not a zeroed object) when no
+  // criterion was ever satisfied this run, matching this repo's existing convention for
+  // optional response fields.
+  const evidenceTierSummary =
+    state.milestoneEvidence.length > 0
+      ? state.milestoneEvidence.reduce(
+          (summary, record) => {
+            if (record.evidenceTier === "observed") summary.observedCount += 1;
+            else if (record.evidenceTier === "inferred") summary.inferredCount += 1;
+            else summary.assumedCount += 1;
+            return summary;
+          },
+          { observedCount: 0, inferredCount: 0, assumedCount: 0 },
+        )
+      : undefined;
+
   const engineAssessment: EngineAssessment = {
     objectiveAchieved,
     confidence: objectiveAchieved ? 1 : 0,
@@ -397,6 +417,7 @@ function buildTerminalResponse(params: {
         ? "The engine selected stop_success but independent verification found required success criteria still unsatisfied; the objective is not treated as achieved."
         : `The run ended with status "${status}" (${finishReason}).`,
     ...(lastStep ? { satisfiedSuccessCriteriaIds: lastStep.progress.satisfiedCriteriaIds } : {}),
+    ...(evidenceTierSummary ? { evidenceTierSummary } : {}),
   };
 
   const reasoningProviderDiagnostics = reasoning.getUsageDiagnostics?.();
@@ -406,7 +427,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.14.0",
+    schemaVersion: "1.15.0",
     taskId: task.taskId,
     status,
     statusReason,

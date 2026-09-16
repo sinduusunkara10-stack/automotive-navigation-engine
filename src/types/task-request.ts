@@ -73,7 +73,7 @@ export interface Safety {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.15.0";
+  schemaVersion: "1.16.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -95,7 +95,7 @@ export interface TaskRequest {
   captureModules: CaptureModuleName[];
   limits: Limits;
   safety: Safety;
-  outputSchemaVersion: "1.14.0";
+  outputSchemaVersion: "1.15.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

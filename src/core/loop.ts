@@ -887,6 +887,11 @@ export async function runStep(params: {
     wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
     buildCriteriaEvidence(captures),
     { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
+    // PR 1D (surface-scoped evidence, docs/architecture.md §21): scope semantic_page_match
+    // evidence to the currently-uncovered surface whenever this step's own action just
+    // opened one (PR 1C-a's ActionResult.surfaceChangeDetected) -- never for an ordinary
+    // click/navigate with no detected surface change, which behaves exactly as before.
+    actionResult.surfaceChangeDetected === true,
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
 
