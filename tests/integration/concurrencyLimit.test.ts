@@ -47,7 +47,7 @@ function buildTask(startUrl: string) {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

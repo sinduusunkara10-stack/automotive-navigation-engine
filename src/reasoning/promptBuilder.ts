@@ -642,6 +642,18 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
         ...(el.disabled ? { disabled: el.disabled } : {}),
         ...(el.ariaState ? { ariaState: el.ariaState } : {}),
         ...(el.covered ? { covered: el.covered } : {}),
+        // Nested/repeated-control disambiguation (Phase 3 PR 3, see CLAUDE.md and
+        // docs/architecture.md "Surface adoption"): the nearest enclosing heading's text
+        // (observation/observationBuilder.ts) already disambiguates route-memory candidate
+        // identity (see core/routeMemory.ts's buildClickIdentityKey) for a control repeated
+        // across several cards/list-items with no destinationUrl of its own -- but that
+        // identity is never itself shown to the reasoning layer, so two visually identical
+        // "Select"-labelled buttons under different cards previously looked completely
+        // indistinguishable in this very payload. Surfacing it here (verbatim, the same
+        // bounded <=80-char text, never a selector or brand-specific marker) lets the model
+        // actually tell them apart when choosing between them, not just lets route memory
+        // track them apart after the fact.
+        ...(el.nearestHeadingText ? { nearestHeadingText: el.nearestHeadingText } : {}),
       })),
     },
     recentActions: recentActions.slice(-MAX_RECENT_ACTIONS).map((a) => ({

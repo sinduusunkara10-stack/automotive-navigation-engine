@@ -27,7 +27,11 @@ import {
   type SettleOutcome,
 } from "../core/robustNavigation.js";
 import { recordDiagnosticError } from "../capture-modules/errors.js";
-import { adoptPopupForCapture } from "../capture-modules/popupCapture.js";
+import {
+  adoptOrCapturePopup,
+  type AdoptOrCapturePopupResult,
+  type SurfaceAdoptionRequest,
+} from "../capture-modules/popupCapture.js";
 
 const CLICK_ELEMENT_TIMEOUT_MS = 5000;
 
@@ -78,6 +82,14 @@ export interface ExecuteClickParams {
   knownDestinationUrl?: string;
   /** Task-level override for the adaptive settle ceiling (task.settling.maxSettleMs) -- see core/robustNavigation.ts. */
   settleCeilingMs?: number;
+  /**
+   * Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
+   * adoption"): built fresh by core/loop.ts for every click dispatch. Absent/undefined for
+   * every call site that predates this PR and for any run with Safety.allowSurfaceAdoption
+   * unset -- in both cases this executor's popup handling is byte-for-byte the pre-PR-3
+   * capture-only-and-close path (see adoptOrCapturePopup's own doc comment).
+   */
+  surfaceAdoption?: SurfaceAdoptionRequest;
 }
 
 type ClickErrorCategory =
@@ -478,6 +490,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     reObservationAttempted,
     knownDestinationUrl,
     settleCeilingMs,
+    surfaceAdoption,
   } = params;
 
   if (!action.target) {
@@ -554,12 +567,12 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   // local/CDN-hosted destination page could otherwise load and fire its own beacon/push
   // unobserved. Whichever branch below ends up handling this click simply awaits this
   // already-in-flight promise rather than starting adoption itself.
-  let popupAdoption: Promise<{ observed: boolean }> | undefined;
+  let popupAdoption: Promise<AdoptOrCapturePopupResult> | undefined;
   const onPopup = (popup: Page) => {
     popupOpened = popup;
-    popupAdoption = adoptPopupForCapture({ popup, captures, stepIndex, captureModules }).catch(() => ({
-      observed: false,
-    }));
+    popupAdoption = adoptOrCapturePopup({ popup, captures, stepIndex, captureModules, surfaceAdoption }).catch(
+      () => ({ observed: false }),
+    );
   };
   // Registered before the click so a navigation (or popup) that commits fast is never missed.
   page.on("framenavigated", onFrameNavigated);
@@ -706,9 +719,31 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // still captured, tagged with its own popup_context/contextId provenance, before it is
     // closed. Navigation safety/allowedDomains handling below is unchanged: the engine
     // still only ever continues navigating the one tracked `page`.
-    const { observed: observedNewContext } = popupAdoption ? await popupAdoption : { observed: false };
+    const popupOutcome = popupAdoption ? await popupAdoption : { observed: false };
+    // Surface adoption (Phase 3 PR 3): the one case above stops being true. When
+    // adoptOrCapturePopup actually kept this popup open (surfaceAdoption was enabled and
+    // decideSurfaceAdoption approved it), this click is a genuine success -- it just didn't
+    // navigate the *tracked* page, because it deliberately opened a new one that the engine
+    // is about to make its new active surface instead. The live Page is handed back via
+    // surfaceAdoption.adopted (never through this JSON-serializable ActionResult -- see
+    // SurfaceAdoptionRequest's own doc comment); core/loop.ts reads it immediately after
+    // this call returns and turns it into a RunState.pushSurface.
+    if (popupOutcome.adoptedPage && surfaceAdoption) {
+      surfaceAdoption.adopted = {
+        page: popupOutcome.adoptedPage,
+        url: popupOutcome.adoptedUrl,
+        ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
+      };
+      return {
+        success: true,
+        resultingUrl: popupOutcome.adoptedUrl ?? popupUrl,
+        surfaceAdopted: true,
+        openedNewContext: true,
+      };
+    }
+    const observedNewContext = popupOutcome.observed;
     const postPopupState = await readElementState(page, targetElementId);
-    return resolveUnactionableClick({
+    const unactionableResult = await resolveUnactionableClick({
       page,
       targetElementId,
       category: "popup_opened",
@@ -730,6 +765,15 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       openedNewContext: true,
       observedNewContext,
     });
+    // "adoption_disabled" is deliberately never reachable here: this whole popupAdoption
+    // path only ever calls decideSurfaceAdoption (core/surfaceAdoption.ts) with
+    // allowSurfaceAdoption: true (see adoptOrCapturePopup's own early-return guard) --
+    // ActionResult.adoptionRejectedReason's narrower two-value type reflects that.
+    const reportableReason =
+      popupOutcome.adoptionRejectedReason === "domain_rejected" || popupOutcome.adoptionRejectedReason === "budget_exhausted"
+        ? popupOutcome.adoptionRejectedReason
+        : undefined;
+    return reportableReason ? { ...unactionableResult, adoptionRejectedReason: reportableReason } : unactionableResult;
   }
 
   if (!mainFrameNavigated) {

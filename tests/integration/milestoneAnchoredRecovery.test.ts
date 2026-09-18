@@ -173,7 +173,7 @@ function combinedSequenceTask(startUrl: string): TaskRequest {
       allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       consentInteractionPolicy: "accept_optional",
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

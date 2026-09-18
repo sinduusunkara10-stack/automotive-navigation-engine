@@ -43,7 +43,7 @@ test("a breached memory threshold stops the run safely and preserves partial evi
       captureModules: ["page_visits", "journey_path", "errors"],
       limits: { maxSteps: 10, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task, isMemoryThresholdBreached: () => true });
@@ -93,7 +93,7 @@ test("without a breach signal, the same task proceeds normally (no false positiv
       captureModules: ["page_visits"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task, isMemoryThresholdBreached: () => false });

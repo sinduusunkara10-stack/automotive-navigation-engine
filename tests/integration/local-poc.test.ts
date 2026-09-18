@@ -66,7 +66,7 @@ test("navigation engine observes, decides, acts, reaches success, and produces a
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });
@@ -222,7 +222,7 @@ test("capture modules only run when the task requests them", async () => {
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });
@@ -264,7 +264,7 @@ test("safety layer blocks a task whose startUrl falls outside allowedDomains", a
       captureModules: ["page_visits"],
       limits: { maxSteps: 5, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });
@@ -304,7 +304,7 @@ test("limits guard stops the run once maxSteps is reached without a success stat
       captureModules: ["page_visits"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });

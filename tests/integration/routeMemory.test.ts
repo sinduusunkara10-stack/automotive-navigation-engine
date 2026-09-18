@@ -120,7 +120,7 @@ function buildTask(params: { startUrl: string; successUrlPattern: string; maxBac
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: params.maxBacktracks ?? 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

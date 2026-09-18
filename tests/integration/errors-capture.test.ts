@@ -54,7 +54,7 @@ test("errors capture module records page JS errors, console errors, failed netwo
       captureModules: ["errors"],
       limits: { maxSteps: 3, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });
@@ -148,7 +148,7 @@ test("errors capture module records a limit_stop diagnostic when maxSteps is rea
       captureModules: ["errors"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });
@@ -194,7 +194,7 @@ test("errors capture module records nothing when not requested, even on a page t
       captureModules: ["page_visits"],
       limits: { maxSteps: 3, maxBacktracks: 0, maxRepeatedActions: 3 },
       safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const response = await runTask({ page, task });

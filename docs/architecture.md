@@ -3128,3 +3128,127 @@ had its meaning changed.
   `safety.maxAdoptedSurfacesPerRun` (default 5) will enforce starting in PR 3, this is not a
   practical growth concern, but it is worth noting the map is never pruned even after a surface is
   permanently closed.
+
+## 26. Surface adoption (Phase 3 PR 3)
+
+### Problem
+
+Before this PR, a click that opened a popup/new tab (`target="_blank"`, `window.open()`) was
+never anything more than capture-only evidence: `capture-modules/popupCapture.ts`'s
+`adoptPopupForCapture` gave it a short, bounded window to attach GA4/dataLayer capture, then
+always closed it. The engine's own navigation loop never observed or acted on it. This is
+exactly wrong for any journey whose actual next step -- a CTA-selection or a multi-step
+configurator continuation -- happens *inside* that new tab (e.g. "View Offer Details" opening a
+partner site in a new tab, where the interesting continuation lives).
+
+### Design
+
+The core mechanism is a single new local in `core/loop.ts`'s `runStep`:
+
+```ts
+const page = state.activePage ?? params.page;
+```
+
+`RunState` (PR 2's surface stack) is extended to optionally carry a live `Page` alongside each
+non-`"main"` surface id (`pushSurface(surfaceId, page?)`, `activePage` getter,
+`pageBySurfaceId` map -- "main" deliberately has no entry, since its Page is always the one
+`runTask`/`runStep` were originally called with). Every one of `runStep`'s ~20 pre-existing
+`page`-using call sites (`buildObservation`, `dispatchAction`, `evaluateSuccessCriteria`,
+`readElementState`, ...) needed zero further changes: they were already written against one
+local `page` binding, so once that binding resolves to the adopted Page, everything downstream
+-- ranked interactive elements, the reasoning layer's own context, milestone
+satisfaction/`state.satisfiedCriteriaIds`, multi-step action dispatch -- naturally observes/acts
+against the adopted surface, from the *next* `runStep` call on (the step that dispatches the
+adopting click itself still finishes against the page it started on -- see Acceptance criterion
+2 in the PR 3 plan).
+
+The adoption *decision* is pure, dependency-free logic in the new `core/surfaceAdoption.ts`
+(`decideSurfaceAdoption`): disabled -> `adoption_disabled`; budget
+(`safety.maxAdoptedSurfacesPerRun`, default `DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN` = 5, a
+one-way ratchet that counts every surface ever adopted, nested chains included, never
+decremented by a surface closing) exhausted -> `budget_exhausted`; otherwise checked against
+`safety.surfaceAdoptionDomainPolicy`: `"require_allowed_domain"` (the default) adopts only when
+the popup's own landing hostname is already in `allowedDomains`; `"extend_trust_from_landing"`
+adopts regardless, naming the popup's own hostname as `extendedAllowedDomain` so the *caller*
+(`core/loop.ts`) can record a per-surface domain-trust extension
+(`RunState.extendAllowedDomainForCurrentSurface`/`effectiveAllowedDomains`) that applies only to
+that one surface's own subsequent navigation, never retroactively and never to any other
+surface.
+
+Wiring, end to end:
+
+- `actions/click.ts`'s existing `page.on("popup", ...)` handler now calls
+  `capture-modules/popupCapture.ts`'s new `adoptOrCapturePopup` instead of
+  `adoptPopupForCapture` directly. When the caller-supplied `SurfaceAdoptionRequest` is
+  absent/disabled, this is byte-for-byte the pre-PR-3 capture-only-and-close path (see
+  `crossClientAnalyticsCapture.test.ts`'s own unchanged regression coverage). When enabled, the
+  popup is given a bounded chance to reach a real document (so its landing hostname can be
+  checked), `decideSurfaceAdoption` is consulted, and either kept open (never instrumented with
+  the capture-only listeners -- it becomes the engine's own surface instead) or capture-only-
+  and-closed exactly as before, tagged with the specific rejection reason.
+- The live `Page` itself never travels through the JSON-serializable `ActionResult`/`StepLog` --
+  `SurfaceAdoptionRequest` carries a write-only `adopted` slot that `click.ts` fills in the
+  instant a popup is actually kept open, and `core/loop.ts` reads immediately after
+  `dispatchAction` returns, in the same step. `ActionResult` itself only gains two plain,
+  serializable fields: `surfaceAdopted` (boolean) and `adoptionRejectedReason`
+  (`"domain_rejected"` | `"budget_exhausted"`).
+- `core/loop.ts` builds a fresh `SurfaceAdoptionRequest` for every `click` dispatch (the only
+  action type a `"popup"` event can ever originate from), from the run's own *live*
+  `RunState.adoptedSurfaceCount` -- so a nested popup-from-popup's own budget check sees any
+  earlier adoption this same run already made. On `actionResult.surfaceAdopted`, it calls
+  `state.nextAdoptedSurfaceId()` (`"adopted-1"`, `"adopted-2"`, ...) and `state.pushSurface(id,
+  adoptedPage)`; `withActiveSurface` (PR 2) already maps any non-`"main"` surface id to
+  `{kind: "adopted_context", identity: surfaceId}`, so `Observation.activeSurface` needed no
+  further change either.
+- Nested popup-from-popup falls out of the same mechanism for free: `actions/click.ts`'s
+  `page.on("popup", ...)` listener is attached to whichever `Page` it was actually called
+  against -- which, for a click dispatched while an adopted surface is active, *is* that
+  adopted Page (via the `const page = state.activePage ?? params.page` local above) -- so a
+  `window.open()` from inside an already-adopted popup fires "popup" on that popup's own Page,
+  runs through `decideSurfaceAdoption`/`adoptOrCapturePopup` exactly the same way, and (within
+  budget) becomes `"adopted-2"` on top of `"adopted-1"` on the same stack.
+- Nested/repeated-control disambiguation: `observation/observationBuilder.ts`'s
+  `nearestHeadingText` (added for route-memory candidate identity before this PR) is now also
+  forwarded into `reasoning/promptBuilder.ts`'s `interactiveElements` payload. Before this PR it
+  disambiguated candidate *identity* (`core/routeMemory.ts`'s `buildClickIdentityKey`) without
+  ever being shown to the reasoning layer itself -- two visually identical "Select" buttons
+  under different offer cards looked completely indistinguishable in the very payload the model
+  chooses from. No new scan, no new field: purely surfacing data already captured.
+
+### Relationship with existing systems
+
+- Success-criteria evaluation (`core/successEvaluator.ts`) reads `page.url()`/the page's own DOM
+  directly -- it already runs against whichever `page` `core/loop.ts`'s `runStep` passes it, so
+  a milestone satisfied on an adopted surface updates `state.satisfiedCriteriaIds` through the
+  exact same path a milestone satisfied on `"main"` does. No adoption-specific code exists in
+  `successEvaluator.ts` at all.
+- `RunState`'s per-surface state buckets (PR 2: `lastBlockerTargetId`/`routeMemory`/
+  `lowConfidenceRetriedFingerprints`) already isolate an adopted surface's own recovery state
+  from `"main"`'s -- this PR is the first to actually populate a non-`"main"` bucket via real
+  use.
+- `go_back` while `activeSurface !== "main"` is deliberately unenforced by this PR: it dispatches
+  against the adopted Page's own browser history exactly like an ordinary `go_back` on `"main"`
+  would, with no verified return-to-parent semantics yet. That is PR 4's own scope
+  ("Return-to-parent recovery") -- see this doc's own changelog once that PR lands.
+
+### Schema impact
+
+`schemaVersion` (response) bumped `"1.19.0"` -> `"1.20.0"`; `outputSchemaVersion` (request)
+bumped to match. New: `actionResult.surfaceAdopted` (boolean), `actionResult.adoptionRejectedReason`
+(`"domain_rejected"` | `"budget_exhausted"`). No existing field removed, renamed, or had its
+meaning changed. `Observation.activeSurface`'s `identity` is populated for the first time by
+this PR (`"adopted-1"`, `"adopted-2"`, ...) -- the schema shape itself is unchanged from PR 2.
+
+### Known limitations
+
+- No verified return-to-parent: see "Relationship with existing systems" above -- PR 4.
+- An adopted surface closing unexpectedly (site-initiated, or after a form post) is not yet
+  specially handled -- the next `buildObservation`/`dispatchAction` against a closed Page will
+  throw, propagating as an ordinary run failure rather than a clean, diagnosed return to parent.
+  Also PR 4's own scope ("handle unexpected surface closure").
+- GA4/dataLayer real-time capture (`captureModules`) is not re-attached to an adopted surface --
+  it continues to work exactly as before for `"main"`, but an adopted surface's own analytics
+  activity is not captured while it is active. Milestone/objective evaluation is entirely
+  unaffected (it reads the page directly, not `captures`); this is a capture-completeness gap
+  only, not tracked for a specific future PR since Phase 3's own scope is navigation, not
+  capture-module completeness.

@@ -53,7 +53,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.19.0",
+  "outputSchemaVersion": "1.20.0",
   "metadata": {
     "useCase": "configurator-journey",
     "requestedBy": "n8n-workflow-demo"

@@ -1,3 +1,4 @@
+import type { Page } from "playwright";
 import type { RecordedAction, SelectedAction } from "../types/actions.js";
 import type { RouteMemoryCandidate, RouteMemoryOutcome } from "../types/routeMemory.js";
 import type { MilestoneEvidenceRecord } from "../types/task-response.js";
@@ -27,6 +28,16 @@ interface SurfaceState {
   blockerSignatureRepeatCount: number;
   readonly lowConfidenceRetriedFingerprints: Set<string>;
   readonly routeMemory: RouteMemory;
+  /**
+   * Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
+   * adoption"): set only for a surface entered under safety.surfaceAdoptionDomainPolicy
+   * "extend_trust_from_landing" -- the hostname this one surface's own allowedDomains check
+   * is additionally permitted to navigate within, on top of the run's own task.allowedDomains
+   * (see RunState.effectiveAllowedDomains). Never written back onto "main" or onto any other
+   * surface's own bucket -- trust extended to reach one adopted popup's landing page is never
+   * silently inherited by an unrelated surface.
+   */
+  extendedAllowedDomain: string | undefined;
 }
 
 function createSurfaceState(): SurfaceState {
@@ -36,6 +47,7 @@ function createSurfaceState(): SurfaceState {
     blockerSignatureRepeatCount: 0,
     lowConfidenceRetriedFingerprints: new Set<string>(),
     routeMemory: new RouteMemory(),
+    extendedAllowedDomain: undefined,
   };
 }
 
@@ -97,12 +109,42 @@ export class RunState {
    */
   private readonly surfaceStack: string[] = [MAIN_SURFACE_ID];
   private readonly surfaceStates = new Map<string, SurfaceState>([[MAIN_SURFACE_ID, createSurfaceState()]]);
+  /**
+   * Surface adoption (Phase 3 PR 3): the live Playwright Page each non-"main" surface on the
+   * stack is backed by. "main" deliberately has no entry here -- its Page is always the one
+   * runTask/runStep were originally called with, threaded down as an ordinary parameter (see
+   * core/loop.ts's own `const page = state.activePage ?? params.page`), never owned by
+   * RunState itself.
+   */
+  private readonly pageBySurfaceId = new Map<string, Page>();
+  private adoptedSurfaceCounter = 0;
 
   get activeSurface(): string {
     // Never empty -- MAIN_SURFACE_ID is pushed once at construction and popSurface refuses
     // to remove the last remaining entry (see popSurface below) -- the fallback is purely to
     // satisfy noUncheckedIndexedAccess, never a reachable runtime path.
     return this.surfaceStack[this.surfaceStack.length - 1] ?? MAIN_SURFACE_ID;
+  }
+
+  /**
+   * Surface adoption (Phase 3 PR 3): the live Page core/loop.ts must observe/act against for
+   * the current step, or undefined when activeSurface is "main" (in which case the caller's
+   * own, separately-threaded main Page is used instead). Never main's own Page -- see
+   * pageBySurfaceId's own doc comment.
+   */
+  get activePage(): Page | undefined {
+    return this.pageBySurfaceId.get(this.activeSurface);
+  }
+
+  /** How many distinct surfaces have ever been adopted this run (never decremented by popSurface) -- the budget safety.maxAdoptedSurfacesPerRun bounds. */
+  get adoptedSurfaceCount(): number {
+    return this.adoptedSurfaceCounter;
+  }
+
+  /** A fresh, stable, run-unique id for a newly adopted surface (e.g. "adopted-1", "adopted-2", ...), independent of stack depth or nesting. */
+  nextAdoptedSurfaceId(): string {
+    this.adoptedSurfaceCounter += 1;
+    return `adopted-${this.adoptedSurfaceCounter}`;
   }
 
   private currentSurfaceState(): SurfaceState {
@@ -121,9 +163,17 @@ export class RunState {
    * previously-untouched bucket -- never the surface being left, and never shared with any
    * other surface id. The surface being left keeps its own bucket exactly as it was, ready
    * to resume unchanged once popSurface returns to it.
+   *
+   * `page`, when given (surface adoption, Phase 3 PR 3), is the live Page this surface is
+   * backed by, recorded so activePage resolves to it for as long as this surface remains
+   * anywhere on the stack -- omitted only by tests exercising the pre-adoption stack
+   * mechanics on their own (see tests/unit/runStateSurfaceScoping.test.ts).
    */
-  pushSurface(surfaceId: string): void {
+  pushSurface(surfaceId: string, page?: Page): void {
     this.surfaceStack.push(surfaceId);
+    if (page) {
+      this.pageBySurfaceId.set(surfaceId, page);
+    }
   }
 
   /**
@@ -131,13 +181,41 @@ export class RunState {
    * own bucket exactly as it was left. Never pops the last remaining entry -- "main" is
    * always the stack's permanent floor -- so a caller that pops more times than it pushed
    * simply stays on "main" rather than ever leaving the stack empty. Returns the surface id
-   * that was popped, or undefined if there was nothing above "main" to pop.
+   * that was popped, or undefined if there was nothing above "main" to pop. The popped
+   * surface's own Page mapping (if any) is deliberately left in pageBySurfaceId -- re-pushing
+   * the same surfaceId later (never done today, but kept consistent with every other
+   * per-surface bucket's re-entry-preserves-state behaviour) would otherwise silently lose
+   * its Page.
    */
   popSurface(): string | undefined {
     if (this.surfaceStack.length <= 1) {
       return undefined;
     }
     return this.surfaceStack.pop();
+  }
+
+  /**
+   * Surface adoption (Phase 3 PR 3, "extend_trust_from_landing" policy): records that the
+   * *current* surface's own allowedDomains check is additionally permitted to navigate
+   * within `hostname`, on top of the run's own task.allowedDomains. Scoped to exactly the
+   * surface active at call time -- never retroactively applied to a surface entered earlier
+   * or later.
+   */
+  extendAllowedDomainForCurrentSurface(hostname: string): void {
+    this.currentSurfaceState().extendedAllowedDomain = hostname;
+  }
+
+  /**
+   * The allowedDomains list core/loop.ts should actually enforce for the current surface's
+   * own navigation/click dispatch: `base` (the run's own task.allowedDomains), plus the
+   * current surface's own extended-trust hostname when one was recorded (see
+   * extendAllowedDomainForCurrentSurface above). Returns `base` unchanged (same array
+   * reference) for every run that never adopts a surface under "extend_trust_from_landing" --
+   * this stays a complete no-op for every pre-existing task.
+   */
+  effectiveAllowedDomains(base: string[]): string[] {
+    const extended = this.currentSurfaceState().extendedAllowedDomain;
+    return extended ? [...base, extended] : base;
   }
 
   /**

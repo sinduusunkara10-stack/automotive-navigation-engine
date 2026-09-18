@@ -204,7 +204,7 @@ function baseTask(
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
     ...overrides,
   };
 }
