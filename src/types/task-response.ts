@@ -1,6 +1,7 @@
 import type { ActionType, SelectedAction } from "./actions.js";
 import type { ConsentControlIntent } from "./consentControl.js";
 import type { ConsentInteractionPolicy } from "./task-request.js";
+import type { AlternativeExplorationDiagnostics, ConsentDiagnostics, RecoveryDiagnostics } from "./recovery.js";
 
 export type RunStatus =
   | "success"
@@ -92,6 +93,14 @@ export interface Observation {
    * from interactiveElements[].covered alone.
    */
   activeDialog?: { role: string; accessibleName: string };
+  /**
+   * Multilingual consent handling (see CLAUDE.md and docs/architecture.md "Consent
+   * behaviour -- multilingual"): the page's own declared language (`<html lang>`),
+   * normalised to its primary subtag only (e.g. "fr-FR" -> "fr") -- one signal among
+   * several src/safety/consentClassifier.ts combines, never a translation and never used
+   * on its own to decide anything. Absent when the page declares no language.
+   */
+  pageLanguage?: string;
 }
 
 /**
@@ -529,7 +538,19 @@ export interface PromptElementSelectionDiagnostic {
   selectedCount: number;
   relevantSelectedCount: number;
   structuralSelectedCount: number;
+  /** Relevant candidates that did not survive selection -- see omissionReason below for why. */
   excludedRelevantCount: number;
+  /**
+   * Candidate-selection redesign (see CLAUDE.md and docs/architecture.md "The 40-element
+   * limit"): how many elements were included only because they strongly matched the
+   * currently-unresolved milestone specifically (selectPromptInteractiveElements's bounded
+   * guaranteed-inclusion top-up), on top of the ordinary relevance/structural budgets.
+   */
+  guaranteedInclusionCount: number;
+  /** Short, fixed label naming which selection strategy produced this diagnostic -- "none" when candidateCount was already within the cap. */
+  truncationStrategy: string;
+  /** Present only when excludedRelevantCount > 0, explaining generically why a relevant candidate still did not survive. */
+  omissionReason?: string;
   selected: { id: string; accessibleName: string; reason: "relevant" | "structural" }[];
 }
 
@@ -859,10 +880,31 @@ export interface Diagnostics {
    * during the run (bounded implicitly by successCriteria.length).
    */
   milestoneEvidence?: MilestoneEvidenceRecord[];
+  /**
+   * Milestone-anchored recovery (see CLAUDE.md and docs/architecture.md "Milestone-anchored
+   * recovery"): every recovery-anchor restore attempt this run made, whether it succeeded or
+   * not -- see src/types/recovery.ts. Present only when at least one restore was attempted.
+   */
+  recovery?: RecoveryDiagnostics;
+  /**
+   * Alternative Route Exploration (see CLAUDE.md and docs/architecture.md "Alternative
+   * route exploration"): every distinct candidate this run tried at a recovery anchor's
+   * decision point, and its progress outcome -- see src/types/recovery.ts. Present only
+   * when at least one bounded exploration cycle ran.
+   */
+  alternativeExploration?: AlternativeExplorationDiagnostics;
+  /**
+   * Consent behaviour (see CLAUDE.md and docs/architecture.md "Consent behaviour"): every
+   * consent surface the engine's own independent, deterministic classifier evaluated this
+   * run (detected or not), and any proactive accept-all action taken under
+   * consentInteractionPolicy "accept_optional" -- see src/types/recovery.ts. Present only
+   * when at least one surface was evaluated.
+   */
+  consent?: ConsentDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.15.0";
+  schemaVersion: "1.17.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

@@ -11,6 +11,7 @@ import type {
 import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
+import type { ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
@@ -103,6 +104,15 @@ export async function runTask(params: {
    */
   semanticVerifier?: SemanticCriterionVerifier;
   /**
+   * Optional, opt-in bounded model call used only when a genuine consent surface's own
+   * wording matches none of consentClassifier.ts's configured languages (see that module's
+   * ConsentAmbiguityResolver/resolveAmbiguousConsentSurface) -- entirely absent by default,
+   * same as semanticVerifier above: every existing caller that doesn't pass this gets
+   * byte-for-byte the same deterministic-only consent handling as before this parameter
+   * existed.
+   */
+  consentAmbiguityResolver?: ConsentAmbiguityResolver;
+  /**
    * Opt-in (MEMORY_CIRCUIT_BREAKER_ENABLED), checked once per step alongside
    * checkLimitsBreach -- see src/safety/containerMemoryGuard.ts. Sampling itself happens
    * independently, on its own timer, in src/api/runner.ts (which owns Redis persistence);
@@ -111,7 +121,7 @@ export async function runTask(params: {
    */
   isMemoryThresholdBreached?: () => boolean;
 }): Promise<TaskResponse> {
-  const { page, task, semanticVerifier, isMemoryThresholdBreached } = params;
+  const { page, task, semanticVerifier, consentAmbiguityResolver, isMemoryThresholdBreached } = params;
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -312,6 +322,7 @@ export async function runTask(params: {
         reasoning,
         actionNavigationTimeoutMs,
         semanticVerifier,
+        consentAmbiguityResolver,
         isMemoryThresholdBreached,
       });
       // Bounded for storage only, after everything that needs the step's *live*,
@@ -427,7 +438,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.15.0",
+    schemaVersion: "1.17.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -448,6 +459,28 @@ function buildTerminalResponse(params: {
       ...(semanticVerifierDiagnostics ? { semanticVerifier: semanticVerifierDiagnostics } : {}),
       ...(memorySamples.length > 0 ? { memory: memorySamples } : {}),
       ...(state.milestoneEvidence.length > 0 ? { milestoneEvidence: state.milestoneEvidence } : {}),
+      ...(state.recoveryAttemptDiagnostics.length > 0 || state.routeAttemptDiagnostics.length > 0
+        ? {
+            recovery: {
+              version: "1.1.0" as const,
+              anchorsRecorded: state.recoveryAnchors.length,
+              attempts: state.recoveryAttemptDiagnostics,
+              routeAttempts: state.routeAttemptDiagnostics,
+            },
+          }
+        : {}),
+      ...(state.alternativeCandidateDiagnostics.length > 0
+        ? { alternativeExploration: { version: "1.0.0" as const, candidates: state.alternativeCandidateDiagnostics } }
+        : {}),
+      ...(state.consentSurfaceDiagnostics.length > 0
+        ? {
+            consent: {
+              version: "1.0.0" as const,
+              surfaces: state.consentSurfaceDiagnostics,
+              consentRetriesUsed: state.consentRetriesUsed,
+            },
+          }
+        : {}),
     },
   };
 }

@@ -19,9 +19,9 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "description": "Version of this task-response contract, e.g. \"1.15.0\". Bumped from \"1.14.0\" to \"1.15.0\" for PR 1D (truthful milestone evaluation -- see CLAUDE.md and docs/architecture.md \u00a721): diagnostics.milestoneEvidence[] entries now carry a required evidenceTier (\"observed\"/\"inferred\"/\"assumed\") classifying how evidenceSource established the criterion, and score is now always populated (1.0 for an \"observed\" entry, the existing deterministic-overlap/verifier-confidence value for an \"inferred\" one) rather than present only for semantic_page_match; engineAssessment gains an optional evidenceTierSummary (observedCount/inferredCount/assumedCount) rollup, present whenever at least one criterion was satisfied. This is observability-only: no criterion that would have satisfied before this change is newly withheld, and none that would not have satisfied now does -- assumedCount is always 0, enforced by an invariant test, since nothing in this evaluator ever satisfies a criterion without either observed or inferred evidence. The one narrowing change is that milestoneEvidenceRecord.score, previously optional and populated only for semantic_page_match, is now required and always populated -- every existing consumer reading it only when present is unaffected. No other existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.14.0\". Bumped from \"1.13.0\" to \"1.14.0\" for PR 1C-a (drawer/modal/half-window surface detection beyond role=\"dialog\"/aria-modal, post-click surface awareness, and readiness-based post-click timing -- see CLAUDE.md and docs/architecture.md \u00a719): actionResult.surfaceChangeDetected/surfaceChangeType report, for a non-navigating click, whether a bounded, DOM-mutation-aware post-click readiness wait (replacing the previous fixed 250ms settle delay on this path) found generic evidence -- a dialog/modal appearing or changing, or a large newly-appeared fixed/absolute/sticky panel co-occurring with several new controls -- that a new interactive surface likely appeared. This is a separate, broader, non-target-attributed heuristic from the existing clickSideEffectDetected, which alone continues to govern click-success/route-progress attribution unchanged; the new fields are purely informational context threaded into the next reasoning-layer decision (an internal ReasoningContext.recentActions field, not part of this wire schema). All changes are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.13.0\". Bumped from \"1.12.0\" to \"1.13.0\" for the target-attributable click-success fix (see CLAUDE.md and docs/architecture.md \"Overlay-click side effect detection\"): actionResult.clickSideEffectDetected and actionResult.fallbackVerified now require evidence attributable to the clicked target specifically (its own aria-expanded/covered state changing, or it disappearing -- see detectTargetAttributableSideEffect), not merely that something changed anywhere on the page; a fallback whose only evidence is an unattributed whole-page mutation no longer counts. actionResult.fallbackVerificationReason (new, present whenever fallbackVerified is present) names the specific mechanism that produced that verdict. actionResult.success is no longer unconditionally true for a fallback that changed the URL: it is now false whenever fallbackVerified is false, with staleTarget: true, giving the reasoning layer a further bounded recovery chance instead of silently reporting unverified progress as successful. observation.interactiveElements[].ariaState may now include aria-expanded, the same standards-based signal used for target-attribution. All changes are additive to the schema shape; the one behavioural (non-additive) change is actionResult.success's classification criteria for an unverified fallback, described above -- no existing field was removed, renamed, or had its meaning silently changed for any other case. Version of this task-response contract, e.g. \"1.12.0\". Bumped from \"1.11.0\" to \"1.12.0\" for the generic cross-client analytics-capture-evidence fix (see CLAUDE.md and docs/architecture.md \"Generic action-attributed analytics capture\"): captures.data_layer_evidence[] and captures.ga4_network_events[] entries now carry capture-context provenance (source: \"main_frame\"/\"child_frame\"/\"popup_context\", contextId, frameOrigin, truncated); ga4_network_events[] also gained method, postDataRaw, postDataParams, measurementId, and consentState so POST/sendBeacon GA4 requests are no longer only partially captured; captures.cta_clicks[] gained openedNewContext/observedNewContext reporting whether a click opened a popup/new-tab context and whether that context was actually instrumented before being closed, rather than closed unobserved. All new fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.11.0\". Bumped from \"1.10.0\" to \"1.11.0\" for the overlay-click-detection fix (see CLAUDE.md and docs/architecture.md \"Modal-aware observation\" / \"Overlay-click side effect detection\"): observation.activeDialog (see $defs/observation) reports a compact, generic identity (role + short accessible-name excerpt) for a visible dialog/modal surface (role=\"dialog\", aria-modal=\"true\", or a native <dialog>), when one is present in the main document; observation.interactiveElements[].nearestHeadingText surfaces the nearest enclosing heading's text, found via a bounded ancestor walk, so repeated-card/list-item controls that share an identical role+accessibleName (e.g. the same-labelled action button under several different listing cards) can be told apart for route-memory candidate identity; actionResult.clickSideEffectDetected and actionResult.fallbackVerified report, respectively, whether a click that looked intercepted/timed-out was instead recognised as having actually succeeded from generic post-click evidence, and whether a generic destinationUrl navigation fallback's resulting page state was verified as a meaningful change rather than assumed equivalent to a real click. All four fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.9.0\" to \"1.10.0\" earlier because diagnostics.milestoneEvidence (see $defs/milestoneEvidenceRecord) was added: one record per success criterion, appended the moment it first becomes satisfied, explaining which page it was evaluated against, which phase of the step, and what evidence (a matched URL pattern, a matched selector, a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) actually satisfied it -- part of the fix converting ordered-milestone successCriteria from a reporting-only convention (docs/n8n-integration.md \u00a79f) into an enforced runtime constraint: only the first not-yet-satisfied required milestone (in successCriteria declaration order) is ever eligible to be evaluated or satisfied, so a later required milestone can never be satisfied by evidence that only happens to overlap with an earlier page (e.g. a homepage's own persistent navigation advertising a destination it never actually reached). This same change also excludes persistent site-wide navigation/menu/header/footer chrome from semantic_page_match's own interactive-element vocabulary signal (src/core/semanticPageMatch.ts) -- a link living in that chrome is evidence a destination exists, never evidence it was reached. Neither the ordering enforcement nor the chrome exclusion required any new request-schema field: milestone order remains purely successCriteria's own declaration order, exactly as docs/n8n-integration.md \u00a79f already documented. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.8.0\" to \"1.9.0\" earlier because status gained the additive \"container_memory_threshold_reached\" enum value and diagnostics.containerMemory (see $defs/containerMemoryDiagnostics) was added: the opt-in container-memory circuit breaker (MEMORY_CIRCUIT_BREAKER_ENABLED) reports its latest generic Linux cgroup memory sample and whether it stopped the run before the container's own OS-level OOM kill. Present only when that breaker was enabled for a run. Purely diagnostic, generic container-memory evidence -- never anything about the page/task/brand being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.7.0\" to \"1.8.0\" earlier because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
+      "description": "Version of this task-response contract, e.g. \"1.17.0\". Bumped from \"1.16.0\" to \"1.17.0\" for the corrective pass (complete-route-exploration lifecycle diagnostics, multilingual consent handling, element-identity fix -- see CLAUDE.md and docs/architecture.md §23): diagnostics.recovery.routeAttempts[] (new, see $defs/routeAttemptDiagnostic) reports one record per candidate-route lifecycle transition (candidate_selected/route_active/route_progressing/route_succeeded/route_blocked/anchor_restore_required/anchor_restored/candidate_exhausted) -- proving a candidate route was genuinely followed for however many downstream actions it took, and evaluated for progress at each one, rather than only dispatched once and checked immediately; diagnostics.recovery.version moved from \"1.0.0\" to \"1.1.0\" for this new required field. observation.pageLanguage (new, optional) reports the page's own declared language (<html lang>, normalised to its primary subtag), one of several signals the engine's now-multilingual consent classifier (English/French/German/Spanish/Italian/Dutch) combines. diagnostics.consent.surfaces[] gained three new optional fields: resolvedViaModelAssist (true when a surface's own wording matched none of the configured languages and a caller-supplied bounded, independently-verified model-assist resolver identified the accept-all control instead), languageAmbiguous, and pageLanguage. All changes are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.16.0\". Bumped from \"1.14.0\" to \"1.16.0\" for PR 1D (truthful milestone evaluation -- see CLAUDE.md and docs/architecture.md \u00a721): diagnostics.milestoneEvidence[] entries now carry a required evidenceTier (\"observed\"/\"inferred\"/\"assumed\") classifying how evidenceSource established the criterion, and score is now always populated (1.0 for an \"observed\" entry, the existing deterministic-overlap/verifier-confidence value for an \"inferred\" one) rather than present only for semantic_page_match; engineAssessment gains an optional evidenceTierSummary (observedCount/inferredCount/assumedCount) rollup, present whenever at least one criterion was satisfied. This is observability-only: no criterion that would have satisfied before this change is newly withheld, and none that would not have satisfied now does -- assumedCount is always 0, enforced by an invariant test, since nothing in this evaluator ever satisfies a criterion without either observed or inferred evidence. The one narrowing change is that milestoneEvidenceRecord.score, previously optional and populated only for semantic_page_match, is now required and always populated -- every existing consumer reading it only when present is unaffected. No other existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.14.0\". Bumped from \"1.13.0\" to \"1.14.0\" for PR 1C-a (drawer/modal/half-window surface detection beyond role=\"dialog\"/aria-modal, post-click surface awareness, and readiness-based post-click timing -- see CLAUDE.md and docs/architecture.md \u00a719): actionResult.surfaceChangeDetected/surfaceChangeType report, for a non-navigating click, whether a bounded, DOM-mutation-aware post-click readiness wait (replacing the previous fixed 250ms settle delay on this path) found generic evidence -- a dialog/modal appearing or changing, or a large newly-appeared fixed/absolute/sticky panel co-occurring with several new controls -- that a new interactive surface likely appeared. This is a separate, broader, non-target-attributed heuristic from the existing clickSideEffectDetected, which alone continues to govern click-success/route-progress attribution unchanged; the new fields are purely informational context threaded into the next reasoning-layer decision (an internal ReasoningContext.recentActions field, not part of this wire schema). All changes are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.13.0\". Bumped from \"1.12.0\" to \"1.13.0\" for the target-attributable click-success fix (see CLAUDE.md and docs/architecture.md \"Overlay-click side effect detection\"): actionResult.clickSideEffectDetected and actionResult.fallbackVerified now require evidence attributable to the clicked target specifically (its own aria-expanded/covered state changing, or it disappearing -- see detectTargetAttributableSideEffect), not merely that something changed anywhere on the page; a fallback whose only evidence is an unattributed whole-page mutation no longer counts. actionResult.fallbackVerificationReason (new, present whenever fallbackVerified is present) names the specific mechanism that produced that verdict. actionResult.success is no longer unconditionally true for a fallback that changed the URL: it is now false whenever fallbackVerified is false, with staleTarget: true, giving the reasoning layer a further bounded recovery chance instead of silently reporting unverified progress as successful. observation.interactiveElements[].ariaState may now include aria-expanded, the same standards-based signal used for target-attribution. All changes are additive to the schema shape; the one behavioural (non-additive) change is actionResult.success's classification criteria for an unverified fallback, described above -- no existing field was removed, renamed, or had its meaning silently changed for any other case. Version of this task-response contract, e.g. \"1.12.0\". Bumped from \"1.11.0\" to \"1.12.0\" for the generic cross-client analytics-capture-evidence fix (see CLAUDE.md and docs/architecture.md \"Generic action-attributed analytics capture\"): captures.data_layer_evidence[] and captures.ga4_network_events[] entries now carry capture-context provenance (source: \"main_frame\"/\"child_frame\"/\"popup_context\", contextId, frameOrigin, truncated); ga4_network_events[] also gained method, postDataRaw, postDataParams, measurementId, and consentState so POST/sendBeacon GA4 requests are no longer only partially captured; captures.cta_clicks[] gained openedNewContext/observedNewContext reporting whether a click opened a popup/new-tab context and whether that context was actually instrumented before being closed, rather than closed unobserved. All new fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Version of this task-response contract, e.g. \"1.11.0\". Bumped from \"1.10.0\" to \"1.11.0\" for the overlay-click-detection fix (see CLAUDE.md and docs/architecture.md \"Modal-aware observation\" / \"Overlay-click side effect detection\"): observation.activeDialog (see $defs/observation) reports a compact, generic identity (role + short accessible-name excerpt) for a visible dialog/modal surface (role=\"dialog\", aria-modal=\"true\", or a native <dialog>), when one is present in the main document; observation.interactiveElements[].nearestHeadingText surfaces the nearest enclosing heading's text, found via a bounded ancestor walk, so repeated-card/list-item controls that share an identical role+accessibleName (e.g. the same-labelled action button under several different listing cards) can be told apart for route-memory candidate identity; actionResult.clickSideEffectDetected and actionResult.fallbackVerified report, respectively, whether a click that looked intercepted/timed-out was instead recognised as having actually succeeded from generic post-click evidence, and whether a generic destinationUrl navigation fallback's resulting page state was verified as a meaningful change rather than assumed equivalent to a real click. All four fields are additive and optional -- no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.9.0\" to \"1.10.0\" earlier because diagnostics.milestoneEvidence (see $defs/milestoneEvidenceRecord) was added: one record per success criterion, appended the moment it first becomes satisfied, explaining which page it was evaluated against, which phase of the step, and what evidence (a matched URL pattern, a matched selector, a deterministic vocabulary-overlap score, or a semanticVerifier's own cited evidence) actually satisfied it -- part of the fix converting ordered-milestone successCriteria from a reporting-only convention (docs/n8n-integration.md \u00a79f) into an enforced runtime constraint: only the first not-yet-satisfied required milestone (in successCriteria declaration order) is ever eligible to be evaluated or satisfied, so a later required milestone can never be satisfied by evidence that only happens to overlap with an earlier page (e.g. a homepage's own persistent navigation advertising a destination it never actually reached). This same change also excludes persistent site-wide navigation/menu/header/footer chrome from semantic_page_match's own interactive-element vocabulary signal (src/core/semanticPageMatch.ts) -- a link living in that chrome is evidence a destination exists, never evidence it was reached. Neither the ordering enforcement nor the chrome exclusion required any new request-schema field: milestone order remains purely successCriteria's own declaration order, exactly as docs/n8n-integration.md \u00a79f already documented. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.8.0\" to \"1.9.0\" earlier because status gained the additive \"container_memory_threshold_reached\" enum value and diagnostics.containerMemory (see $defs/containerMemoryDiagnostics) was added: the opt-in container-memory circuit breaker (MEMORY_CIRCUIT_BREAKER_ENABLED) reports its latest generic Linux cgroup memory sample and whether it stopped the run before the container's own OS-level OOM kill. Present only when that breaker was enabled for a run. Purely diagnostic, generic container-memory evidence -- never anything about the page/task/brand being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.7.0\" to \"1.8.0\" earlier because diagnostics.resourceRouting (see $defs/resourceRoutingDiagnostics) was added: counts and approximate bytes of network requests allowed/blocked by the new opt-in LOW_MEMORY_BROWSER_MODE (see docs/architecture.md \"Low-memory browser mode\"), present only when that mode was enabled for a run. Purely diagnostic, generic Playwright resource-type evidence -- never anything about a specific site or brand -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.6.0\" to \"1.7.0\" earlier because diagnostics.memory (see $defs/memorySample) was added: bounded process.memoryUsage() samples taken at run start, after each step, and after browser/context cleanup, so an out-of-memory incident can be correlated with the run's own memory trend rather than only inferred after the fact from platform-level restart events. Purely diagnostic, generic Node runtime evidence -- never anything about the page/task being run -- and additive: no existing field was removed, renamed, or had its meaning changed. Bumped from \"1.5.0\" to \"1.6.0\" earlier because observation.elementDiscoveryDiagnostics (see $defs/observation) was added: bounded, generic evidence about the interactive-element scan itself -- raw candidate count before filtering, button-like/link-like/other-role counts, per-reason excluded counts (zero-size, display:none, visibility:hidden), and a count of elements hosting an open shadow root -- so a caller can distinguish a genuinely empty page from one whose controls were excluded or live inside a structure the scan cannot see. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.4.0\" to \"1.5.0\" earlier because this repo's own versioning convention (see task-request.schema.json's schemaVersion description) bumps this const for every contract change, additive or not: this is the blocker-recovery response widening -- observation.interactiveElements[].frameOrigin and observation.inaccessibleFrameOrigins surface generic, one-level same-origin child-frame evidence; actionResult.staleTarget marks a failed action whose cause was mechanically classified as the target going stale (never a genuinely wrong decision); steps[].reObservationAttempted/recoveryAttempts surface the bounded pre-dispatch recovery cycle a step used; errors[].category gained the additive \"stale_target_recovery\" value; and the new opt-in host_context_snapshot capture module reports a bounded, names-only cookie/storage footprint on a cross-host transition. No existing field was removed, renamed, or had its meaning changed. Bumped from \"1.3.0\" to \"1.4.0\" earlier because observation.interactiveElements[].covered surfaces whether another element currently sits on top of a control's centre point, so the reasoning layer can see up front that a control is not actually clickable instead of only discovering it after a failed dispatch. Bumped from \"1.2.0\" to \"1.3.0\" earlier still because observation.interactiveElements[].disabled/ariaState and observation.progressIndicatorText widened the evidence surfaced to the reasoning/verification layers; captures.cta_clicks[].resultingTitle and captures.cta_clicks[].actionAnalytics (see $defs/actionAnalytics) added the generic, journey-agnostic action-attributed analytics record (dataLayer delta, GA4 window-correlated requests, resulting state, whether the action advanced the journey, and any semantic-verifier decisions attributable to it). Bumped from \"1.1.0\" to \"1.2.0\" earlier still for the additive diagnostics.domainDiscovery structure (see $defs/domainDiscoveryDiagnostics).",
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
-      "const": "1.15.0"
+      "const": "1.17.0"
     },
     "taskId": {
       "type": "string",
@@ -269,6 +269,10 @@
               "type": "string"
             }
           }
+        },
+        "pageLanguage": {
+          "type": "string",
+          "description": "The page's own declared language (<html lang>), normalised to its primary subtag only (e.g. \"fr-FR\" -> \"fr\") -- one signal among several the engine's consent classifier combines, never a translation and never used on its own to decide anything. Absent when the page declares no language."
         },
         "notableText": {
           "type": "array",
@@ -1093,6 +1097,359 @@
           "items": {
             "$ref": "#/$defs/milestoneEvidenceRecord"
           }
+        },
+        "recovery": {
+          "$ref": "#/$defs/recoveryDiagnostics"
+        },
+        "alternativeExploration": {
+          "$ref": "#/$defs/alternativeExplorationDiagnostics"
+        },
+        "consent": {
+          "$ref": "#/$defs/consentDiagnostics"
+        }
+      }
+    },
+    "recoveryDiagnostics": {
+      "type": "object",
+      "description": "Milestone-anchored recovery: every recovery-anchor restore attempt this run made, whether it succeeded or not, plus the full candidate-route lifecycle trace. Present only when at least one restore or route attempt was recorded.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "anchorsRecorded",
+        "attempts",
+        "routeAttempts"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.1.0"
+        },
+        "anchorsRecorded": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many recovery anchors (one per required milestone satisfied) this run recorded."
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recoveryAttemptDiagnostic"
+          }
+        },
+        "routeAttempts": {
+          "type": "array",
+          "description": "Full route-lifecycle transition trace (candidate_selected -> route_active -> ... -> route_succeeded/candidate_exhausted) proving the engine genuinely followed and evaluated each candidate route, not only dispatched a click.",
+          "items": {
+            "$ref": "#/$defs/routeAttemptDiagnostic"
+          }
+        }
+      }
+    },
+    "routeAttemptDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchorFingerprint",
+        "anchorCriterionId",
+        "candidateId",
+        "candidateLabel",
+        "candidateRank",
+        "routeStartStepIndex",
+        "routeStartUrl",
+        "stepIndex",
+        "status",
+        "urlsVisited",
+        "surfacesOpened",
+        "milestoneStateBefore",
+        "milestoneStateAtTransition",
+        "consentInterruptionsHandled"
+      ],
+      "properties": {
+        "anchorFingerprint": {
+          "type": "string"
+        },
+        "anchorCriterionId": {
+          "type": "string"
+        },
+        "candidateId": {
+          "type": "string"
+        },
+        "candidateLabel": {
+          "type": "string"
+        },
+        "candidateRank": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based rank among the candidates tried at this anchor (1 = first tried, up to the bounded budget)."
+        },
+        "routeStartStepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "routeStartUrl": {
+          "type": "string"
+        },
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "candidate_selected",
+            "route_active",
+            "route_progressing",
+            "route_succeeded",
+            "route_blocked",
+            "anchor_restore_required",
+            "anchor_restored",
+            "candidate_exhausted"
+          ]
+        },
+        "urlsVisited": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "surfacesOpened": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestoneStateBefore": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "milestoneStateAtTransition": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "progressEvidence": {
+          "type": "string"
+        },
+        "consentInterruptionsHandled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminationReason": {
+          "type": "string"
+        }
+      }
+    },
+    "recoveryAttemptDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepIndex",
+        "anchorCriterionId",
+        "anchorMilestoneOrder",
+        "targetFingerprint",
+        "hopsAttempted",
+        "hopsBudget",
+        "restored"
+      ],
+      "properties": {
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "anchorCriterionId": {
+          "type": "string"
+        },
+        "anchorMilestoneOrder": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targetFingerprint": {
+          "type": "string",
+          "description": "Opaque decision-point fingerprint the restore sequence was aiming to reach."
+        },
+        "hopsAttempted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hopsBudget": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "restored": {
+          "type": "boolean",
+          "description": "True once the target fingerprint was actually re-observed and matched."
+        },
+        "failureReason": {
+          "type": "string",
+          "enum": [
+            "hops_exhausted",
+            "go_back_failed",
+            "no_further_anchor",
+            "safety_limit"
+          ]
+        }
+      }
+    },
+    "alternativeExplorationDiagnostics": {
+      "type": "object",
+      "description": "Alternative Route Exploration: every distinct candidate this run tried at a recovery anchor's decision point, and its progress outcome. Present only when at least one bounded exploration cycle ran.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "candidates"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.0.0"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/alternativeCandidateAttemptDiagnostic"
+          }
+        }
+      }
+    },
+    "alternativeCandidateAttemptDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchorFingerprint",
+        "anchorCriterionId",
+        "candidateId",
+        "candidateLabel",
+        "stepIndex",
+        "progressResult",
+        "attemptNumber",
+        "budget"
+      ],
+      "properties": {
+        "anchorFingerprint": {
+          "type": "string"
+        },
+        "anchorCriterionId": {
+          "type": "string"
+        },
+        "candidateId": {
+          "type": "string"
+        },
+        "candidateLabel": {
+          "type": "string"
+        },
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "progressResult": {
+          "type": "string",
+          "enum": [
+            "advanced",
+            "no_change",
+            "failed",
+            "blocked"
+          ]
+        },
+        "attemptNumber": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-based position of this attempt within this anchor's bounded exploration budget."
+        },
+        "budget": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "consentDiagnostics": {
+      "type": "object",
+      "description": "Every consent surface the engine's own independent, deterministic classifier evaluated this run (detected or not), and any proactive accept-all action taken under consentInteractionPolicy \"accept_optional\". Present only when at least one surface was evaluated.",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "surfaces",
+        "consentRetriesUsed"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.0.0"
+        },
+        "surfaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/consentSurfaceDiagnostic"
+          }
+        },
+        "consentRetriesUsed": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many of this run's bounded consent-retry allowance were used -- never drawn from the navigation alternative-exploration budget."
+        }
+      }
+    },
+    "consentSurfaceDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepIndex",
+        "pageUrl",
+        "surfaceDetected",
+        "evidence",
+        "acceptAllCandidateFound"
+      ],
+      "properties": {
+        "stepIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pageUrl": {
+          "type": "string"
+        },
+        "surfaceDetected": {
+          "type": "boolean"
+        },
+        "evidence": {
+          "type": "array",
+          "description": "Short, generic evidence strings explaining the classification (text/role/grouping signals), never full page content.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "acceptAllCandidateFound": {
+          "type": "boolean"
+        },
+        "engineActionTaken": {
+          "type": "string",
+          "enum": [
+            "clicked_accept_all"
+          ]
+        },
+        "engineActionVerified": {
+          "type": "boolean"
+        },
+        "modelReportedIntent": {
+          "type": "string",
+          "enum": [
+            "grants_optional_consent",
+            "declines_optional_consent",
+            "opens_consent_settings",
+            "not_consent_related"
+          ]
+        },
+        "resolvedViaModelAssist": {
+          "type": "boolean",
+          "description": "True when the accept-all control was identified via the bounded, independently-verified model-assist fallback rather than the deterministic, configured-language wording table -- i.e. the page's own wording matched none of the configured languages."
+        },
+        "languageAmbiguous": {
+          "type": "boolean",
+          "description": "True when this surface showed genuine consent-context evidence but the deterministic, configured-language wording table could not resolve a confident choice shape from it."
+        },
+        "pageLanguage": {
+          "type": "string",
+          "description": "The page's own declared language (<html lang>, normalised to its primary subtag) at this step, when present."
         }
       }
     },
@@ -1397,6 +1754,8 @@
         "relevantSelectedCount",
         "structuralSelectedCount",
         "excludedRelevantCount",
+        "guaranteedInclusionCount",
+        "truncationStrategy",
         "selected"
       ],
       "properties": {
@@ -1424,6 +1783,19 @@
           "type": "integer",
           "minimum": 0,
           "description": "Count of elements that scored positively on lexical relevance but still did not fit within the prompt's element cap. A count only, never a list, to keep this diagnostic bounded."
+        },
+        "guaranteedInclusionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Of selectedCount, how many were included only because they strongly matched the currently-unresolved milestone specifically, via the bounded guaranteed-inclusion top-up (see src/reasoning/promptBuilder.ts)."
+        },
+        "truncationStrategy": {
+          "type": "string",
+          "description": "Short, fixed label naming which selection strategy produced this diagnostic -- \"none\" when candidateCount was already within the cap."
+        },
+        "omissionReason": {
+          "type": "string",
+          "description": "Present only when excludedRelevantCount > 0, explaining generically why a relevant candidate still did not survive."
         },
         "selected": {
           "type": "array",

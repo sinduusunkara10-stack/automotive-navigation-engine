@@ -651,6 +651,28 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         targetAfter: targetElementSnapshot(postFailureState),
       });
       if (sideEffect.detected) {
+        // Corrective fix (half-window settle/surface-signal gap -- see CLAUDE.md and
+        // docs/architecture.md "Surfaces, drawers and half-windows"): detectTargetAttributableSideEffect
+        // above can return detected:true the instant the target's own hit-test becomes
+        // covered -- e.g. a drawer's backdrop mounting -- well before the drawer's own
+        // content (a "Request a Quote"-style control) has finished rendering. Two gaps
+        // previously existed here, both fixed together since they compound: (1) this path
+        // never gave the page the same bounded, DOM-mutation-quiet settle window
+        // waitForPostClickReadiness already gives the *other* click-success path, so the
+        // very next observation could be taken before the surface's own content had
+        // rendered; (2) this path never computed classifyObservedSurfaceChange at all, so
+        // ActionResult.surfaceChangeDetected/surfaceChangeType were silently left unset --
+        // starving core/loop.ts's low-confidence recovery (gated on exactly that field) of
+        // the one signal it needs to recognise this exact situation.
+        await waitForPostClickReadiness(page);
+        const settledSnapshot = await captureInteractionSnapshot(page).catch(() => postClickSnapshot);
+        const observedSurfaceChange = classifyObservedSurfaceChange(preClickSnapshot, settledSnapshot);
+        const reportableSurfaceChangeType: ObservedSurfaceChangeType | undefined =
+          observedSurfaceChange.type === "dialog_appeared" ||
+          observedSurfaceChange.type === "dialog_changed" ||
+          observedSurfaceChange.type === "layer_panel_appeared"
+            ? observedSurfaceChange.type
+            : undefined;
         if (captureModules.includes("errors")) {
           recordDiagnosticError(captures, {
             stepIndex,
@@ -672,6 +694,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
           success: true,
           resultingUrl: safePageUrl(page) ?? urlBeforeClick,
           clickSideEffectDetected: true,
+          ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
           ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
         };
       }

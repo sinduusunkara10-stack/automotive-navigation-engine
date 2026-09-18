@@ -226,10 +226,12 @@ test("diagnostics contain no prompts, raw responses, observations, page HTML, se
     assert.deepEqual(selectionKeys, [
       "candidateCount",
       "excludedRelevantCount",
+      "guaranteedInclusionCount",
       "relevantSelectedCount",
       "selected",
       "selectedCount",
       "structuralSelectedCount",
+      "truncationStrategy",
     ]);
     for (const entry of decision.elementSelection.selected) {
       assert.deepEqual(Object.keys(entry).sort(), ["accessibleName", "id", "reason"]);

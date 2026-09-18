@@ -70,10 +70,20 @@ export interface Safety {
   requireDomainConfirmationOnRedirect?: boolean;
   /** See ConsentInteractionPolicy above. Omitted means "reject_optional". */
   consentInteractionPolicy?: ConsentInteractionPolicy;
+  /**
+   * Milestone-anchored recovery / Alternative Route Exploration (see CLAUDE.md and
+   * docs/architecture.md "Alternative route exploration"): the bounded number of distinct
+   * candidates the engine may try at one recovery anchor's decision point before treating
+   * it as exhausted. Omitted means MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR (3, src/core/loop.ts).
+   * Always subject to maxSteps/maxBacktracks/every other safety control regardless of this
+   * value -- never a way around them, only a cap on how many distinct route candidates one
+   * decision point may be given before recovery moves on.
+   */
+  maxAlternativeCandidatesPerDecisionPoint?: number;
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.16.0";
+  schemaVersion: "1.18.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -95,7 +105,7 @@ export interface TaskRequest {
   captureModules: CaptureModuleName[];
   limits: Limits;
   safety: Safety;
-  outputSchemaVersion: "1.15.0";
+  outputSchemaVersion: "1.17.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

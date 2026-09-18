@@ -17,7 +17,16 @@ import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
+import type { RouteMemoryOutcome } from "../types/routeMemory.js";
 import { PAGE_SETTLE_DELAY_MS } from "./robustNavigation.js";
+import {
+  buildRecoveryAnchor,
+  computeCriterionOrder,
+  computeTargetMilestoneCriterionIds,
+  selectRecoveryAnchor,
+} from "./recoveryAnchors.js";
+import type { RecoveryAnchor, RouteStatus } from "../types/recovery.js";
+import { assessConsentSurface, resolveAmbiguousConsentSurface, type ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
 import {
   computeEstimatedCompletion,
   computeMilestoneRollup,
@@ -33,6 +42,7 @@ import {
   assessBranchProgress,
   classifyClosureFromSafetyFlags,
   computeEffectiveBranchDepth,
+  hasBranchAchievedTargetMilestone,
   isAmbiguousMultiCandidateDecisionPoint,
   type BranchRecord,
 } from "./branchExploration.js";
@@ -67,6 +77,35 @@ const MAX_STALE_TARGET_RECOVERY_ATTEMPTS = 3;
 // (checked again at the very top of the next runStep call regardless) remain the actual stop.
 const MAX_JOURNEY_REPLANNING_ATTEMPTS = 2;
 
+// Milestone-anchored recovery (see docs/architecture.md "Milestone-anchored recovery"):
+// total go_back hops one run may spend restoring toward any recovery anchor, across every
+// anchor tried -- independent of, and separate from, MAX_JOURNEY_REPLANNING_ATTEMPTS above
+// (which remains the fallback for a decision point with no recovery anchor available at
+// all, e.g. before any milestone has been satisfied yet). Sized generously enough for a
+// small number of anchors each needing a couple of hops, while staying a small, fixed,
+// non-task-configurable ceiling -- always still subject to maxBacktracks/maxSteps regardless.
+const MAX_ANCHOR_RESTORE_HOPS_TOTAL = 6;
+
+// Alternative Route Exploration (see docs/architecture.md "Alternative route exploration"):
+// default bounded budget of distinct candidates tried at one recovery anchor's decision
+// point before that anchor is considered exhausted and a further-back anchor (or, if none
+// remains, today's existing fallback) is used instead. Matches the task requirement of "up
+// to three distinct relevant candidates where three valid candidates exist" -- never a
+// count inflated by retrying an already-exhausted candidate, and never a reason to invent
+// an irrelevant click merely to reach this number.
+export const MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR = 3;
+
+// Consent-interruption handling (see docs/architecture.md "Consent behaviour"): bounded,
+// fixed allowance for the engine's own proactive accept-all click under
+// consentInteractionPolicy "accept_optional" -- deliberately small and separate from every
+// navigation-exploration budget above, so resolving a genuine, recurring consent surface
+// can never consume the alternative-route-exploration or journey-replanning allowance.
+// Sized to comfortably cover a real journey's own worth of distinct consent surfaces (a
+// widget re-appearing after navigating to a new page/origin, entering a new component, or
+// re-rendering after a same-document route change -- see docs/architecture.md "Consent
+// behaviour -- consent at any journey stage") without being unbounded.
+const MAX_CONSENT_RETRIES = 8;
+
 /**
  * PR 1C (Alternative Route Exploration): a trivial, dedicated reader for
  * RunState.pendingAlternativeExploration, called instead of reading the property
@@ -96,11 +135,28 @@ export async function runStep(params: {
   actionNavigationTimeoutMs: number;
   semanticVerifier?: SemanticCriterionVerifier;
   /** See runTask's own param of the same name (src/core/engine.ts). */
+  consentAmbiguityResolver?: ConsentAmbiguityResolver;
+  /** See runTask's own param of the same name (src/core/engine.ts). */
   isMemoryThresholdBreached?: () => boolean;
 }): Promise<LoopStepOutcome> {
-  const { page, task, state, captures, reasoning, actionNavigationTimeoutMs, semanticVerifier, isMemoryThresholdBreached } =
-    params;
+  const {
+    page,
+    task,
+    state,
+    captures,
+    reasoning,
+    actionNavigationTimeoutMs,
+    semanticVerifier,
+    consentAmbiguityResolver,
+    isMemoryThresholdBreached,
+  } = params;
   const stepIndex = state.stepCount;
+  // Alternative Route Exploration: the candidate budget per decision point is configurable
+  // per task (Safety.maxAlternativeCandidatesPerDecisionPoint, types/task-request.ts),
+  // defaulting to MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR when omitted -- never itself a way
+  // around maxSteps/maxBacktracks/the other safety controls, which remain independently
+  // enforced regardless of this value.
+  const alternativeCandidateBudget = task.safety.maxAlternativeCandidatesPerDecisionPoint ?? MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR;
 
   let observation = await buildObservation(page);
   // See RunState.resolveLastActionProgress: fills in observedProgress on the action
@@ -209,6 +265,118 @@ export async function runStep(params: {
     };
   }
 
+  // Consent-interruption handling (see CLAUDE.md and docs/architecture.md "Consent
+  // behaviour"): independent of, and prior to, every other block below -- a genuine consent
+  // surface can appear at any point in the journey (initial load, or re-appearing later
+  // from another component/frame) and must be resolved as an interrupting surface, then the
+  // existing journey state (activeBranch/activeAnchorRestore, satisfiedCriteriaIds, all of
+  // it) resumed completely untouched. Engine-enforced only for "accept_optional" -- an
+  // explicit, caller-opted-in instruction to actually grant optional consent (see
+  // ConsentInteractionPolicy) -- where accepting is unambiguously the desired action
+  // whenever a genuine surface is confidently detected; every other policy remains
+  // advisory-only prompt guidance plus the existing reactive
+  // consentPolicyGuard/isConsentIntentCompliant backstop, since the engine has no safe,
+  // generic way to independently decide *which* narrower action (decline vs a specific
+  // settings choice) a caller wants without guessing. Bounded by MAX_CONSENT_RETRIES,
+  // entirely separate from the navigation-exploration/journey-replanning budgets below (item
+  // 8 of Alternative Route Exploration's own requirements) -- resolving consent can never
+  // consume either.
+  if (task.safety.consentInteractionPolicy === "accept_optional" && state.consentRetriesUsed < MAX_CONSENT_RETRIES) {
+    const consentAssessment = assessConsentSurface(observation);
+    // Multilingual consent handling (corrective pass, see docs/architecture.md "Consent
+    // behaviour -- unsupported/ambiguous languages"): when the deterministic,
+    // configured-language wording table cannot resolve a confident choice shape but the
+    // page still shows genuine consent-context evidence, a caller-supplied
+    // consentAmbiguityResolver gets one bounded, independently-verified chance to interpret
+    // the exact same observed surface before the engine gives up on this surface entirely --
+    // see resolveAmbiguousConsentSurface's own doc comment for the verification it performs.
+    // Absent (no resolver configured) or unresolved, this is a silent no-op and behaviour is
+    // byte-for-byte the same as before this extension.
+    const resolvedCandidate =
+      consentAssessment.acceptAllCandidate ??
+      (consentAmbiguityResolver
+        ? await resolveAmbiguousConsentSurface(observation, consentAssessment, consentAmbiguityResolver)
+        : undefined);
+    const resolvedViaModelAssist = !consentAssessment.acceptAllCandidate && Boolean(resolvedCandidate);
+    if (resolvedCandidate) {
+      state.consentRetriesUsed += 1;
+      const forcedAction: SelectedAction = { type: "click", target: resolvedCandidate.elementId };
+      const consentActionResult = await dispatchAction({
+        page,
+        action: forcedAction,
+        captures,
+        stepIndex,
+        captureModules: task.captureModules,
+        allowedDomains: task.allowedDomains,
+        actionNavigationTimeoutMs,
+      });
+      state.recordAction(forcedAction, { url: observation.url, title: observation.title }, consentActionResult.surfaceChangeType);
+      // Verify the click was attributable to that control and the surface actually closed
+      // or changed -- never assumed from the click alone. A fresh observation is the same
+      // generic evidence every other post-action check in this file already uses.
+      const postConsentObservation = await buildObservation(page).catch(() => observation);
+      const stillDetected = assessConsentSurface(postConsentObservation).surfaceDetected;
+      const engineActionVerified = consentActionResult.success && !stillDetected;
+      // Consent-interruption handling pauses an active candidate route without ever
+      // resetting or exhausting it (see docs/architecture.md "Consent at any journey
+      // step") -- state.activeBranch is left completely untouched by this whole block
+      // (this step returns before ever reaching the branch-evaluation code above); only
+      // this diagnostic counter is incremented, purely for visibility.
+      if (state.activeBranch) {
+        state.activeBranch.consentInterruptionsHandled += 1;
+      }
+      state.consentSurfaceDiagnostics.push({
+        stepIndex,
+        pageUrl: observation.url,
+        surfaceDetected: true,
+        evidence: consentAssessment.consentContextEvidence,
+        acceptAllCandidateFound: true,
+        engineActionTaken: "clicked_accept_all",
+        engineActionVerified,
+        ...(resolvedViaModelAssist ? { resolvedViaModelAssist: true } : {}),
+        ...(consentAssessment.pageLanguage ? { pageLanguage: consentAssessment.pageLanguage } : {}),
+      });
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "safety_guard_stop",
+          severity: "info",
+          pageUrl: observation.url,
+          actionType: "click",
+          targetElementId: resolvedCandidate.elementId,
+          message: `Detected a genuine consent surface (${consentAssessment.consentContextEvidence.join("; ")}) under consentInteractionPolicy "accept_optional"; ${resolvedViaModelAssist ? "used bounded, independently-verified model assistance (the page's own wording matched no configured language) to identify" : "proactively clicked"} the accept-all-equivalent control (${resolvedCandidate.label}). Verified closed/changed: ${engineActionVerified}.`,
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
+      const stepLog = buildStepLog({
+        stepIndex,
+        observation,
+        decision: `Engine-detected consent surface; proactively accepted optional consent under consentInteractionPolicy "accept_optional" before continuing the existing journey.`,
+        selectedAction: forcedAction,
+        actionResult: consentActionResult,
+        satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+        successCriteria: task.successCriteria,
+        safetyFlags: ["consent_surface_auto_accepted"],
+        reObservationAttempted: false,
+        recoveryAttempts: 0,
+      });
+      recordJourneyPathEntry(captures, task.captureModules, stepLog);
+      return { stepLog };
+    }
+    if (consentAssessment.consentContextEvidence.length > 0) {
+      state.consentSurfaceDiagnostics.push({
+        stepIndex,
+        pageUrl: observation.url,
+        surfaceDetected: consentAssessment.surfaceDetected,
+        evidence: consentAssessment.consentContextEvidence,
+        acceptAllCandidateFound: Boolean(consentAssessment.acceptAllCandidate),
+        ...(consentAssessment.languageAmbiguous ? { languageAmbiguous: true } : {}),
+        ...(consentAssessment.pageLanguage ? { pageLanguage: consentAssessment.pageLanguage } : {}),
+      });
+    }
+  }
+
   // Goal-Directed Bounded Branch Exploration (see core/branchExploration.ts): while a
   // branch is active, this block decides, before any reasoning call, whether to (a)
   // recognise the objective itself as already satisfied (closing the branch as "success"
@@ -224,12 +392,33 @@ export async function runStep(params: {
     const currentFingerprint = computeDecisionPointFingerprint(observation);
 
     if (!branch.result) {
+      // Complete-route-exploration proof: accumulate this branch's own url/surface
+      // history on every step it is actively evaluated (never during the return-sequence
+      // calls below, which run only after branch.result is already set) -- the raw
+      // evidence pushRouteAttemptDiagnostic reports, proving the engine actually followed
+      // the route rather than only dispatching its entry click and checking once.
+      if (!branch.urlsVisited.includes(observation.url)) {
+        branch.urlsVisited.push(observation.url);
+      }
+      const lastActionForHistory = state.actionHistory[state.actionHistory.length - 1];
+      if (lastActionForHistory?.surfaceChangeType && !branch.surfacesOpened.includes(lastActionForHistory.surfaceChangeType)) {
+        branch.surfacesOpened.push(lastActionForHistory.surfaceChangeType);
+      }
+
       if (getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length === 0) {
         branch.result = "success";
         state.routeMemory.recordBranchResult(branch.decisionPointId, branch.candidateId, {
           depthReached: branch.depth,
           result: "success",
         });
+        pushRouteAttemptDiagnostic({
+          state,
+          branch,
+          stepIndex,
+          status: "route_succeeded",
+          progressEvidence: "every required success criterion is now satisfied",
+        });
+        pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
         state.archiveActiveBranch();
       } else {
         const lastAction = state.actionHistory[state.actionHistory.length - 1];
@@ -271,6 +460,14 @@ export async function runStep(params: {
             depthReached: branch.depth,
             result: assessment.result,
           });
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: "route_blocked",
+            progressEvidence: assessment.reason,
+            terminationReason: assessment.result,
+          });
           if (task.captureModules.includes("errors")) {
             recordDiagnosticError(captures, {
               stepIndex,
@@ -282,11 +479,42 @@ export async function runStep(params: {
               stoppedRun: false,
             });
           }
+        } else {
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: hasBranchAchievedTargetMilestone(branch) ? "route_succeeded" : "route_progressing",
+            progressEvidence: assessment.reason,
+          });
         }
       }
     }
 
-    if (branch.result && branch.result !== "success" && branch.returnStatus !== "restored") {
+    // Milestone-anchored recovery (corrective pass, see docs/architecture.md "Alternative
+    // route exploration -- complete route following"): a "milestone_recovery"-entered
+    // branch that has already satisfied the specific milestone it was pursuing is never
+    // forced back to its own recovery anchor, even if its *own* later outcome (e.g. a
+    // further downstream depth-budget exhaustion, chasing an even-later milestone) would
+    // otherwise have closed it unproductively -- "do not return to the earlier anchor
+    // merely because the route needs more than one step" / "continue towards the next
+    // milestone without being reset". An "ambiguity"-entered branch never has
+    // targetMilestoneCriterionIds set, so hasBranchAchievedTargetMilestone is always false
+    // for it -- zero behavioural change to that pre-existing path.
+    if (branch.result && branch.result !== "success" && hasBranchAchievedTargetMilestone(branch) && branch.returnStatus !== "restored") {
+      branch.returnStatus = "restored";
+      pushRouteAttemptDiagnostic({
+        state,
+        branch,
+        stepIndex,
+        status: "anchor_restored",
+        progressEvidence: "the targeted milestone was already achieved; no return to the recovery anchor was needed",
+      });
+      pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+      state.archiveActiveBranch();
+      state.markAnchorRecovered(branch.decisionPointId, stepIndex);
+      // Falls through below to a completely ordinary decision this same step.
+    } else if (branch.result && branch.result !== "success" && branch.returnStatus !== "restored") {
       // Branch closed unproductively: perform (or continue) the bounded,
       // fingerprint-verified return sequence toward its own recorded decisionPointId,
       // reusing the exact same go_back execution/accounting PR #41's own journey
@@ -297,7 +525,17 @@ export async function runStep(params: {
       // fixed count of go_backs dispatched blindly in a row.
       if (currentFingerprint === branch.decisionPointId) {
         branch.returnStatus = "restored";
+        pushRouteAttemptDiagnostic({ state, branch, stepIndex, status: "anchor_restored" });
+        pushRouteAttemptDiagnostic({
+          state,
+          branch,
+          stepIndex,
+          status: "candidate_exhausted",
+          terminationReason: branch.result,
+        });
+        pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
         state.archiveActiveBranch();
+        state.markAnchorRecovered(branch.decisionPointId, stepIndex);
         // Falls through below to a completely ordinary decision this same step.
       } else if (
         branch.returnHopsAttempted >= branch.returnHopsBudget ||
@@ -306,6 +544,15 @@ export async function runStep(params: {
         state.stepCount + 1 >= task.limits.maxSteps
       ) {
         branch.returnStatus = "restore_failed";
+        pushRouteAttemptDiagnostic({
+          state,
+          branch,
+          stepIndex,
+          status: "candidate_exhausted",
+          progressEvidence: "the recovery anchor could not be safely restored",
+          terminationReason: "anchor_restore_failed",
+        });
+        pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
         state.archiveActiveBranch();
         const forcedAction: SelectedAction = { type: "stop_blocked" };
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
@@ -341,6 +588,13 @@ export async function runStep(params: {
         return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
       } else {
         branch.returnHopsAttempted += 1;
+        pushRouteAttemptDiagnostic({
+          state,
+          branch,
+          stepIndex,
+          status: "anchor_restore_required",
+          progressEvidence: `return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget}`,
+        });
         const forcedAction: SelectedAction = { type: "go_back" };
         const returnActionResult = await dispatchAction({
           page,
@@ -354,6 +608,15 @@ export async function runStep(params: {
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         if (!returnActionResult.success) {
           branch.returnStatus = "restore_failed";
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: "candidate_exhausted",
+            progressEvidence: "the return hop itself failed to execute",
+            terminationReason: "go_back_failed",
+          });
+          pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
           state.archiveActiveBranch();
           if (task.captureModules.includes("errors")) {
             recordDiagnosticError(captures, {
@@ -545,16 +808,27 @@ export async function runStep(params: {
   // stop_blocked/journey-replanning handling further below, so it can never itself create a
   // deadlock: worst case, this run's fixed journey-replanning/step budget is what ends it,
   // exactly as it would if the model had proposed stop_blocked directly.
-  if (state.pendingAlternativeExploration) {
-    const exhaustedIds = state.pendingAlternativeExploration.exhaustedCandidateIds;
+  // Persistent, per-fingerprint exhausted-candidate set (corrective pass, see
+  // state.exhaustedCandidatesByFingerprint / docs/architecture.md "Alternative route
+  // exploration") is consulted here too, alongside the legacy one-shot
+  // pendingAlternativeExploration -- so a candidate already marked exhausted at this exact
+  // decision point (however it got there: an anchor-recovery cycle, or an earlier plain
+  // journey-replanning substitution) is protected against being re-proposed, not just the
+  // single candidate named by the most recent one-shot nudge.
+  const persistentExhaustedAtFingerprint = state.getExhaustedCandidates(computeDecisionPointFingerprint(observation));
+  if (state.pendingAlternativeExploration || persistentExhaustedAtFingerprint.size > 0) {
+    const exhaustedIds = new Set<string>([
+      ...(state.pendingAlternativeExploration?.exhaustedCandidateIds ?? []),
+      ...persistentExhaustedAtFingerprint.keys(),
+    ]);
     const proposedCandidate = computeCandidateIdentity(decision.action, observation);
-    if (proposedCandidate && exhaustedIds.includes(proposedCandidate.id)) {
+    if (proposedCandidate && exhaustedIds.has(proposedCandidate.id)) {
       const exhaustedRetry = await obtainDecision({ task, state, observation, reasoning });
       decision = exhaustedRetry.decision;
       safetyResult = exhaustedRetry.safetyResult;
       effectiveAction = exhaustedRetry.effectiveAction;
       const retriedCandidate = computeCandidateIdentity(decision.action, observation);
-      if (retriedCandidate && exhaustedIds.includes(retriedCandidate.id)) {
+      if (retriedCandidate && exhaustedIds.has(retriedCandidate.id)) {
         safetyResult = { allowed: false, flags: [...safetyResult.flags, "repeated_exhausted_candidate"] };
         effectiveAction = { type: "stop_blocked" };
         if (task.captureModules.includes("errors")) {
@@ -661,7 +935,37 @@ export async function runStep(params: {
       depthReached: branch.depth,
       result: closureResult,
     });
-    if (task.safety.allowedActions.includes("go_back")) {
+    if (!hasBranchAchievedTargetMilestone(branch)) {
+      pushRouteAttemptDiagnostic({
+        state,
+        branch,
+        stepIndex,
+        status: "route_blocked",
+        progressEvidence: `the reasoning layer's own decision was rejected/fell back (${closureResult})`,
+        terminationReason: closureResult,
+      });
+    }
+    // Zero-hop restore (see docs/architecture.md "One-step-back requirement"): this step's
+    // own pre-dispatch observation (`observation`, taken at the top of this runStep call,
+    // still unchanged here since a stop_blocked decision never carries a click target)
+    // already matches the branch's own decision point -- e.g. a same-document drawer/
+    // half-window candidate that turned out to be a no-op, pushing no browser-history entry
+    // at all -- so forcing a go_back here would actually retreat *past* the anchor (to
+    // whatever page preceded it), not restore it. Checked before ever falling back to the
+    // hop-by-hop go_back sequence below, exactly like the pre-existing
+    // anchorRecoveryEligible zero-hop path (anchorAlreadyAtTarget) this mirrors.
+    if (computeDecisionPointFingerprint(observation) === branch.decisionPointId) {
+      branch.returnStatus = "restored";
+      pushRouteAttemptDiagnostic({ state, branch, stepIndex, status: "anchor_restored" });
+      pushRouteAttemptDiagnostic({ state, branch, stepIndex, status: "candidate_exhausted", terminationReason: closureResult });
+      pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+      state.archiveActiveBranch();
+      state.markAnchorRecovered(branch.decisionPointId, stepIndex);
+      const zeroHopRetry = await obtainDecision({ task, state, observation, reasoning });
+      decision = zeroHopRetry.decision;
+      safetyResult = zeroHopRetry.safetyResult;
+      effectiveAction = zeroHopRetry.effectiveAction;
+    } else if (task.safety.allowedActions.includes("go_back")) {
       branch.returnHopsBudget = branch.depth + 1;
       branch.returnHopsAttempted += 1;
       effectiveAction = { type: "go_back" };
@@ -671,6 +975,7 @@ export async function runStep(params: {
       // return, so the branch is closed unrestored and the existing stop_blocked handling
       // below runs unmodified (effectiveAction is still stop_blocked).
       branch.returnStatus = "restore_failed";
+      pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
       state.archiveActiveBranch();
     }
   }
@@ -710,6 +1015,61 @@ export async function runStep(params: {
     state.backtrackCount < task.limits.maxBacktracks &&
     state.stepCount + 1 < task.limits.maxSteps;
 
+  // Milestone-anchored recovery (see core/recoveryAnchors.ts and docs/architecture.md
+  // "Milestone-anchored recovery"): whenever journey replanning would otherwise fire, prefer
+  // a bounded, verified restore toward the nearest useful recovery anchor over an
+  // unconstrained go_back. Only ever considered when journeyReplanningEligible already holds
+  // (every one of its own guards still applies unchanged) and at least one recovery anchor
+  // exists -- state.recoveryAnchors stays empty for any run that has not yet satisfied a
+  // required criterion, so this adds zero behavioural change for that case; the existing,
+  // unconstrained journeyReplanningAttempted path below remains the fallback whenever no
+  // anchor is available or every available anchor's own bounded budget is exhausted.
+  const currentFingerprintForRecovery = journeyReplanningEligible ? computeDecisionPointFingerprint(observation) : undefined;
+  const candidateRecoveryAnchor: RecoveryAnchor | undefined = journeyReplanningEligible
+    ? (state.activeAnchorRestore &&
+      !state.exhaustedAnchorFingerprints.has(state.activeAnchorRestore.anchor.decisionPointFingerprint)
+        ? state.activeAnchorRestore.anchor
+        : selectRecoveryAnchor({ anchors: state.recoveryAnchors, excludeFingerprints: state.exhaustedAnchorFingerprints }))
+    : undefined;
+  const anchorAlternativeBudgetAvailable = candidateRecoveryAnchor
+    ? state.getAlternativeExplorationAttempts(candidateRecoveryAnchor.decisionPointFingerprint) < alternativeCandidateBudget
+    : false;
+  const anchorAlreadyAtTarget = Boolean(
+    candidateRecoveryAnchor && currentFingerprintForRecovery === candidateRecoveryAnchor.decisionPointFingerprint,
+  );
+  // Per-anchor hop ceiling (independent of, and tighter than, MAX_ANCHOR_RESTORE_HOPS_TOTAL's
+  // whole-run budget): if a specific anchor cannot be reached within a small, fixed number of
+  // hops, further hops toward it are not attempted -- it is excluded going forward (below)
+  // rather than silently retried forever.
+  const priorHopsForCandidateAnchor =
+    candidateRecoveryAnchor && state.activeAnchorRestore?.anchor.decisionPointFingerprint === candidateRecoveryAnchor.decisionPointFingerprint
+      ? state.activeAnchorRestore.hopsAttempted
+      : 0;
+  const PER_ANCHOR_HOP_LIMIT = 3;
+  const anchorHopBudgetAvailable =
+    priorHopsForCandidateAnchor < PER_ANCHOR_HOP_LIMIT && state.anchorRestoreHopsAttempted < MAX_ANCHOR_RESTORE_HOPS_TOTAL;
+  const anchorRecoveryEligible =
+    journeyReplanningEligible &&
+    Boolean(candidateRecoveryAnchor) &&
+    anchorAlternativeBudgetAvailable &&
+    (anchorAlreadyAtTarget || anchorHopBudgetAvailable);
+  // A candidate anchor this run cannot use right now (its own alternative-candidate budget
+  // or hop ceiling is exhausted) is excluded from selectRecoveryAnchor on every subsequent
+  // trigger, so a later attempt reaches for the next-older anchor instead of retrying a
+  // known-unusable one -- never an automatic jump straight to the very first anchor while a
+  // closer one simply hasn't been tried yet.
+  if (
+    journeyReplanningEligible &&
+    candidateRecoveryAnchor &&
+    !anchorRecoveryEligible &&
+    !state.exhaustedAnchorFingerprints.has(candidateRecoveryAnchor.decisionPointFingerprint)
+  ) {
+    state.exhaustedAnchorFingerprints.add(candidateRecoveryAnchor.decisionPointFingerprint);
+    if (state.activeAnchorRestore?.anchor.decisionPointFingerprint === candidateRecoveryAnchor.decisionPointFingerprint) {
+      state.activeAnchorRestore = undefined;
+    }
+  }
+
   if (!safetyResult.allowed && task.captureModules.includes("errors")) {
     const limitFlags = new Set(["max_steps", "max_backtracks", "max_duration", "loop_detected"]);
     const category: ErrorCategory = safetyResult.flags.some((flag) => limitFlags.has(flag))
@@ -737,16 +1097,112 @@ export async function runStep(params: {
   // `decision` text and safetyFlags) purely for diagnostics -- captured here, before a
   // successful override replaces effectiveAction, so those diagnostics can still say what
   // was actually blocked.
-  const journeyReplanningAttempted = journeyReplanningEligible;
+  const journeyReplanningAttempted = journeyReplanningEligible && !anchorRecoveryEligible;
   const blockedDecisionWasProposedDirectly = decision.action.type === "stop_blocked";
-  if (journeyReplanningAttempted) {
+  const originalDecisionRationale = decision.rationale;
+  let anchorHopAttempted = false;
+  let anchorRetryAttempted = false;
+
+  if (anchorRecoveryEligible && candidateRecoveryAnchor) {
+    const targetFingerprint = candidateRecoveryAnchor.decisionPointFingerprint;
+
+    if (anchorAlreadyAtTarget) {
+      // Zero-hop restore (see docs/architecture.md "One-step-back requirement"): the
+      // current decision point already *is* the anchor -- e.g. a same-document drawer/
+      // half-window that added no browser-history entry at all -- so no go_back is
+      // dispatched. Ask the reasoning layer again instead, with this anchor's own
+      // persistent exhausted-candidate history guaranteed visible (see obtainDecision
+      // below), in place of the stop_blocked this step would otherwise have ended on.
+      // Whatever candidate this produces is not itself tracked as a "route" here -- see
+      // the entry-detection block further below, which starts genuine multi-step route
+      // tracking (reusing Goal-Directed Bounded Branch Exploration) for whatever this
+      // retry's own dispatched action turns out to be.
+      anchorRetryAttempted = true;
+      state.activeAnchorRestore = undefined;
+      state.markAnchorRecovered(targetFingerprint, stepIndex);
+      state.recoveryAttemptDiagnostics.push({
+        stepIndex,
+        anchorCriterionId: candidateRecoveryAnchor.criterionId,
+        anchorMilestoneOrder: candidateRecoveryAnchor.milestoneOrder,
+        targetFingerprint,
+        hopsAttempted: 0,
+        hopsBudget: 0,
+        restored: true,
+      });
+      const anchorRetry = await obtainDecision({ task, state, observation, reasoning });
+      decision = anchorRetry.decision;
+      safetyResult = anchorRetry.safetyResult;
+      effectiveAction = anchorRetry.effectiveAction;
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "safety_guard_stop",
+          severity: "info",
+          pageUrl: observation.url,
+          message:
+            `Milestone-anchored recovery: current decision point already matches the recovery anchor for ` +
+            `"${candidateRecoveryAnchor.criterionId}" (milestone order ${candidateRecoveryAnchor.milestoneOrder}); asked the ` +
+            `reasoning layer again with alternative-candidate context instead of retreating. Original rationale: ${originalDecisionRationale}`,
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
+      if (effectiveAction.type === "stop_blocked") {
+        // No usable candidate emerged even after being told exactly where it is and what
+        // already failed here -- exclude this anchor going forward (bounded by
+        // MAX_ANCHOR_RESTORE_HOPS_TOTAL, reused here as the overall ceiling on *every*
+        // anchor-recovery attempt, hop or retry, across the whole run) so a later trigger
+        // reaches for an older anchor instead of retrying the same unproductive one
+        // forever.
+        state.exhaustedAnchorFingerprints.add(targetFingerprint);
+        state.anchorRestoreHopsAttempted += 1;
+      }
+    } else {
+      anchorHopAttempted = true;
+      const previousHops = priorHopsForCandidateAnchor;
+      state.activeAnchorRestore = { anchor: candidateRecoveryAnchor, hopsAttempted: previousHops + 1, hopsBudget: PER_ANCHOR_HOP_LIMIT };
+      state.anchorRestoreHopsAttempted += 1;
+      effectiveAction = { type: "go_back" };
+      state.recoveryAttemptDiagnostics.push({
+        stepIndex,
+        anchorCriterionId: candidateRecoveryAnchor.criterionId,
+        anchorMilestoneOrder: candidateRecoveryAnchor.milestoneOrder,
+        targetFingerprint,
+        hopsAttempted: previousHops + 1,
+        hopsBudget: PER_ANCHOR_HOP_LIMIT,
+        // Not yet confirmed: this hop's own dispatch outcome, and whether it actually
+        // reached the target fingerprint, are only known on the *next* step (or in the
+        // failure branch just below, for a go_back that failed to execute at all). A
+        // subsequent zero-hop anchorRetryAttempted entry with restored: true is what
+        // confirms successful restoration once it actually happens.
+        restored: false,
+      });
+      if (task.captureModules.includes("errors")) {
+        recordDiagnosticError(captures, {
+          stepIndex,
+          category: "safety_guard_stop",
+          severity: "info",
+          pageUrl: observation.url,
+          actionType: "go_back",
+          message:
+            `Milestone-anchored recovery (hop ${previousHops + 1}/${PER_ANCHOR_HOP_LIMIT}): returning toward the recovery ` +
+            `anchor for "${candidateRecoveryAnchor.criterionId}" (milestone order ${candidateRecoveryAnchor.milestoneOrder}, ` +
+            `page ${candidateRecoveryAnchor.pageUrl}) instead of an unconstrained go_back. Original rationale: ${originalDecisionRationale}`,
+          recoverable: true,
+          stoppedRun: false,
+        });
+      }
+    }
+  } else if (journeyReplanningAttempted) {
     state.journeyReplanningAttempts += 1;
     effectiveAction = { type: "go_back" };
 
     // PR 1C: Alternative Route Exploration -- seeds the one-shot nudge/guard consumed at
     // the top of the *next* runStep call (see the exhausted-candidate-protection block
     // earlier in this function, and docs/architecture.md "Alternative route exploration").
-    // Uses whichever click/navigate candidate this run most recently actually dispatched
+    // Fallback only, for the case with no recovery anchor available at all (see
+    // anchorRecoveryEligible above) -- unchanged from before this corrective pass. Uses
+    // whichever click/navigate candidate this run most recently actually dispatched
     // (state.lastDispatchedRouteCandidate) as "the thing that apparently didn't lead
     // anywhere" -- never *this* step's own decision, since a stop_blocked/low-confidence
     // step never itself dispatches a route candidate. Accumulates across more than one
@@ -766,6 +1222,21 @@ export async function runStep(params: {
       };
     }
   }
+
+  // A zero-hop anchor retry (anchorRetryAttempted) whose own fresh decision is *again*
+  // stop_blocked is not itself the end of this run's recovery: unlike an ordinary
+  // stop_blocked (handled, unconditionally terminal, further below), this means only that
+  // this particular anchor produced nothing usable this time. The anchor was already
+  // excluded (state.exhaustedAnchorFingerprints, above) and one unit of the overall
+  // anchor-recovery ceiling (MAX_ANCHOR_RESTORE_HOPS_TOTAL) already spent -- while that
+  // ceiling still has room, the run is allowed to continue non-terminally: the next
+  // runStep call takes a genuinely fresh observation and either reaches for an older
+  // anchor (selectRecoveryAnchor now excludes this one) or falls back to ordinary,
+  // unconstrained journey replanning. Only once the ceiling itself is exhausted does a
+  // further stop_blocked here fall through to the existing, unconditional terminal
+  // handling below.
+  const anchorRetryStillBlockedWithBudgetRemaining =
+    anchorRetryAttempted && effectiveAction.type === "stop_blocked" && state.anchorRestoreHopsAttempted < MAX_ANCHOR_RESTORE_HOPS_TOTAL;
 
   // Element attributes must be read before the click executes: a click can navigate
   // away, taking the clicked element's DOM node with it.
@@ -960,6 +1431,43 @@ export async function runStep(params: {
   // that was dispatched successfully and without any safety rejection -- entry never
   // changes *which* action gets taken, only whether the engine starts tracking it as a
   // bounded branch afterward.
+  // Milestone-anchored recovery (corrective pass, see docs/architecture.md "Alternative
+  // route exploration -- complete route following"): a second, independently-budgeted entry
+  // gate alongside the pre-existing ambiguity heuristic below. Entry here means a candidate
+  // is genuinely *followed* as a multi-step route (reusing every downstream mechanism
+  // above: depth budget, consecutive-no-progress/dead-end detection, milestone-progress
+  // continuation, fingerprint-verified return) rather than only dispatched once and left
+  // unobserved -- see this corrective pass's own investigation report for why a bare click
+  // was not sufficient. Deliberately checked at every ordinary dispatch (not only
+  // immediately after an anchor-restore retry): once a branch closes and restores, the very
+  // next ordinary decision that happens to pick a *different*, non-exhausted candidate at
+  // the same recovery-anchored fingerprint re-enters here automatically, which is what lets
+  // candidate B start its own tracked route without any special-cased "start the next
+  // candidate" code.
+  const missingRequiredCriteriaIdsForEntry = getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds);
+  const hasRecoveryAnchorAtThisFingerprint =
+    preDispatchDecisionPointFingerprint !== undefined &&
+    state.recoveryAnchors.some((a) => a.decisionPointFingerprint === preDispatchDecisionPointFingerprint);
+  // Entry-gate fix (corrective pass, discovered via the multilingual-consent fixture): a
+  // recorded anchor existing at this fingerprint is not, by itself, evidence that *this*
+  // dispatch is a recovery attempt -- see RunState.wasAnchorRecoveredThisStep's own doc
+  // comment. Without this check, an entirely ordinary, first-ever, unambiguous click
+  // dispatched from a fingerprint some *earlier* milestone happened to anchor would start
+  // being tracked as a bounded candidate route, leaving it vulnerable to being hijacked by a
+  // later, unrelated stop_blocked as if it were the route that had failed.
+  const viaMilestoneRecoveryEntry =
+    Boolean(preDispatchDecisionPointFingerprint) &&
+    hasRecoveryAnchorAtThisFingerprint &&
+    state.wasAnchorRecoveredThisStep(preDispatchDecisionPointFingerprint as string, stepIndex) &&
+    state.getAlternativeExplorationAttempts(preDispatchDecisionPointFingerprint as string) < alternativeCandidateBudget;
+  const viaAmbiguityEntry =
+    Boolean(preDispatchDecisionPointFingerprint) &&
+    state.getBranchAttempts(preDispatchDecisionPointFingerprint as string) < MAX_CANDIDATE_BUDGET_PER_DECISION_POINT &&
+    isAmbiguousMultiCandidateDecisionPoint({
+      observation,
+      relevanceText: [task.objective, ...task.successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
+    });
+
   if (
     !state.activeBranch &&
     routeCandidate &&
@@ -967,13 +1475,9 @@ export async function runStep(params: {
     safetyResult.allowed &&
     actionResult.success &&
     task.safety.allowedActions.includes("go_back") &&
-    getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length > 0 &&
-    state.getBranchAttempts(preDispatchDecisionPointFingerprint) < MAX_CANDIDATE_BUDGET_PER_DECISION_POINT &&
+    missingRequiredCriteriaIdsForEntry.length > 0 &&
     !state.routeMemory.hasBranchResult(preDispatchDecisionPointFingerprint, routeCandidate.id) &&
-    isAmbiguousMultiCandidateDecisionPoint({
-      observation,
-      relevanceText: [task.objective, ...task.successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
-    })
+    (viaMilestoneRecoveryEntry || viaAmbiguityEntry)
   ) {
     const effectiveMaxDepth = computeEffectiveBranchDepth({
       requestedMaxDepth: DEFAULT_MAX_BRANCH_DEPTH,
@@ -983,6 +1487,17 @@ export async function runStep(params: {
       elapsedMs: Date.now() - state.startedAtMs,
     });
     if (effectiveMaxDepth > 0) {
+      // Prefer the pre-existing "ambiguity" reason when both gates happen to be true at
+      // once (a page that is both recovery-anchored and lexically ambiguous) -- this keeps
+      // every pre-existing ambiguity-triggered scenario's own diagnostics/budget accounting
+      // byte-for-byte unchanged. "milestone_recovery" is reserved for the case ambiguity
+      // does not already justify entry on its own -- exactly the corrective pass's own
+      // target scenario (a dominant, well-labelled candidate that still needs to be
+      // *followed*, not merely dispatched, once recovery has already identified it).
+      const entryReason: BranchRecord["entryReason"] = viaAmbiguityEntry ? "ambiguity" : "milestone_recovery";
+      const anchorForEntry = entryReason === "milestone_recovery"
+        ? state.recoveryAnchors.find((a) => a.decisionPointFingerprint === preDispatchDecisionPointFingerprint)
+        : undefined;
       const branchRecord: BranchRecord = {
         branchId: state.nextBranchId(),
         decisionPointId: preDispatchDecisionPointFingerprint,
@@ -997,8 +1512,23 @@ export async function runStep(params: {
         consecutiveNoProgress: 0,
         returnHopsAttempted: 0,
         returnHopsBudget: 0,
+        entryReason,
+        ...(anchorForEntry ? { recoveryAnchorCriterionId: anchorForEntry.criterionId } : {}),
+        ...(entryReason === "milestone_recovery"
+          ? { targetMilestoneCriterionIds: computeTargetMilestoneCriterionIds(task.successCriteria, missingRequiredCriteriaIdsForEntry) }
+          : {}),
+        consentInterruptionsHandled: 0,
+        routeStartUrl: observation.url,
+        urlsVisited: [observation.url],
+        surfacesOpened: actionResult.surfaceChangeType ? [actionResult.surfaceChangeType] : [],
+        candidateRank: state.nextCandidateRank(preDispatchDecisionPointFingerprint),
       };
       state.startBranch(branchRecord);
+      if (entryReason === "milestone_recovery") {
+        state.incrementAlternativeExplorationAttempts(preDispatchDecisionPointFingerprint);
+        pushRouteAttemptDiagnostic({ state, branch: branchRecord, stepIndex, status: "candidate_selected" });
+        pushRouteAttemptDiagnostic({ state, branch: branchRecord, stepIndex, status: "route_active" });
+      }
       if (task.captureModules.includes("errors")) {
         recordDiagnosticError(captures, {
           stepIndex,
@@ -1007,7 +1537,10 @@ export async function runStep(params: {
           pageUrl: observation.url,
           actionType: effectiveAction.type,
           ...(effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
-          message: `Entering bounded branch "${branchRecord.branchId}" through candidate ${routeCandidate.label} (depth budget ${effectiveMaxDepth}, candidate ${state.getBranchAttempts(preDispatchDecisionPointFingerprint)}/${MAX_CANDIDATE_BUDGET_PER_DECISION_POINT} at this decision point).`,
+          message:
+            entryReason === "milestone_recovery"
+              ? `Milestone-anchored recovery: entering tracked candidate route "${branchRecord.branchId}" through candidate ${routeCandidate.label} (rank ${branchRecord.candidateRank}, depth budget ${effectiveMaxDepth}, alternative-candidate attempt ${state.getAlternativeExplorationAttempts(preDispatchDecisionPointFingerprint)}/${alternativeCandidateBudget} at this decision point).`
+              : `Entering bounded branch "${branchRecord.branchId}" through candidate ${routeCandidate.label} (depth budget ${effectiveMaxDepth}, candidate ${state.getBranchAttempts(preDispatchDecisionPointFingerprint)}/${MAX_CANDIDATE_BUDGET_PER_DECISION_POINT} at this decision point).`,
           recoverable: true,
           stoppedRun: false,
         });
@@ -1033,6 +1566,38 @@ export async function runStep(params: {
     actionResult.surfaceChangeDetected === true,
   );
   newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
+
+  // Milestone-anchored recovery (see core/recoveryAnchors.ts and docs/architecture.md
+  // "Milestone-anchored recovery"): the moment a required criterion first becomes
+  // satisfied, record enough about *this* decision point to recognise or restore it later
+  // -- the connective tissue PR 1D's own truthful milestone evidence never had to recovery
+  // logic (see loop.ts's activeAnchorRestore handling below). Deliberately re-observes the
+  // page fresh here rather than reusing this step's own `observation` variable: that
+  // variable still reflects the page state from *before* this step's own action dispatched
+  // (evaluateSuccessCriteria's post-action call, just above, reads the live page directly
+  // for its own pass/fail judgement, but never refreshes `observation` itself) -- a
+  // milestone satisfied as a direct result of this step's own action (e.g. a click that
+  // both selects an item and opens its own half-window, the exact production shape this
+  // corrective pass targets) would otherwise be anchored to the *pre*-click decision point,
+  // silently missing every control the action itself just revealed. Only paid when at
+  // least one criterion actually became satisfied this step -- never on the common,
+  // no-new-milestone step.
+  if (newlySatisfied.length > 0) {
+    const postActionObservationForAnchors = await buildObservation(page);
+    for (const criterionId of newlySatisfied) {
+      const evidenceRecord = [...state.milestoneEvidence].reverse().find((r) => r.criterionId === criterionId);
+      state.recoveryAnchors.push(
+        buildRecoveryAnchor({
+          criterionId,
+          criteria: task.successCriteria,
+          stepIndex,
+          observation: postActionObservationForAnchors,
+          evidenceTier: evidenceRecord?.evidenceTier ?? "inferred",
+          sequence: state.nextRecoveryAnchorSequence(),
+        }),
+      );
+    }
+  }
 
   // Route-progress classification fix (see CLAUDE.md and docs/architecture.md "Route
   // progress classification", requirement E): a successful click/navigate candidate's
@@ -1133,34 +1698,69 @@ export async function runStep(params: {
   const stepLog = buildStepLog({
     stepIndex,
     observation,
-    decision: journeyReplanningAttempted
-      ? `Bounded journey replanning (attempt ${state.journeyReplanningAttempts}/${MAX_JOURNEY_REPLANNING_ATTEMPTS}): substituting go_back for a stop_blocked action ${
-          blockedDecisionWasProposedDirectly ? "proposed by the reasoning layer" : "substituted by the safety layer for a rejected decision"
-        }, to try an alternate path before giving up. Original rationale: ${decision.rationale}`
-      : branchReturnAttempted
-        ? `Bounded branch closed (${branchClosureResultForLog}): substituting go_back for a stop_blocked action to return to the branch's original decision point. Original rationale: ${decision.rationale}`
-        : decision.rationale,
+    decision: anchorHopAttempted
+      ? `Milestone-anchored recovery (hop ${state.activeAnchorRestore?.hopsAttempted ?? 0}/${state.activeAnchorRestore?.hopsBudget ?? 0} ` +
+        `toward the recovery anchor for "${candidateRecoveryAnchor?.criterionId}"): returning to the last-proven decision point instead ` +
+        `of an unconstrained go_back. Original rationale: ${originalDecisionRationale}`
+      : anchorRetryAttempted
+        ? `Milestone-anchored recovery: already at the recovery anchor for "${candidateRecoveryAnchor?.criterionId}" (milestone order ` +
+          `${candidateRecoveryAnchor?.milestoneOrder}); tried a different candidate instead of retreating (alternative-candidate attempt ` +
+          `${candidateRecoveryAnchor ? state.getAlternativeExplorationAttempts(candidateRecoveryAnchor.decisionPointFingerprint) : 0}/` +
+          `${alternativeCandidateBudget}). Original rationale: ${originalDecisionRationale}`
+        : journeyReplanningAttempted
+          ? `Bounded journey replanning (attempt ${state.journeyReplanningAttempts}/${MAX_JOURNEY_REPLANNING_ATTEMPTS}): substituting go_back for a stop_blocked action ${
+              blockedDecisionWasProposedDirectly ? "proposed by the reasoning layer" : "substituted by the safety layer for a rejected decision"
+            }, to try an alternate path before giving up. Original rationale: ${originalDecisionRationale}`
+          : branchReturnAttempted
+            ? `Bounded branch closed (${branchClosureResultForLog}): substituting go_back for a stop_blocked action to return to the branch's original decision point. Original rationale: ${decision.rationale}`
+            : decision.rationale,
     selectedAction: effectiveAction,
     actionResult,
     satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
     successCriteria: task.successCriteria,
-    safetyFlags: journeyReplanningAttempted
-      ? [...safetyResult.flags, "journey_replanning_attempted"]
-      : branchReturnAttempted
-        ? [...safetyResult.flags, "branch_return_attempted"]
-        : stopSuccessRejected
-          ? [
-              ...safetyResult.flags,
-              "required_criteria_unsatisfied",
-              ...(noProgressDetected ? ["no_progress_detected"] : []),
-            ]
-          : safetyResult.flags,
+    safetyFlags: anchorHopAttempted
+      ? [...safetyResult.flags, "milestone_anchor_restore_attempted"]
+      : anchorRetryAttempted
+        ? [...safetyResult.flags, "milestone_anchor_alternative_candidate_attempted"]
+        : journeyReplanningAttempted
+          ? [...safetyResult.flags, "journey_replanning_attempted"]
+          : branchReturnAttempted
+            ? [...safetyResult.flags, "branch_return_attempted"]
+            : stopSuccessRejected
+              ? [
+                  ...safetyResult.flags,
+                  "required_criteria_unsatisfied",
+                  ...(noProgressDetected ? ["no_progress_detected"] : []),
+                ]
+              : safetyResult.flags,
     reObservationAttempted,
     recoveryAttempts,
   });
   recordJourneyPathEntry(captures, task.captureModules, stepLog);
 
-  if (journeyReplanningAttempted && !actionResult.success) {
+  if (anchorRetryStillBlockedWithBudgetRemaining) {
+    // This candidate attempt did not pan out, but this anchor's own bounded budget still
+    // has room for another -- see the comment above anchorRetryStillBlockedWithBudgetRemaining.
+    // Non-terminal: the outer loop (core/engine.ts) calls runStep again, which starts with a
+    // brand-new buildObservation and re-triggers this same anchor-recovery block.
+    return { stepLog };
+  }
+
+  if ((journeyReplanningAttempted || anchorHopAttempted) && !actionResult.success) {
+    if (anchorHopAttempted && candidateRecoveryAnchor) {
+      state.recoveryAttemptDiagnostics.push({
+        stepIndex,
+        anchorCriterionId: candidateRecoveryAnchor.criterionId,
+        anchorMilestoneOrder: candidateRecoveryAnchor.milestoneOrder,
+        targetFingerprint: candidateRecoveryAnchor.decisionPointFingerprint,
+        hopsAttempted: state.activeAnchorRestore?.hopsAttempted ?? priorHopsForCandidateAnchor + 1,
+        hopsBudget: PER_ANCHOR_HOP_LIMIT,
+        restored: false,
+        failureReason: "go_back_failed",
+      });
+      state.exhaustedAnchorFingerprints.add(candidateRecoveryAnchor.decisionPointFingerprint);
+      state.activeAnchorRestore = undefined;
+    }
     // The substituted go_back itself failed to execute (e.g. no browser history entry was
     // actually available despite visitedUrls suggesting one) -- fall through to the same
     // blocked outcome the original stop_blocked action would have produced, rather than the
@@ -1240,6 +1840,82 @@ export async function runStep(params: {
   }
 
   return { stepLog };
+}
+
+/**
+ * One bounded per-candidate summary row (TaskResponse.diagnostics.alternativeExploration.
+ * candidates -- see types/recovery.ts's AlternativeCandidateAttemptDiagnostic), pushed once
+ * a "milestone_recovery"-entered branch's outcome is final (i.e. immediately before every
+ * state.archiveActiveBranch() call for such a branch). Distinct from, and coarser than,
+ * pushRouteAttemptDiagnostic's own full transition-by-transition trace: this is the "at a
+ * glance" summary a caller not interested in the full route lifecycle can use instead. A
+ * silent no-op for any other branch (entryReason "ambiguity", or one with no result yet),
+ * so every archiveActiveBranch() call site can call this unconditionally.
+ */
+function pushAlternativeCandidateDiagnostic(params: { state: RunState; branch: BranchRecord; stepIndex: number; budget: number }): void {
+  const { state, branch, stepIndex, budget } = params;
+  if (branch.entryReason !== "milestone_recovery" || !branch.recoveryAnchorCriterionId || !branch.result) {
+    return;
+  }
+  const progressResult: RouteMemoryOutcome =
+    branch.result === "success" || branch.result === "goal_progress"
+      ? "advanced"
+      : branch.result === "plausible_progress" || branch.result === "neutral_progress"
+        ? "no_change"
+        : branch.result === "blocked" || branch.result === "unsafe"
+          ? "blocked"
+          : "failed";
+  state.alternativeCandidateDiagnostics.push({
+    anchorFingerprint: branch.decisionPointId,
+    anchorCriterionId: branch.recoveryAnchorCriterionId,
+    candidateId: branch.candidateId,
+    candidateLabel: branch.candidateLabel,
+    stepIndex,
+    progressResult,
+    attemptNumber: branch.candidateRank,
+    budget,
+  });
+}
+
+/**
+ * Complete-route-exploration proof (corrective pass, see CLAUDE.md and
+ * docs/architecture.md "Alternative route exploration -- complete route following"): one
+ * lifecycle-transition record per call, for a "milestone_recovery"-entered branch only (an
+ * "ambiguity"-entered branch's own, pre-existing diagnostics -- captures.errors text,
+ * routeMemory branchResult -- are unaffected and unchanged). A silent no-op for any other
+ * branch, so every existing call site can call this unconditionally without its own
+ * entryReason check.
+ */
+function pushRouteAttemptDiagnostic(params: {
+  state: RunState;
+  branch: BranchRecord;
+  stepIndex: number;
+  status: RouteStatus;
+  progressEvidence?: string;
+  terminationReason?: string;
+}): void {
+  const { state, branch, stepIndex, status, progressEvidence, terminationReason } = params;
+  if (branch.entryReason !== "milestone_recovery" || !branch.recoveryAnchorCriterionId) {
+    return;
+  }
+  state.routeAttemptDiagnostics.push({
+    anchorFingerprint: branch.decisionPointId,
+    anchorCriterionId: branch.recoveryAnchorCriterionId,
+    candidateId: branch.candidateId,
+    candidateLabel: branch.candidateLabel,
+    candidateRank: branch.candidateRank,
+    routeStartStepIndex: branch.entryStepIndex,
+    routeStartUrl: branch.routeStartUrl,
+    stepIndex,
+    status,
+    urlsVisited: [...branch.urlsVisited],
+    surfacesOpened: [...branch.surfacesOpened],
+    milestoneStateBefore: [...branch.satisfiedCriteriaIdsAtEntry],
+    milestoneStateAtTransition: [...state.satisfiedCriteriaIds],
+    ...(progressEvidence ? { progressEvidence } : {}),
+    consentInterruptionsHandled: branch.consentInterruptionsHandled,
+    ...(terminationReason ? { terminationReason } : {}),
+  });
 }
 
 function buildStepLog(params: {
@@ -1341,6 +2017,17 @@ async function obtainDecision(params: {
   const decisionPointFingerprint = computeDecisionPointFingerprint(observation);
   const triedCandidates = state.routeMemory.getTriedCandidates(decisionPointFingerprint);
 
+  // Alternative Route Exploration (corrective pass, see docs/architecture.md "Alternative
+  // route exploration"): the persistent, per-fingerprint exhausted-candidate set -- unlike
+  // the legacy one-shot pendingAlternativeExploration nudge below (kept only as the
+  // no-anchor fallback's own context), this is consulted on *every* decision at this
+  // fingerprint for as long as any candidate here remains exhausted, guaranteeing the model
+  // is told which candidates already failed rather than only for the single decision right
+  // after the substitution that discovered it. Labels are resolved from Route Memory (the
+  // same store that already tracks a label per candidate id at this fingerprint).
+  const exhaustedAtFingerprint = state.getExhaustedCandidates(decisionPointFingerprint);
+  const exhaustedLabelsAtFingerprint = [...exhaustedAtFingerprint.values()];
+
   // Goal-Directed Bounded Branch Exploration: milestones reuses existing successCriteria
   // (see computeMilestoneRollup, core/successEvaluator.ts) as the objective's milestones --
   // never a second, parallel milestone system. branch is present only while a branch is
@@ -1381,9 +2068,11 @@ async function obtainDecision(params: {
     ...(triedCandidates.length > 0 ? { routeMemory: triedCandidates } : {}),
     milestones: milestoneRollup,
     ...(branchContext ? { branch: branchContext } : {}),
-    ...(state.pendingAlternativeExploration
-      ? { alternativeExploration: { justFailedLabels: state.pendingAlternativeExploration.exhaustedCandidateLabels } }
-      : {}),
+    ...(exhaustedLabelsAtFingerprint.length > 0
+      ? { alternativeExploration: { justFailedLabels: exhaustedLabelsAtFingerprint } }
+      : state.pendingAlternativeExploration
+        ? { alternativeExploration: { justFailedLabels: state.pendingAlternativeExploration.exhaustedCandidateLabels } }
+        : {}),
   });
 
   const safetyResult = validateDecision({

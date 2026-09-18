@@ -3,6 +3,7 @@ import type { ConsentInteractionPolicy } from "../types/task-request.js";
 import { CONSENT_CONTROL_INTENTS } from "../types/consentControl.js";
 import type { InteractiveElement, PromptElementSelectionDiagnostic } from "../types/task-response.js";
 import { objectiveRelevanceScore } from "../discovery/relevance.js";
+import { assessConsentSurface, classifyConsentControlPolarity } from "../safety/consentClassifier.js";
 
 /**
  * Plain-language instruction for this run's consentInteractionPolicy (see
@@ -164,6 +165,22 @@ const MAX_CONTAINER_SPAN = 8;
 // `limit + MAX_GROUP_ADDITIONS`, never unbounded.
 const MAX_GROUP_ADDITIONS = 10;
 
+// Candidate-selection redesign (corrective pass, see CLAUDE.md and docs/architecture.md
+// "The 40-element limit"): a bounded, separate top-up pass, applied *after* the existing
+// relevance/structural selection above, that guarantees inclusion of any element strongly
+// matching the currently-unresolved milestone specifically (not just the whole objective +
+// every criterion's text blended together, which selectPromptInteractiveElements's existing
+// `relevant` tier already uses and which a single unresolved milestone's own wording can
+// still lose out to under the fixed STRUCTURAL_RESERVE_FRACTION split). Reuses the same
+// MIN_DOMINANT_RELEVANCE_SCORE-style threshold core/branchExploration.ts already uses for
+// "is this a genuinely strong, not merely incidental, lexical match" -- an independently
+// chosen value for this different scorer, not the same literal constant reused blindly.
+// Bounded by MAX_GUARANTEED_INCLUSION_ADDITIONS so this can never itself become an
+// unbounded expansion -- the adaptive cap the task requires stays a small, fixed ceiling,
+// never "send everything".
+const GUARANTEED_INCLUSION_MIN_SCORE = 0.5;
+const MAX_GUARANTEED_INCLUSION_ADDITIONS = 10;
+
 /**
  * Walks outward from `anchorIndex` through the *natural* contiguous run of zero-relevance,
  * not-yet-selected elements surrounding it (see MAX_CONTAINER_SPAN's doc comment above for
@@ -304,6 +321,7 @@ function selectPromptInteractiveElements(
   relevanceText: string,
   limit: number,
   hasActiveDialog: boolean,
+  activeMilestoneText?: string,
 ): { selected: readonly InteractiveElement[]; diagnostic: PromptElementSelectionDiagnostic } {
   if (elements.length <= limit) {
     return {
@@ -314,6 +332,8 @@ function selectPromptInteractiveElements(
         relevantSelectedCount: 0,
         structuralSelectedCount: elements.length,
         excludedRelevantCount: 0,
+        guaranteedInclusionCount: 0,
+        truncationStrategy: "none",
         selected: elements.map((el) => ({ id: el.id, accessibleName: el.accessibleName, reason: "structural" })),
       },
     };
@@ -375,9 +395,34 @@ function selectPromptInteractiveElements(
     }
   }
 
-  const selected = [...relevantTaken, ...structuralTaken, ...neighborsTaken].sort((a, b) => a.index - b.index);
+  const preGuaranteedSelected = [...relevantTaken, ...structuralTaken, ...neighborsTaken].sort((a, b) => a.index - b.index);
+  const preGuaranteedIndices = new Set(preGuaranteedSelected.map((s) => s.index));
+  const excludedRelevant = relevant.filter((s) => !preGuaranteedIndices.has(s.index));
+
+  // Guaranteed-inclusion top-up (see MAX_GUARANTEED_INCLUSION_ADDITIONS above): elements
+  // strongly matching the specific, currently-unresolved milestone that the ordinary
+  // relevance/structural budgets above still dropped. Applied on top of, never instead of,
+  // everything already selected -- this can only add elements, never remove one already
+  // chosen for another reason.
+  const guaranteedTaken: ScoredElement[] = [];
+  if (activeMilestoneText) {
+    for (const s of scored) {
+      if (guaranteedTaken.length >= MAX_GUARANTEED_INCLUSION_ADDITIONS) {
+        break;
+      }
+      if (preGuaranteedIndices.has(s.index)) {
+        continue;
+      }
+      if (objectiveRelevanceScore(activeMilestoneText, s.el.accessibleName) >= GUARANTEED_INCLUSION_MIN_SCORE) {
+        guaranteedTaken.push(s);
+      }
+    }
+  }
+  const guaranteedIndices = new Set(guaranteedTaken.map((s) => s.index));
+
+  const selected = [...preGuaranteedSelected, ...guaranteedTaken].sort((a, b) => a.index - b.index);
   const selectedIndices = new Set(selected.map((s) => s.index));
-  const excludedRelevant = relevant.filter((s) => !selectedIndices.has(s.index));
+  const stillOmittedRelevant = excludedRelevant.filter((s) => !selectedIndices.has(s.index));
 
   return {
     selected: selected.map((s) => s.el),
@@ -386,11 +431,20 @@ function selectPromptInteractiveElements(
       selectedCount: selected.length,
       relevantSelectedCount: relevantTaken.length,
       structuralSelectedCount: structuralTaken.length + neighborsTaken.length,
-      excludedRelevantCount: excludedRelevant.length,
+      excludedRelevantCount: stillOmittedRelevant.length,
+      guaranteedInclusionCount: guaranteedTaken.length,
+      truncationStrategy: "relevance+structural-reserve+container-groups+guaranteed-milestone-match",
+      ...(stillOmittedRelevant.length > 0
+        ? {
+            omissionReason:
+              "relevant candidate ranked below the reserved structural budget and did not clear the " +
+              "guaranteed-inclusion threshold against the active milestone",
+          }
+        : {}),
       selected: selected.map((s) => ({
         id: s.el.id,
         accessibleName: s.el.accessibleName,
-        reason: takenIndices.has(s.index) ? "relevant" : "structural",
+        reason: takenIndices.has(s.index) ? "relevant" : guaranteedIndices.has(s.index) ? "relevant" : "structural",
       })),
     },
   };
@@ -480,6 +534,12 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     consentInteractionPolicyClause(consentInteractionPolicy) +
     " " +
     consentControlIntentClause() +
+    " When \"currentPage\" includes \"consentControls\", those entries are the engine's own " +
+    "independent, deterministic classification (from visible text/role, never a selector) of " +
+    "which currently-visible controls are accept-all/decline/settings-purposed consent " +
+    "controls -- consult it as corroborating evidence for consentControlIntent above, and " +
+    "note that the engine verifies your choice against this same classification " +
+    "independently of what you report. " +
     " When more than one visible control could " +
     "plausibly apply, choose the one whose semantic purpose most specifically matches the " +
     "objective/successCriteria wording (for example: prefer whichever of a " +
@@ -518,7 +578,38 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     [objective, ...successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
     MAX_INTERACTIVE_ELEMENTS,
     Boolean(observation.activeDialog),
+    milestones?.activeSubGoal?.description,
   );
+
+  // Candidate-selection redesign (see CLAUDE.md and docs/architecture.md "The 40-element
+  // limit", requirement 5): consent controls are surfaced as their own clearly-labelled
+  // category, using the same deterministic, generic DOM-pattern classification the engine
+  // itself now independently verifies a consent action against (src/safety/
+  // consentClassifier.ts) -- never a second, model-facing wordlist. Computed over every
+  // candidate element (not just the ones selectPromptInteractiveElements happened to keep),
+  // so a consent control can never be crowded out of this category by an unrelated page's
+  // worth of other controls; bounded implicitly (a real consent surface offers a handful of
+  // controls, never hundreds). Purely additive labelling -- every consent control listed
+  // here is still also a normal, selectable entry in interactiveElements when it survived
+  // that selection; this category exists so the model (and a diagnostics reader) can find
+  // it without having to re-derive polarity from label text itself.
+  // Gated on assessConsentSurface's own genuine-surface check (consent-context evidence
+  // *and* a real accept/decline-or-settings choice shape) -- never a bare per-element label
+  // match. Without this gate, an unrelated control whose label happens to contain a short
+  // polarity word (e.g. "Allow location access") would be mislabelled as a consent control
+  // with no corroborating page context at all -- exactly the false-positive risk this
+  // module's own doc comment on classifyConsentControlPolarity warns against trusting on
+  // its own.
+  const consentSurfaceAssessment = assessConsentSurface(observation);
+  const consentControls = consentSurfaceAssessment.surfaceDetected
+    ? observation.interactiveElements
+        .filter((el) => el.visible !== false && !el.disabled)
+        .map((el) => {
+          const classified = classifyConsentControlPolarity(el.accessibleName);
+          return classified ? { id: el.id, label: el.accessibleName, polarity: classified.polarity } : undefined;
+        })
+        .filter((c): c is { id: string; label: string; polarity: "accept_all" | "decline" | "settings" } => Boolean(c))
+    : [];
 
   const payload = {
     objective,
@@ -541,6 +632,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
       notableText: (observation.notableText ?? []).slice(0, MAX_NOTABLE_TEXT),
       ...(observation.progressIndicatorText ? { progressIndicatorText: observation.progressIndicatorText } : {}),
       ...(observation.activeDialog ? { activeDialog: observation.activeDialog } : {}),
+      ...(consentControls.length > 0 ? { consentControls } : {}),
       interactiveElements: interactiveElements.map((el) => ({
         id: el.id,
         type: el.role,

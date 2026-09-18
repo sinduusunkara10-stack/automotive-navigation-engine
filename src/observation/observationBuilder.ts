@@ -130,10 +130,27 @@ function scanInteractiveElements({
   let excludedDisplayNoneCount = 0;
   let excludedVisibilityHiddenCount = 0;
 
-  const scanned = elements.map((el, index) => {
+  // Element-identity fix (corrective pass, see CLAUDE.md "Fix the element-ID collision at
+  // its source"): a fallback id must never be derived from this scan's own array position
+  // (the previous scheme's `el-${index}`) -- once an earlier-scanned element at that same
+  // position is removed from the DOM (a closed drawer, a dismissed banner), a later scan's
+  // *unrelated* new element can land at that same index and be assigned that now-unused id,
+  // letting a stale reference from an earlier observation silently resolve to the wrong
+  // control. A monotonically increasing counter, stored on `window` (so it is naturally
+  // scoped per frame -- each frame has its own global -- with zero extra bookkeeping here)
+  // and never decremented or reused, guarantees a freshly-assigned id can never coincide
+  // with one ever handed out before in this frame, no matter what gets removed or reordered
+  // in between. An element that already carries the attribute (i.e. was scanned before and
+  // still exists) always keeps that same id, unaffected by this counter -- identity for an
+  // already-known control remains exactly as stable as before this fix.
+  const idCounterKey = "__navEngineNextElementId";
+  const idCounterHost = window as unknown as Record<string, number>;
+  const scanned = elements.map((el) => {
     let id = el.getAttribute(attr);
     if (!id) {
-      id = `el-${index}`;
+      const nextIndex = typeof idCounterHost[idCounterKey] === "number" ? idCounterHost[idCounterKey] : 0;
+      id = `el-${nextIndex}`;
+      idCounterHost[idCounterKey] = nextIndex + 1;
       el.setAttribute(attr, id);
     }
     const role = el.getAttribute("role") ?? el.tagName.toLowerCase();
@@ -359,6 +376,16 @@ export async function buildObservation(page: Page): Promise<Observation> {
   // docs/architecture.md for why this deliberately does not reach into child frames yet.
   const activeDialog = await page.evaluate(scanActiveDialog, DIALOG_SELECTOR);
 
+  // Multilingual consent handling (corrective pass, see CLAUDE.md and docs/architecture.md
+  // "Consent behaviour -- multilingual"): the page's own declared language
+  // (<html lang="...">), read verbatim and normalised only to its primary subtag (e.g.
+  // "fr-FR" -> "fr") -- one of the several independent signals
+  // src/safety/consentClassifier.ts combines (alongside structural surface shape and
+  // language-aware wording) rather than relying on wording alone. Never itself a
+  // translation or a guess at page content; absent when the page declares no language.
+  const rawHtmlLang = await page.evaluate(() => document.documentElement.lang || undefined);
+  const pageLanguage = rawHtmlLang?.trim().toLowerCase().split("-")[0] || undefined;
+
   return {
     url: page.url(),
     title: await page.title(),
@@ -368,6 +395,7 @@ export async function buildObservation(page: Page): Promise<Observation> {
     ...(inaccessibleFrameOrigins.length > 0 ? { inaccessibleFrameOrigins } : {}),
     elementDiscoveryDiagnostics,
     ...(activeDialog ? { activeDialog } : {}),
+    ...(pageLanguage ? { pageLanguage } : {}),
   };
 }
 
