@@ -38,6 +38,7 @@ import {
 import type { ActionAnalytics, ActionResult } from "../types/task-response.js";
 import { MAIN_SURFACE_ID, type RunState } from "./state.js";
 import { detectClosedAdoptedSurfaces, returnToParentSurface } from "./surfaceReturn.js";
+import { shouldEnterInDocumentSurface, shouldLeaveInDocumentSurface } from "./inDocumentSurface.js";
 import {
   DEFAULT_MAX_BRANCH_DEPTH,
   MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
@@ -122,22 +123,30 @@ function readPendingAlternativeExploration(state: RunState): RunState["pendingAl
   return state.pendingAlternativeExploration;
 }
 
+/** Drawer/modal formalization (Phase 3 PR 5): the id prefix core/state.ts's nextInDocumentSurfaceId always uses -- see withActiveSurface below. */
+const IN_DOCUMENT_SURFACE_ID_PREFIX = "in_document-";
+
 /**
  * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and
  * docs/architecture.md "Active surface tracking"): attaches Observation.activeSurface,
  * derived from state.activeSurface, onto every observation this loop builds -- the single
  * place that mapping happens, so every call site below stays byte-for-byte identical to a
- * plain buildObservation(page) except for this one added field. As of PR 2, state.activeSurface
- * is always MAIN_SURFACE_ID (nothing yet calls RunState.pushSurface), so this always resolves
- * to {kind: "main"} today; the non-"main" branch exists only so PR 3 onward can wire a real
- * adopted surface's identity here without touching any of this function's callers.
+ * plain buildObservation(page) except for this one added field. `"adopted_context"` is a
+ * genuinely separate Page (Phase 3 PR 3); `"in_document"` is a same-document drawer/modal/
+ * side panel (Phase 3 PR 5, core/inDocumentSurface.ts) -- told apart purely by the surface
+ * id's own prefix, never by re-deriving it from the observation itself.
  */
 function withActiveSurface(observation: Observation, state: RunState): Observation {
   const surfaceId = state.activeSurface;
+  if (surfaceId === MAIN_SURFACE_ID) {
+    return { ...observation, activeSurface: { kind: "main" } };
+  }
   return {
     ...observation,
-    activeSurface:
-      surfaceId === MAIN_SURFACE_ID ? { kind: "main" } : { kind: "adopted_context", identity: surfaceId },
+    activeSurface: {
+      kind: surfaceId.startsWith(IN_DOCUMENT_SURFACE_ID_PREFIX) ? "in_document" : "adopted_context",
+      identity: surfaceId,
+    },
   };
 }
 
@@ -230,7 +239,57 @@ export async function runStep(params: {
   // way down to waitForAdaptiveSettle itself.
   const settleCeilingMs = task.settling?.maxSettleMs;
 
-  let observation = withActiveSurface(await buildObservation(page), state);
+  const rawObservation = await buildObservation(page);
+
+  // Drawer/modal formalization (Phase 3 PR 5, see CLAUDE.md and docs/architecture.md
+  // "Drawer/modal formalization"): decided from this step's own fresh observation, before
+  // withActiveSurface wraps it below, so a drawer/modal that just appeared (or just closed)
+  // is reported as "in_document" (or back to "main") starting on this exact step -- never a
+  // step late. Only one level deep: a drawer opening from within an already-tracked
+  // in_document surface is out of scope (see core/inDocumentSurface.ts's own doc comment).
+  const lastRecordedAction = state.actionHistory[state.actionHistory.length - 1];
+  // See RunState.suppressNextInDocumentEntry's own doc comment: consumed (read-and-clear)
+  // exactly once here, immediately after a return from a Page-less in_document surface, so
+  // that return gets one real step on "main" before the same still-visible drawer/modal
+  // evidence would otherwise immediately re-trigger entry.
+  const suppressEntryThisStep = state.consumeSuppressInDocumentEntry();
+  if (
+    !suppressEntryThisStep &&
+    shouldEnterInDocumentSurface({
+      onMain: state.activeSurface === MAIN_SURFACE_ID,
+      activeDialogPresent: Boolean(rawObservation.activeDialog),
+      lastActionSurfaceChangeType: lastRecordedAction?.surfaceChangeType,
+    })
+  ) {
+    const newSurfaceId = state.nextInDocumentSurfaceId();
+    state.pushSurface(newSurfaceId);
+    if (rawObservation.activeDialog) {
+      state.markInDocumentEnteredViaActiveDialog(newSurfaceId);
+    }
+    state.surfaceAdoptionDiagnostics.push({
+      stepIndex,
+      surfaceId: newSurfaceId,
+      event: "adopted",
+      pageUrl: rawObservation.url,
+    });
+  } else if (
+    shouldLeaveInDocumentSurface({
+      activeSurfaceIsInDocument: state.activeSurface.startsWith(IN_DOCUMENT_SURFACE_ID_PREFIX),
+      enteredViaActiveDialog: state.wasInDocumentEnteredViaActiveDialog(state.activeSurface),
+      activeDialogPresent: Boolean(rawObservation.activeDialog),
+    })
+  ) {
+    const leftSurfaceId = state.activeSurface;
+    state.popSurface();
+    state.surfaceAdoptionDiagnostics.push({
+      stepIndex,
+      surfaceId: leftSurfaceId,
+      event: "closed_unexpectedly",
+      pageUrl: rawObservation.url,
+    });
+  }
+
+  let observation = withActiveSurface(rawObservation, state);
   // See RunState.resolveLastActionProgress: fills in observedProgress on the action
   // recorded by the *previous* step, purely by comparing that action's before-state (also
   // just recorded url/title) against this fresh observation -- generic, no extra page
