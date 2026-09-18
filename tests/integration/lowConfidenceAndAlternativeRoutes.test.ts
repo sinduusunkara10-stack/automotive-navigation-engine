@@ -107,7 +107,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
     captureModules: ["errors"],
     limits: { maxSteps: 12, maxBacktracks: 4, maxRepeatedActions: 8 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
     ...overrides,
   };
 }

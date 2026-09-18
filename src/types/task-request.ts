@@ -154,7 +154,7 @@ export interface TaskRequest {
   safety: Safety;
   /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
   settling?: Settling;
-  outputSchemaVersion: "1.20.0";
+  outputSchemaVersion: "1.21.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

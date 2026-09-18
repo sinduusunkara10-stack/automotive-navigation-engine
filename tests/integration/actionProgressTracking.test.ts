@@ -120,7 +120,7 @@ function buildTask(params: { startUrl: string; successUrlPattern: string }): Tas
     captureModules: ["errors"],
     limits: { maxSteps: 6, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 

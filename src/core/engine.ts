@@ -438,7 +438,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.20.0",
+    schemaVersion: "1.21.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -478,6 +478,15 @@ function buildTerminalResponse(params: {
               version: "1.0.0" as const,
               surfaces: state.consentSurfaceDiagnostics,
               consentRetriesUsed: state.consentRetriesUsed,
+            },
+          }
+        : {}),
+      ...(state.surfaceAdoptionDiagnostics.length > 0
+        ? {
+            surfaceAdoption: {
+              version: "1.0.0" as const,
+              attempts: state.surfaceAdoptionDiagnostics,
+              returnAttempts: state.surfaceReturnAttempts,
             },
           }
         : {}),

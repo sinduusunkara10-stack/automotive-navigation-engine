@@ -25,6 +25,16 @@ import type { InteractiveElement, ReasoningProviderDiagnostics } from "../../src
  */
 export type ElementSelector = (element: InteractiveElement) => boolean;
 
+/**
+ * Return-to-parent recovery (Phase 3 PR 4): a queue entry may also be the literal "go_back",
+ * for a test that needs the reasoning layer itself to select go_back directly (acceptance
+ * criterion "recover to parent"), rather than relying on the engine's own internal
+ * journey-replanning/branch-return substitution to produce one. Never consumed unless
+ * go_back is actually an allowedAction, exactly like an ElementSelector is never consumed
+ * unless a matching, visible candidate actually exists.
+ */
+export type ScriptedStep = ElementSelector | "go_back";
+
 export function byAccessibleName(name: string): ElementSelector {
   return (el) => el.accessibleName.trim() === name;
 }
@@ -34,12 +44,12 @@ export function byAccessibleNameAndHeading(name: string, heading: string): Eleme
 }
 
 export class ScriptedReasoningProvider implements ReasoningProvider {
-  private readonly queue: ElementSelector[];
+  private readonly queue: ScriptedStep[];
   private cursor = 0;
   /** Every decision this provider actually produced, for test assertions (e.g. "no candidate was ever found for step N"). */
   readonly decisions: Decision[] = [];
 
-  constructor(queue: ElementSelector[]) {
+  constructor(queue: ScriptedStep[]) {
     this.queue = queue;
   }
 
@@ -79,16 +89,29 @@ export class ScriptedReasoningProvider implements ReasoningProvider {
     }
 
     if (this.cursor < this.queue.length) {
-      const selector = this.queue[this.cursor];
-      const candidate = selector ? observation.interactiveElements.find((el) => el.visible !== false && selector(el)) : undefined;
-      if (candidate && allowedActions.includes("click")) {
-        this.cursor += 1;
-        const decision: Decision = {
-          action: { type: "click", target: candidate.id },
-          rationale: `Scripted step ${this.cursor}: selected "${candidate.accessibleName}"${candidate.nearestHeadingText ? ` (heading "${candidate.nearestHeadingText}")` : ""}.`,
-        };
-        this.decisions.push(decision);
-        return decision;
+      const step = this.queue[this.cursor];
+      if (step === "go_back") {
+        if (allowedActions.includes("go_back")) {
+          this.cursor += 1;
+          const decision: Decision = {
+            action: { type: "go_back" },
+            rationale: `Scripted step ${this.cursor}: go_back.`,
+          };
+          this.decisions.push(decision);
+          return decision;
+        }
+      } else {
+        const selector = step;
+        const candidate = selector ? observation.interactiveElements.find((el) => el.visible !== false && selector(el)) : undefined;
+        if (candidate && allowedActions.includes("click")) {
+          this.cursor += 1;
+          const decision: Decision = {
+            action: { type: "click", target: candidate.id },
+            rationale: `Scripted step ${this.cursor}: selected "${candidate.accessibleName}"${candidate.nearestHeadingText ? ` (heading "${candidate.nearestHeadingText}")` : ""}.`,
+          };
+          this.decisions.push(decision);
+          return decision;
+        }
       }
     }
 

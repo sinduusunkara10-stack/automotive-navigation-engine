@@ -8,6 +8,7 @@ import type {
   RecoveryAnchor,
   RecoveryAttemptDiagnostic,
   RouteAttemptDiagnostic,
+  SurfaceAdoptionAttemptDiagnostic,
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
@@ -442,6 +443,10 @@ export class RunState {
   readonly routeAttemptDiagnostics: RouteAttemptDiagnostic[] = [];
   readonly consentSurfaceDiagnostics: ConsentSurfaceDiagnostic[] = [];
   consentRetriesUsed = 0;
+  /** Full diagnostic history for TaskResponse.diagnostics.surfaceAdoption -- see src/types/recovery.ts and core/surfaceReturn.ts. */
+  readonly surfaceAdoptionDiagnostics: SurfaceAdoptionAttemptDiagnostic[] = [];
+  /** Return-to-parent recovery (Phase 3 PR 4): total go_back-while-off-"main" return attempts this run, successful or not. */
+  surfaceReturnAttempts = 0;
 
   /** 1-based rank counter of distinct candidates tried per recovery-anchor fingerprint, for RouteAttemptDiagnostic.candidateRank -- reset is never needed (a monotonically increasing rank across this anchor's own bounded budget is exactly what "1st/2nd/3rd candidate tried here" means). */
   private readonly candidateRankByFingerprint = new Map<string, number>();
