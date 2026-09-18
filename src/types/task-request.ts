@@ -62,6 +62,19 @@ export interface Limits {
  */
 export type ConsentInteractionPolicy = "reject_optional" | "accept_optional" | "essential_only" | "do_not_interact";
 
+/**
+ * Surface adoption domain policy (Phase 3 PR 2/3 scaffolding, see CLAUDE.md and
+ * docs/architecture.md "Active surface tracking"): only meaningful once
+ * Safety.allowSurfaceAdoption is true and a later PR actually adopts a surface.
+ * "require_allowed_domain" (the default): an adopted surface's own navigation is held to
+ * this run's existing allowedDomains, exactly like the tracked page -- no relaxation at all
+ * for adopted content. "extend_trust_from_landing": an explicit, caller-opted-in relaxation
+ * that additionally trusts the hostname an adopted surface actually lands on (never a
+ * hostname merely referenced/linked, only one actually navigated to), on top of
+ * allowedDomains -- never the default, since it widens what a run may reach.
+ */
+export type SurfaceAdoptionDomainPolicy = "require_allowed_domain" | "extend_trust_from_landing";
+
 export interface Safety {
   allowedActions: ActionType[];
   allowFormSubmission?: boolean;
@@ -80,6 +93,26 @@ export interface Safety {
    * decision point may be given before recovery moves on.
    */
   maxAlternativeCandidatesPerDecisionPoint?: number;
+  /**
+   * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and
+   * docs/architecture.md "Active surface tracking"): explicit opt-in, matching the existing
+   * allowFormSubmission pattern -- a new tab/popup/drawer/modal is never adopted as the
+   * engine's active navigation context for a task that omits or sets this false. Omitted
+   * means false. As of PR 2, setting this true changes nothing yet: no PR before PR 3 wires
+   * an actual adoption path, so this field exists only for schema/validation readiness ahead
+   * of that PR landing.
+   */
+  allowSurfaceAdoption?: boolean;
+  /** See SurfaceAdoptionDomainPolicy above. Only meaningful when allowSurfaceAdoption is true. Omitted means "require_allowed_domain". */
+  surfaceAdoptionDomainPolicy?: SurfaceAdoptionDomainPolicy;
+  /**
+   * Active surface tracking scaffolding (Phase 3 PR 2): non-task-relaxable-upward ceiling on
+   * how many distinct surfaces (beyond the tracked page itself) one run may adopt in total --
+   * same bounded-and-generic pattern as maxAlternativeCandidatesPerDecisionPoint above.
+   * Omitted means the engine's own small fixed default (5). Only meaningful once
+   * allowSurfaceAdoption is true and an adoption path exists (PR 3 onward).
+   */
+  maxAdoptedSurfacesPerRun?: number;
 }
 
 /**
@@ -97,7 +130,7 @@ export interface Settling {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.19.0";
+  schemaVersion: "1.20.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -121,7 +154,7 @@ export interface TaskRequest {
   safety: Safety;
   /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
   settling?: Settling;
-  outputSchemaVersion: "1.18.0";
+  outputSchemaVersion: "1.19.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

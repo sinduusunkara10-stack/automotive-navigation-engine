@@ -35,7 +35,7 @@ import {
   type SuccessCriteriaEvidence,
 } from "./successEvaluator.js";
 import type { ActionAnalytics } from "../types/task-response.js";
-import type { RunState } from "./state.js";
+import { MAIN_SURFACE_ID, type RunState } from "./state.js";
 import {
   DEFAULT_MAX_BRANCH_DEPTH,
   MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
@@ -120,6 +120,25 @@ function readPendingAlternativeExploration(state: RunState): RunState["pendingAl
   return state.pendingAlternativeExploration;
 }
 
+/**
+ * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and
+ * docs/architecture.md "Active surface tracking"): attaches Observation.activeSurface,
+ * derived from state.activeSurface, onto every observation this loop builds -- the single
+ * place that mapping happens, so every call site below stays byte-for-byte identical to a
+ * plain buildObservation(page) except for this one added field. As of PR 2, state.activeSurface
+ * is always MAIN_SURFACE_ID (nothing yet calls RunState.pushSurface), so this always resolves
+ * to {kind: "main"} today; the non-"main" branch exists only so PR 3 onward can wire a real
+ * adopted surface's identity here without touching any of this function's callers.
+ */
+function withActiveSurface(observation: Observation, state: RunState): Observation {
+  const surfaceId = state.activeSurface;
+  return {
+    ...observation,
+    activeSurface:
+      surfaceId === MAIN_SURFACE_ID ? { kind: "main" } : { kind: "adopted_context", identity: surfaceId },
+  };
+}
+
 export interface LoopStepOutcome {
   stepLog: StepLog;
   terminal?: TerminalStatus;
@@ -165,7 +184,7 @@ export async function runStep(params: {
   // way down to waitForAdaptiveSettle itself.
   const settleCeilingMs = task.settling?.maxSettleMs;
 
-  let observation = await buildObservation(page);
+  let observation = withActiveSurface(await buildObservation(page), state);
   // See RunState.resolveLastActionProgress: fills in observedProgress on the action
   // recorded by the *previous* step, purely by comparing that action's before-state (also
   // just recorded url/title) against this fresh observation -- generic, no extra page
@@ -780,7 +799,7 @@ export async function runStep(params: {
     if (!state.lowConfidenceRetriedFingerprints.has(lowConfidenceFingerprint)) {
       state.lowConfidenceRetriedFingerprints.add(lowConfidenceFingerprint);
       await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
-      const freshObservation = await buildObservation(page);
+      const freshObservation = withActiveSurface(await buildObservation(page), state);
       const lowConfidenceRetry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
       observation = freshObservation;
       decision = lowConfidenceRetry.decision;
@@ -912,7 +931,7 @@ export async function runStep(params: {
 
     reObservationAttempted = true;
     recoveryAttempts += 1;
-    const freshObservation = await buildObservation(page);
+    const freshObservation = withActiveSurface(await buildObservation(page), state);
     rememberDestinationUrls(freshObservation);
     const retry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
     observation = freshObservation;
