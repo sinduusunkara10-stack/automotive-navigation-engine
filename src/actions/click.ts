@@ -19,7 +19,13 @@ import {
   type TargetElementSnapshot,
 } from "../observation/observationBuilder.js";
 import { checkNavigationAllowed } from "../safety/index.js";
-import { assessNavigationRecovery, robustGoto, PAGE_SETTLE_DELAY_MS, type RobustGotoOutcome } from "../core/robustNavigation.js";
+import {
+  assessNavigationRecovery,
+  robustGoto,
+  waitForAdaptiveSettle,
+  type RobustGotoOutcome,
+  type SettleOutcome,
+} from "../core/robustNavigation.js";
 import { recordDiagnosticError } from "../capture-modules/errors.js";
 import { adoptPopupForCapture } from "../capture-modules/popupCapture.js";
 
@@ -42,62 +48,15 @@ function safePageUrl(page: Page): string | undefined {
   }
 }
 
-// PR 1C-a (replace fixed timing dependency): once DOM_QUIET_WINDOW_MS has elapsed with no
-// further mutation, the page is considered settled -- never sooner than PAGE_SETTLE_DELAY_MS
-// (so this can never observe a page *earlier* than the fixed wait it replaces did) and never
-// later than CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS regardless of how long mutations continue (the
-// same fixed ceiling this repo's existing settle-wait convention already uses -- see
-// observation/observationBuilder.ts's waitForInteractionSideEffect).
-const DOM_QUIET_WINDOW_MS = 100;
-
-/**
- * Runs entirely inside the browser (a MutationObserver cannot be driven from Node). A plain,
- * standalone top-level function passed directly as the sole evaluate() callback -- safe to
- * write with an inner closure/setTimeout loop here (unlike the nested named function/const
- * bindings observationBuilder.ts's own scan functions must avoid), since this whole function,
- * body and all, is what evaluate() serialises and runs, with no reference to anything outside
- * itself.
- */
-function waitForDomSettle(args: { floorMs: number; quietWindowMs: number; ceilingMs: number }): Promise<void> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    let lastMutation = Date.now();
-    const observer = new MutationObserver(() => {
-      lastMutation = Date.now();
-    });
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-    const check = () => {
-      const now = Date.now();
-      const elapsed = now - start;
-      const quietFor = now - lastMutation;
-      if (elapsed >= args.ceilingMs || (elapsed >= args.floorMs && quietFor >= args.quietWindowMs)) {
-        observer.disconnect();
-        resolve();
-        return;
-      }
-      setTimeout(check, 50);
-    };
-    check();
-  });
-}
-
-/**
- * Replaces the previous unconditional `page.waitForTimeout(PAGE_SETTLE_DELAY_MS)` on the one
- * click path most likely to encounter a drawer/modal/half-window that opens without ever
- * looking intercepted/timed-out to Playwright (see docs/architecture.md's PR 1C-a section):
- * a click that succeeds outright, does not navigate the main frame, and did not open a popup.
- * Bounded, DOM-mutation-aware settle detection -- see waitForDomSettle above -- instead of a
- * single fixed sleep: never faster than today's PAGE_SETTLE_DELAY_MS floor, and never slower
- * than CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS regardless of how long the DOM keeps mutating.
- */
-async function waitForPostClickReadiness(page: Page): Promise<void> {
-  await page
-    .evaluate(waitForDomSettle, {
-      floorMs: PAGE_SETTLE_DELAY_MS,
-      quietWindowMs: DOM_QUIET_WINDOW_MS,
-      ceilingMs: CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS,
-    })
-    .catch(() => undefined);
+// Adaptive settling (see CLAUDE.md and docs/architecture.md "Adaptive settling"): PR 1C-a's
+// original click-only settle wait (previously defined here as waitForDomSettle/
+// waitForPostClickReadiness, capped at CLICK_SIDE_EFFECT_CHECK_TIMEOUT_MS/1000ms) has been
+// generalized into core/robustNavigation.ts's waitForAdaptiveSettle, shared by every settle
+// point in the engine (post-navigation, both click-settle paths below, the low-confidence
+// retry, and popup-adoption settling) with a wider, task-configurable ceiling. See that
+// module for the mechanism itself.
+async function waitForPostClickReadiness(page: Page, ceilingMs?: number): Promise<SettleOutcome> {
+  return waitForAdaptiveSettle(page, { ceilingMs });
 }
 
 export interface ExecuteClickParams {
@@ -117,6 +76,8 @@ export interface ExecuteClickParams {
   // recovery below when the target has gone fully detached and can no longer be read live
   // -- a live read is always preferred when the element is still attached.
   knownDestinationUrl?: string;
+  /** Task-level override for the adaptive settle ceiling (task.settling.maxSettleMs) -- see core/robustNavigation.ts. */
+  settleCeilingMs?: number;
 }
 
 type ClickErrorCategory =
@@ -516,6 +477,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     captureModules,
     reObservationAttempted,
     knownDestinationUrl,
+    settleCeilingMs,
   } = params;
 
   if (!action.target) {
@@ -664,7 +626,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         // ActionResult.surfaceChangeDetected/surfaceChangeType were silently left unset --
         // starving core/loop.ts's low-confidence recovery (gated on exactly that field) of
         // the one signal it needs to recognise this exact situation.
-        await waitForPostClickReadiness(page);
+        const settleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
         const settledSnapshot = await captureInteractionSnapshot(page).catch(() => postClickSnapshot);
         const observedSurfaceChange = classifyObservedSurfaceChange(preClickSnapshot, settledSnapshot);
         const reportableSurfaceChangeType: ObservedSurfaceChangeType | undefined =
@@ -696,6 +658,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
           clickSideEffectDetected: true,
           ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
           ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
+          settleDiagnostic,
         };
       }
     }
@@ -770,11 +733,11 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   }
 
   if (!mainFrameNavigated) {
-    // PR 1C-a (replace fixed timing dependency): bounded, DOM-mutation-aware readiness wait
-    // in place of the previous unconditional PAGE_SETTLE_DELAY_MS sleep -- see
-    // waitForPostClickReadiness above. Applies to every non-navigating click uniformly;
-    // nothing here knows or cares what kind of element was clicked.
-    await waitForPostClickReadiness(page);
+    // PR 1C-a (replace fixed timing dependency), generalized by the Phase 3 adaptive-
+    // settling pass: bounded, DOM-mutation/interactive-element-aware readiness wait in place
+    // of a fixed sleep -- see waitForPostClickReadiness above. Applies to every non-navigating
+    // click uniformly; nothing here knows or cares what kind of element was clicked.
+    const settleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
     // One additional, single lightweight snapshot (no extra polling/wait budget beyond the
     // settle wait just above) so a click that succeeded outright -- never even looking
     // intercepted -- but opened a same-document modal/drawer is still correctly reported as
@@ -808,6 +771,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       resultingUrl: safePageUrl(page) ?? urlBeforeClick,
       ...(sideEffect.detected ? { clickSideEffectDetected: true } : {}),
       ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
+      settleDiagnostic,
     };
   }
 
@@ -839,7 +803,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     return { success: false, error: `click navigation landed outside allowedDomains: ${outcomeUrl}`, resultingUrl: outcomeUrl };
   }
 
-  await page.waitForTimeout(PAGE_SETTLE_DELAY_MS).catch(() => {});
+  const settleDiagnostic = await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
 
   if (recoveredMessage && captureModules.includes("errors")) {
     recordDiagnosticError(captures, {
@@ -855,5 +819,5 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     });
   }
 
-  return { success: true, resultingUrl: outcomeUrl };
+  return { success: true, resultingUrl: outcomeUrl, settleDiagnostic };
 }

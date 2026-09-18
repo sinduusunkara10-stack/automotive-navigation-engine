@@ -2934,3 +2934,106 @@ existing field removed, renamed, or had its meaning changed.
   surface in a further language is reported as `languageAmbiguous` and handled only if a caller
   supplies its own `ConsentAmbiguityResolver`; with none supplied, behaviour degrades to the
   pre-existing reactive `consentPolicyGuard` backstop only, same as an undetected surface always did.
+
+## 24. Adaptive settling (Phase 3 PR 1)
+
+### Problem
+
+Several settle points in the engine used a fixed, unconditional wait rather than watching the page
+for actual readiness:
+
+- `src/core/robustNavigation.ts`'s `robustGoto` waited a flat `PAGE_SETTLE_DELAY_MS` (250ms) after
+  every navigation, whether the page was a static document that painted instantly or a client-side-
+  rendered SPA still mounting content well past that window.
+- `src/actions/click.ts` had its own separate, click-only DOM-mutation-aware settle
+  (`waitForDomSettle`/`waitForPostClickReadiness`, introduced in §19/PR 1C-a) capped at a fixed
+  1000ms ceiling — real, but narrower than genuinely slow transitions (a configurator summary page,
+  a newly-adopted surface still rendering) sometimes need, and not shared with any other settle point.
+- `src/core/loop.ts`'s low-confidence-retry re-observation (§20/PR 1C) and
+  `src/capture-modules/popupCapture.ts`'s popup-adoption capture window (`POPUP_ADOPTION_WINDOW_MS`,
+  1500ms) each used their own flat, unconditional wait.
+
+None of these adapted to how long a given page actually took to settle: a fast page waited the full
+fixed duration for no reason, and a genuinely slow one got no more room than the fixed constant
+allowed.
+
+### Design
+
+`src/core/robustNavigation.ts` now exports a single shared mechanism, `waitForAdaptiveSettle(page,
+config?)`, used by every settle point in the engine. It combines two independent readiness signals,
+both of which must be quiet before the wait resolves early:
+
+- **DOM mutation** — a `MutationObserver` on `document.body` (`childList`/`attributes`, `subtree:
+  true`), the same signal PR 1C-a's original click-only mechanism already used.
+- **Interactive-element count stability** — the number of elements matching the same
+  `INTERACTIVE_SELECTOR` `src/observation/observationBuilder.ts` uses to build the reasoning layer's
+  own observation (now exported so this probe can never drift out of sync with what the model is
+  actually shown). Deliberately a coarse, cheap proxy — element *count* only, not full
+  role+accessibleName identity — since recomputing full identity on every ~50ms poll would be too
+  expensive to run this often; a page that swaps one control for another of the same total count is
+  the one case this proxy misses, left to the next step's ordinary `buildObservation`/decision cycle
+  to catch instead of this settle probe.
+
+The wait never resolves before a fixed floor (`PAGE_SETTLE_DELAY_MS`, 250ms, unchanged from before —
+so a fast page is never slower than it was) and never runs past a ceiling: `DEFAULT_SETTLE_CEILING_MS`
+(3000ms) unless a task overrides it via the new `settling.maxSettleMs` request field, always clamped
+to the hard, non-relaxable `MAX_SETTLE_CEILING_MS` (10000ms — the Phase 3 requirement's own "maximum
+wait of 10 seconds") regardless of what's requested. Both signals must be quiet for
+`SETTLE_QUIET_WINDOW_MS` (100ms) before the wait resolves early as `"quiet_window"`; otherwise it is
+cut off at the ceiling and reported as `"ceiling_reached"`. The outcome (`elapsedMs`, `reason`) is
+surfaced as `SettleDiagnostic` on `actionResult.settleDiagnostic` and mirrored onto
+`steps[].settleDiagnostic`, so a caller can empirically see, per action, whether a given site
+regularly hits the ceiling (evidence that its own `maxSettleMs` should be raised) or consistently
+settles well inside it.
+
+Every settle point now goes through this one function instead of its own bespoke wait:
+
+- `robustGoto` (post-navigation, both the plain-success and the timeout-recovered paths) —
+  threaded through `src/actions/navigate.ts`'s `executeNavigate` and `src/core/initialNavigation.ts`'s
+  one-off preflight navigation (which uses the default ceiling only — deliberately not threaded with a
+  per-task override, to keep this PR's blast radius on the one-off preflight path smaller).
+- `src/actions/click.ts`'s three settle points (the intercepted-recovery/side-effect path, the plain
+  non-navigating success path, and the main-frame-navigated path) — `waitForPostClickReadiness` is now
+  a thin wrapper over `waitForAdaptiveSettle`, and the old local `DOM_QUIET_WINDOW_MS`/
+  `waitForDomSettle` are gone.
+- `src/core/loop.ts`'s low-confidence-retry re-observation wait (§20).
+- `src/capture-modules/popupCapture.ts`'s popup-adoption capture window — the previous fixed
+  `POPUP_ADOPTION_WINDOW_MS` wait is now that settle's ceiling rather than an unconditional delay, so
+  a popup whose analytics activity (which typically fires on load, not near the end of a multi-second
+  wait) and DOM both go quiet early no longer holds the run up for the full fixed duration. This
+  settle result is not surfaced on `ActionResult` — it describes the adopted popup context's own
+  settling, never the tracked page's, and `ActionResult.settleDiagnostic` always describes the
+  tracked page.
+
+`task.settling.maxSettleMs` is resolved once per step in `src/core/loop.ts` (`runStep`) and threaded
+into every `dispatchAction` call that step makes (the reasoning-selected action, the forced consent
+click, and the forced return-hop `go_back`) as `settleCeilingMs`, so one task-level override applies
+uniformly regardless of which settle point actually runs for a given step.
+
+### Relationship with existing systems
+
+This is a strict generalisation, not a new decision-making mechanism: no action-selection, safety, or
+recovery logic changed. Milestone-anchored recovery, alternative route exploration, and consent
+handling are all unaffected — they call the same actions as before, which now simply settle more
+adaptively underneath them. `clickSideEffectDetected`/`surfaceChangeDetected` (§19) and
+`settleDiagnostic` are deliberately independent: the former are click-outcome classifications, the
+latter is purely a timing diagnostic — a click can report `surfaceChangeDetected: true` and a
+`settleDiagnostic.reason` of either value, with no correlation implied either way.
+
+### Schema impact
+
+Additive only, `schemaVersion` `"1.17.0"` → `"1.18.0"` (request `schemaVersion` `"1.18.0"` →
+`"1.19.0"`, `outputSchemaVersion` `"1.17.0"` → `"1.18.0"`): new `$defs/settleDiagnostic`
+(`elapsedMs`, `reason`), referenced by `actionResult.settleDiagnostic` and `stepLog.settleDiagnostic`;
+new request-side `settling.maxSettleMs` (optional, 1–10000). No existing field removed, renamed, or
+had its meaning changed.
+
+### Known limitations
+
+- The interactive-element-count signal is a coarse proxy (count only) — see Design above; a same-count
+  control swap is not itself detected by this probe.
+- The one-off preflight/initial-navigation path benefits from the adaptive mechanism itself but not
+  from a per-task `maxSettleMs` override (scoping decision, see Design above).
+- `MAX_SETTLE_CEILING_MS` (10000ms) is a hard ceiling per individual settle wait, not a run-wide
+  budget — a run with many settle points can still accumulate significant total wait time across
+  a run; `limits.maxDurationSeconds` remains the run-level backstop for that, unchanged.
