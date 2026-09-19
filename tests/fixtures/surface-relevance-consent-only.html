@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cookie Preferences</title>
+  </head>
+  <body>
+    <!--
+      Consent-only-candidate handling (PR 4): a candidate whose only rendered content is a
+      genuine consent surface (a real accept/decline choice, deterministically detected by
+      safety/consentClassifier.ts's assessConsentSurface, unchanged) until "Accept All
+      Cookies" is clicked -- at which point the real, objective-matching content is revealed.
+      The heading's own wording ("vehicle") deliberately gives this page a low-but-not-zero
+      relevance score against tests/integration/consentOnlyCandidate.test.ts's own objective
+      text ("Complete the vehicle finance application...") -- enough to land in the
+      *ambiguous* relevance tier (not a clean "reject"), which is what actually gates PR 4's
+      consent-only handling (see popupCapture.ts's own doc comment on
+      attemptConsentOnlyCandidateResolution for why "ambiguous", not "reject", is the trigger).
+    -->
+    <div id="banner">
+      <h1>Before You Continue With Your Vehicle</h1>
+      <button type="button" id="accept-all">Accept All Cookies</button>
+      <button type="button" id="reject-all">Reject All</button>
+    </div>
+    <script>
+      document.getElementById("accept-all").addEventListener("click", function () {
+        document.getElementById("banner").remove();
+        document.title = "Vehicle Finance Application";
+        var h1 = document.createElement("h1");
+        h1.textContent = "Vehicle Finance Application";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Start Finance Application";
+        document.body.appendChild(h1);
+        document.body.appendChild(button);
+      });
+    </script>
+  </body>
+</html>

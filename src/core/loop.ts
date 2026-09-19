@@ -1455,6 +1455,7 @@ export async function runStep(params: {
         maxAdoptedSurfacesPerRun: task.safety.maxAdoptedSurfacesPerRun,
         ...(relevanceObjectiveText ? { relevanceObjectiveText } : {}),
         ...(relevanceAmbiguityResolver ? { relevanceAmbiguityResolver } : {}),
+        ...(task.safety.consentInteractionPolicy ? { consentInteractionPolicy: task.safety.consentInteractionPolicy } : {}),
       }
     : undefined;
 

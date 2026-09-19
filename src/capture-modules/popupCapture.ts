@@ -1,18 +1,27 @@
 import type { Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
-import type { SurfaceAdoptionDomainPolicy } from "../types/task-request.js";
+import type { ConsentInteractionPolicy, SurfaceAdoptionDomainPolicy } from "../types/task-request.js";
 import { attachGa4NetworkCapture } from "./ga4NetworkEvents.js";
 import { attachDataLayerPushCapture, captureDataLayer } from "./dataLayer.js";
 import { popupContextId } from "./captureContext.js";
 import { POPUP_ADOPTION_WINDOW_MS } from "../config/captureLimits.js";
-import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
+import { waitForAdaptiveSettle, DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS } from "../core/robustNavigation.js";
 import { decideSurfaceAdoption, DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN, type AdoptionRejectionReason } from "../core/surfaceAdoption.js";
 import {
   assessSurfaceRelevance,
   type SurfaceRelevanceAmbiguityResolver,
   type SurfaceRelevanceAssessment,
 } from "../core/surfaceRelevance.js";
+import { assessConsentSurface } from "../safety/consentClassifier.js";
+import { buildObservation, elementLocatorSelector } from "../observation/observationBuilder.js";
+
+// Consent-only-candidate handling (surface-relevance corrective work, PR 4, see CLAUDE.md and
+// docs/architecture.md "Surface adoption"): same fixed, bounded click timeout
+// actions/click.ts's own CLICK_ELEMENT_TIMEOUT_MS uses for an ordinary click -- not exported
+// from there (that module owns the tracked page's own click dispatch), so duplicated here as
+// its own small, independent constant for this module's one deterministic consent click.
+const CONSENT_CANDIDATE_CLICK_TIMEOUT_MS = 5000;
 
 export interface AdoptPopupForCaptureResult {
   /** True when at least one real-time capture (GA4 request or dataLayer push/snapshot) was actually recorded from the adopted popup before it closed. */
@@ -46,6 +55,15 @@ export interface SurfaceAdoptionRequest {
   /** See core/surfaceRelevance.ts's own doc comment -- absent by default, same convention as safety/consentClassifier.ts's ConsentAmbiguityResolver. */
   relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
   /**
+   * Consent-only-candidate handling (PR 4): gates the one, deterministic, policy-approved
+   * consent-resolution attempt against a not-yet-adopted candidate whose only content (at the
+   * point relevance scoring left it unresolved) is a genuine consent surface -- see
+   * adoptOrCapturePopup's own doc comment. Same task.safety.consentInteractionPolicy value
+   * the existing per-step (already-adopted-surface) consent handling already gates on;
+   * "accept_optional" is the only value that ever triggers an interaction here, identically.
+   */
+  consentInteractionPolicy?: ConsentInteractionPolicy;
+  /**
    * Write-only output slot: actions/click.ts sets this the instant a popup from its own
    * click is actually adopted, since the live Page it needs to hand back to core/loop.ts
    * cannot travel through the JSON-serializable ActionResult (see ActionResult.surfaceAdopted,
@@ -71,6 +89,96 @@ export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
    * adoptionRejectedReason's own new "relevance_rejected" value).
    */
   relevanceAssessment?: SurfaceRelevanceAssessment;
+  /**
+   * Present only when the consent-only-candidate path (PR 4) actually ran -- full detail for
+   * diagnostics, same "internal for now, PR 6 wires it onto the wire" treatment as
+   * relevanceAssessment above.
+   */
+  consentOnlyCandidateHandling?: ConsentOnlyCandidateOutcome;
+}
+
+/**
+ * Consent-only-candidate handling (PR 4): what actually happened when the one-shot,
+ * policy-gated consent-resolution attempt below ran. `actionSucceeded: false` means the
+ * candidate proceeds to the normal unresolved/fail-closed relevance handling unchanged --
+ * never retried, never escalated to any other interaction.
+ */
+export interface ConsentOnlyCandidateOutcome {
+  consentSurfaceDetected: boolean;
+  actionAttempted: boolean;
+  actionSucceeded: boolean;
+  /** The relevance verdict after the resettle+rescore that followed a successful action. Absent when no action was attempted/succeeded. */
+  reassessment?: SurfaceRelevanceAssessment;
+}
+
+/**
+ * Consent-only-candidate handling (surface-relevance corrective work, PR 4, see CLAUDE.md and
+ * docs/architecture.md "Surface adoption"): only ever called when core/surfaceRelevance.ts's
+ * own assessment has already run its bounded resettle-and-rescore and optional model-assist
+ * and STILL come back unresolved ("ambiguous" tier, uncertain: true) -- this is the one
+ * additional, narrowly-scoped thing tried before finally failing closed. Distinct from (and
+ * never invoked for) a surface that already has other non-consent content: that case is
+ * handled by ordinary relevance scoring alone, which already sees covered-but-present real
+ * content as soon as it's uncovered. Distinct also from a consent banner appearing on an
+ * *already-adopted* surface -- that's the existing, unchanged, working per-step consent
+ * handling in core/loop.ts.
+ *
+ * Reuses safety/consentClassifier.ts's assessConsentSurface verbatim (no new consent-
+ * detection logic) against a fresh observation of the candidate. When it finds a genuine
+ * surface with an identified accept-all-equivalent control, and
+ * task.safety.consentInteractionPolicy is exactly "accept_optional" (the same existing gate
+ * the per-step handling already uses), exactly one click is dispatched against that specific,
+ * classifier-identified control -- never a reasoning-layer-chosen target, never anything else
+ * on the page. Any other policy value, or the click itself failing, means zero interaction
+ * and the surface proceeds to the normal unresolved/fail-closed handling untouched: never
+ * retried, never escalated to a broader interaction.
+ *
+ * Exported so this specific mechanism can be exercised directly in a focused test, without
+ * needing to first drive a full assessSurfaceRelevance call into the exact ambiguous/
+ * uncertain state that gates it in adoptOrCapturePopup below -- see
+ * tests/integration/consentOnlyCandidate.test.ts.
+ */
+export async function attemptConsentOnlyCandidateResolution(params: {
+  popup: Page;
+  objectiveText: string;
+  settleCeilingMs?: number;
+  ambiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  consentInteractionPolicy?: ConsentInteractionPolicy;
+}): Promise<ConsentOnlyCandidateOutcome> {
+  const { popup, objectiveText, settleCeilingMs, ambiguityResolver, consentInteractionPolicy } = params;
+
+  let consentSurfaceDetected = false;
+  let acceptAllElementId: string | undefined;
+  try {
+    const observation = await buildObservation(popup);
+    const consentAssessment = assessConsentSurface(observation);
+    consentSurfaceDetected = consentAssessment.surfaceDetected;
+    acceptAllElementId = consentAssessment.acceptAllCandidate?.elementId;
+  } catch {
+    return { consentSurfaceDetected: false, actionAttempted: false, actionSucceeded: false };
+  }
+
+  if (!consentSurfaceDetected || !acceptAllElementId) {
+    return { consentSurfaceDetected, actionAttempted: false, actionSucceeded: false };
+  }
+
+  if (consentInteractionPolicy !== "accept_optional") {
+    // Detected, but not policy-approved to act on -- proceeds straight to the unchanged
+    // unresolved/fail-closed relevance verdict the caller already computed.
+    return { consentSurfaceDetected: true, actionAttempted: false, actionSucceeded: false };
+  }
+
+  try {
+    await popup.click(elementLocatorSelector(acceptAllElementId), { timeout: CONSENT_CANDIDATE_CLICK_TIMEOUT_MS });
+  } catch {
+    return { consentSurfaceDetected: true, actionAttempted: true, actionSucceeded: false };
+  }
+
+  const ceilingMs = Math.min(settleCeilingMs ?? DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS);
+  await waitForAdaptiveSettle(popup, { ceilingMs }).catch(() => ({ elapsedMs: 0, reason: "ceiling_reached" as const }));
+
+  const reassessment = await assessSurfaceRelevance({ page: popup, objectiveText, settleCeilingMs, ambiguityResolver });
+  return { consentSurfaceDetected: true, actionAttempted: true, actionSucceeded: true, reassessment };
 }
 
 /**
@@ -220,6 +328,7 @@ export async function adoptOrCapturePopup(params: {
   // construction. Skipped entirely (byte-for-byte prior behaviour) when the caller never set
   // relevanceObjectiveText -- see SurfaceAdoptionRequest's own doc comment.
   let relevanceAssessment: SurfaceRelevanceAssessment | undefined;
+  let consentOnlyCandidateHandling: ConsentOnlyCandidateOutcome | undefined;
   if (surfaceAdoption.relevanceObjectiveText) {
     const budget = surfaceAdoption.maxAdoptedSurfacesPerRun ?? DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN;
     const budgetExhausted = surfaceAdoption.adoptedSurfaceCount >= budget;
@@ -230,9 +339,32 @@ export async function adoptOrCapturePopup(params: {
         settleCeilingMs,
         ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
       });
+
+      // Consent-only-candidate handling (PR 4): only tried once core/surfaceRelevance.ts's
+      // own bounded resettle-and-rescore and optional model-assist have already run and
+      // still come back unresolved -- see attemptConsentOnlyCandidateResolution's own doc
+      // comment.
+      if (relevanceAssessment.tier === "ambiguous" && relevanceAssessment.uncertain) {
+        consentOnlyCandidateHandling = await attemptConsentOnlyCandidateResolution({
+          popup,
+          objectiveText: surfaceAdoption.relevanceObjectiveText,
+          settleCeilingMs,
+          ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
+          consentInteractionPolicy: surfaceAdoption.consentInteractionPolicy,
+        });
+        if (consentOnlyCandidateHandling.reassessment) {
+          relevanceAssessment = consentOnlyCandidateHandling.reassessment;
+        }
+      }
+
       if (!relevanceAssessment.relevant) {
         const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
-        return { ...captureResult, adoptionRejectedReason: "relevance_rejected", relevanceAssessment };
+        return {
+          ...captureResult,
+          adoptionRejectedReason: "relevance_rejected",
+          relevanceAssessment,
+          ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
+        };
       }
     }
   }
@@ -254,9 +386,15 @@ export async function adoptOrCapturePopup(params: {
       adoptedUrl: popupUrl,
       ...(decision.extendedAllowedDomain ? { extendedAllowedDomain: decision.extendedAllowedDomain } : {}),
       ...(relevanceAssessment ? { relevanceAssessment } : {}),
+      ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
     };
   }
 
   const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
-  return { ...captureResult, adoptionRejectedReason: decision.reason, ...(relevanceAssessment ? { relevanceAssessment } : {}) };
+  return {
+    ...captureResult,
+    adoptionRejectedReason: decision.reason,
+    ...(relevanceAssessment ? { relevanceAssessment } : {}),
+    ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
+  };
 }
