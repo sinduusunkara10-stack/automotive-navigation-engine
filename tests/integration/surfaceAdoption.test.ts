@@ -26,14 +26,21 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
   return {
     schemaVersion: "1.20.0",
     taskId: "surface-adoption-test",
-    objective: "Reach the fixture's confirmed-offer page, following any partner tab it opens.",
+    // Deliberately short and vocabulary-matched to these fixtures' own title text
+    // ("Confirmed Partner Offer") -- surface-relevance corrective work, PR 5 (trust-policy
+    // integration): every click now runs core/surfaceRelevance.ts's relevance gate before a
+    // popup can be adopted, so a candidate's content must genuinely overlap the task's own
+    // objective/success-criteria/CTA vocabulary to clear RELEVANCE_ADOPT_THRESHOLD. This is
+    // the fixture-wording pass the approved PR breakdown's own PR 5 acceptance criteria
+    // flagged as a known, explicit regression risk -- see the PR 3/PR 5 boundary reports.
+    objective: "Reach the confirmed partner offer.",
     startUrl,
     allowedDomains: ["127.0.0.1"],
     successCriteria: [
       {
         id: "reached_milestone",
         type: "url_pattern",
-        description: "The current page URL matches the expected milestone fixture.",
+        description: "The partner offer is confirmed.",
         config: { pattern: successPattern },
       },
     ],

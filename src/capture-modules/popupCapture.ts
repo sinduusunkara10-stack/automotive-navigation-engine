@@ -333,31 +333,47 @@ export async function adoptOrCapturePopup(params: {
     const budget = surfaceAdoption.maxAdoptedSurfacesPerRun ?? DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN;
     const budgetExhausted = surfaceAdoption.adoptedSurfaceCount >= budget;
     if (!budgetExhausted) {
-      relevanceAssessment = await assessSurfaceRelevance({
-        page: popup,
-        objectiveText: surfaceAdoption.relevanceObjectiveText,
-        settleCeilingMs,
-        ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
-      });
-
-      // Consent-only-candidate handling (PR 4): only tried once core/surfaceRelevance.ts's
-      // own bounded resettle-and-rescore and optional model-assist have already run and
-      // still come back unresolved -- see attemptConsentOnlyCandidateResolution's own doc
-      // comment.
-      if (relevanceAssessment.tier === "ambiguous" && relevanceAssessment.uncertain) {
-        consentOnlyCandidateHandling = await attemptConsentOnlyCandidateResolution({
-          popup,
+      // Both calls below read the popup's own live DOM across several round trips (title,
+      // body text, interactive-element scans, possibly a resettle) -- long enough that a
+      // popup which closes itself shortly after opening (a real, legitimate site pattern,
+      // e.g. "continue in the original tab") can close mid-assessment. Every other existing
+      // await in this function already tolerates that (waitForLoadState/waitForAdaptiveSettle
+      // both catch internally); gatherSemanticPageSignals/consentClassifier's buildObservation
+      // do not, so this is caught here instead. Falls back to skipping relevance for this one
+      // candidate -- exactly the pre-PR-3 behaviour (proceeds straight to the unchanged
+      // decideSurfaceAdoption call below) -- rather than losing this candidate's adoption
+      // decision (and all of its diagnostics) to a silently-swallowed exception further up
+      // the call stack.
+      try {
+        relevanceAssessment = await assessSurfaceRelevance({
+          page: popup,
           objectiveText: surfaceAdoption.relevanceObjectiveText,
           settleCeilingMs,
           ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
-          consentInteractionPolicy: surfaceAdoption.consentInteractionPolicy,
         });
-        if (consentOnlyCandidateHandling.reassessment) {
-          relevanceAssessment = consentOnlyCandidateHandling.reassessment;
+
+        // Consent-only-candidate handling (PR 4): only tried once core/surfaceRelevance.ts's
+        // own bounded resettle-and-rescore and optional model-assist have already run and
+        // still come back unresolved -- see attemptConsentOnlyCandidateResolution's own doc
+        // comment.
+        if (relevanceAssessment.tier === "ambiguous" && relevanceAssessment.uncertain) {
+          consentOnlyCandidateHandling = await attemptConsentOnlyCandidateResolution({
+            popup,
+            objectiveText: surfaceAdoption.relevanceObjectiveText,
+            settleCeilingMs,
+            ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
+            consentInteractionPolicy: surfaceAdoption.consentInteractionPolicy,
+          });
+          if (consentOnlyCandidateHandling.reassessment) {
+            relevanceAssessment = consentOnlyCandidateHandling.reassessment;
+          }
         }
+      } catch {
+        relevanceAssessment = undefined;
+        consentOnlyCandidateHandling = undefined;
       }
 
-      if (!relevanceAssessment.relevant) {
+      if (relevanceAssessment && !relevanceAssessment.relevant) {
         const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
         return {
           ...captureResult,

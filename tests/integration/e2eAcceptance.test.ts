@@ -28,14 +28,20 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
   return {
     schemaVersion: "1.20.0",
     taskId: "e2e-acceptance-test",
-    objective: "Select the requested option and reach the fixture's confirmation milestone.",
+    // Deliberately short and vocabulary-matched to e2e-newtab-cards.html's own title text
+    // ("Choose a Vehicle -- Confirmation") -- see surfaceAdoption.test.ts's own baseTask
+    // comment for why (surface-relevance corrective work, PR 5). Only test 1 (new tab) below
+    // ever opens a real popup and so is the only one this gate applies to; test 2/2-variant
+    // (drawer/modal) use the Page-less in_document surface path, untouched by relevance
+    // scoring.
+    objective: "Choose a vehicle and reach the confirmation milestone.",
     startUrl,
     allowedDomains: ["127.0.0.1"],
     successCriteria: [
       {
         id: "reached_milestone",
         type: "url_pattern",
-        description: "The current page URL matches the expected milestone fixture.",
+        description: "The confirmation milestone page is reached.",
         config: { pattern: successPattern },
       },
     ],

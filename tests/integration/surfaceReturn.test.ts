@@ -23,14 +23,17 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
   return {
     schemaVersion: "1.20.0",
     taskId: "surface-return-test",
-    objective: "Reach the fixture's milestone page, returning to the original tab if a partner tab leads nowhere.",
+    // Deliberately short and vocabulary-matched to surface-adopt-return-popup.html's own
+    // title text ("Confirmed Partner Deal") -- see surfaceAdoption.test.ts's own baseTask
+    // comment for why (surface-relevance corrective work, PR 5).
+    objective: "Reach the confirmed partner deal.",
     startUrl,
     allowedDomains: ["127.0.0.1"],
     successCriteria: [
       {
         id: "reached_milestone",
         type: "url_pattern",
-        description: "The current page URL matches the expected milestone fixture.",
+        description: "The partner deal is confirmed.",
         config: { pattern: successPattern },
       },
     ],
