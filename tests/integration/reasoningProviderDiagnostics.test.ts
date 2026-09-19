@@ -54,7 +54,7 @@ function buildTask(baseUrl: string): TaskRequest {
     captureModules: ["page_visits"],
     limits: { maxSteps: 5, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 
@@ -102,7 +102,7 @@ test("a full run through a real ClaudeReasoningProvider (fake model client) surf
     const response = await runTask({ page, task, reasoning });
 
     assert.equal(response.status, "success");
-    assert.equal(response.schemaVersion, "1.20.0");
+    assert.equal(response.schemaVersion, "1.21.0");
 
     const diagnostics = response.diagnostics.reasoningProvider;
     assert.ok(diagnostics, "expected diagnostics.reasoningProvider to be present");

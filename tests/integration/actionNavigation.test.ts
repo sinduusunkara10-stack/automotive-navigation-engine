@@ -166,7 +166,7 @@ function buildTask(params: {
     captureModules: ["errors"],
     limits: { maxSteps: 4, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: params.allowedActions },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 

@@ -1,7 +1,12 @@
 import type { ActionType, SelectedAction } from "./actions.js";
 import type { ConsentControlIntent } from "./consentControl.js";
 import type { ConsentInteractionPolicy } from "./task-request.js";
-import type { AlternativeExplorationDiagnostics, ConsentDiagnostics, RecoveryDiagnostics } from "./recovery.js";
+import type {
+  AlternativeExplorationDiagnostics,
+  ConsentDiagnostics,
+  RecoveryDiagnostics,
+  SurfaceAdoptionDiagnostics,
+} from "./recovery.js";
 
 export type RunStatus =
   | "success"
@@ -980,10 +985,17 @@ export interface Diagnostics {
    * when at least one surface was evaluated.
    */
   consent?: ConsentDiagnostics;
+  /**
+   * Surface adoption (see CLAUDE.md and docs/architecture.md "Surface adoption" and
+   * "Return-to-parent recovery"): every adopted-surface lifecycle event this run
+   * (adoption, rejection, return-to-parent, or unexpected closure) -- see
+   * src/types/recovery.ts. Present only when at least one such event occurred.
+   */
+  surfaceAdoption?: SurfaceAdoptionDiagnostics;
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.20.0";
+  schemaVersion: "1.21.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

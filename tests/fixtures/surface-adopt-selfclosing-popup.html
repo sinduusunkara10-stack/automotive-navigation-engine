@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Self-Closing Tab</title>
+    <script>
+      // Simulates a site that closes its own popup once its own flow finishes (e.g. a
+      // "Continue in original tab" pattern) -- never a go_back this engine dispatched, so
+      // it must be detected as an unexpected closure, not driven through returnToParentSurface.
+      // Deferred slightly so the engine's own adoption step (which reads popup.url()) always
+      // observes this document first, exactly like a real such site would still render before
+      // closing itself.
+      setTimeout(() => window.close(), 10);
+    </script>
+  </head>
+  <body>
+    <h1>Self-Closing Tab</h1>
+  </body>
+</html>

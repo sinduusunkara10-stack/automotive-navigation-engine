@@ -250,7 +250,7 @@ function buildTask(params: { startUrl: string; maxSettleMs?: number }): TaskRequ
     limits: { maxSteps: 4, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
     ...(params.maxSettleMs !== undefined ? { settling: { maxSettleMs: params.maxSettleMs } } : {}),
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 

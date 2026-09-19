@@ -55,7 +55,7 @@ function buildTask(baseUrl: string): TaskRequest {
     captureModules: ["page_visits"],
     limits: { maxSteps: 6, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 

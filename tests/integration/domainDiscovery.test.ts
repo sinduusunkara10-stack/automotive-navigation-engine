@@ -49,7 +49,7 @@ function baseTask(startUrl: string, overrides: Partial<TaskRequest> = {}): TaskR
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
     ...overrides,
   };
 }

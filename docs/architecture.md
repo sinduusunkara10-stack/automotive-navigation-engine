@@ -3226,10 +3226,10 @@ Wiring, end to end:
   `lowConfidenceRetriedFingerprints`) already isolate an adopted surface's own recovery state
   from `"main"`'s -- this PR is the first to actually populate a non-`"main"` bucket via real
   use.
-- `go_back` while `activeSurface !== "main"` is deliberately unenforced by this PR: it dispatches
+- `go_back` while `activeSurface !== "main"` was deliberately unenforced by this PR: it dispatched
   against the adopted Page's own browser history exactly like an ordinary `go_back` on `"main"`
-  would, with no verified return-to-parent semantics yet. That is PR 4's own scope
-  ("Return-to-parent recovery") -- see this doc's own changelog once that PR lands.
+  would, with no verified return-to-parent semantics. PR 4 ("Return-to-parent recovery", §27
+  below) is what gives `go_back` off `"main"` its own verified meaning.
 
 ### Schema impact
 
@@ -3241,14 +3241,124 @@ this PR (`"adopted-1"`, `"adopted-2"`, ...) -- the schema shape itself is unchan
 
 ### Known limitations
 
-- No verified return-to-parent: see "Relationship with existing systems" above -- PR 4.
-- An adopted surface closing unexpectedly (site-initiated, or after a form post) is not yet
-  specially handled -- the next `buildObservation`/`dispatchAction` against a closed Page will
-  throw, propagating as an ordinary run failure rather than a clean, diagnosed return to parent.
-  Also PR 4's own scope ("handle unexpected surface closure").
+- No verified return-to-parent, and no handling of an adopted surface closing unexpectedly
+  (site-initiated, or after a form post) -- both addressed by PR 4 ("Return-to-parent recovery",
+  §27 below).
 - GA4/dataLayer real-time capture (`captureModules`) is not re-attached to an adopted surface --
   it continues to work exactly as before for `"main"`, but an adopted surface's own analytics
   activity is not captured while it is active. Milestone/objective evaluation is entirely
   unaffected (it reads the page directly, not `captures`); this is a capture-completeness gap
   only, not tracked for a specific future PR since Phase 3's own scope is navigation, not
   capture-module completeness.
+
+## 27. Return-to-parent recovery (Phase 3 PR 4)
+
+### Problem
+
+PR 3 made adopting a popup/new-tab as the active surface possible, but left two gaps it
+explicitly deferred to this PR (see PR 3's own "Known limitations" above): (1) `go_back` while
+`activeSurface !== "main"` dispatched against the adopted Page's own browser history with no
+verified return-to-parent semantics -- there was no notion of "leave this surface and resume on
+its parent" at all, so a journey that hit a dead end inside an adopted tab, or simply finished
+what it needed there, had no way back; (2) a site that closes its own adopted popup (e.g. a
+"Continue in original tab" pattern, or a completed-flow `window.close()`) would leave the next
+`buildObservation`/`dispatchAction` call operating against an already-closed Page, throwing and
+propagating as an ordinary run failure instead of a diagnosed, recovered return to the parent.
+
+### Design
+
+- `core/surfaceReturn.ts` (new) exports `returnToParentSurface({state, mainPage})`: closes the
+  current (non-`"main"`) surface's own Page if still open (a deliberate go_back-triggered return
+  undoes the adoption, exactly as an ordinary go_back undoes a navigation -- never left dangling
+  in the background), pops it off `RunState`'s surface stack, and verifies the parent surface's
+  own Page is still usable (`isClosed()`, then `url()`). Returns `{restored, poppedSurfaceId,
+  parentSurfaceId, parentUrl?, reason?}`; `reason` is `"parent_closed"` or
+  `"parent_navigation_unverified"` when `restored` is false.
+  - Deliberately **not** fingerprint-based, unlike milestone-anchored recovery's own go_back
+    handling elsewhere in `core/`: popping the surface stack always deterministically returns to
+    the same live parent `Page` object `RunState` already holds a reference to (or the run's own
+    original tracked page, for a surface adopted directly under `"main"`) -- there is no
+    browser-history ambiguity here to resolve by re-observing and matching a fingerprint the way
+    an ordinary `go_back` on `"main"` can have. Verification is therefore just "is the parent Page
+    still open and readable", not "does it look like the page we expect".
+  - Because a single call always resolves in exactly one pop, there is no separate "return hop
+    budget" to bound (unlike milestone-anchored recovery's per-anchor hop ceiling, which exists
+    because repeated blind `go_back` calls on `"main"` can legitimately need several hops and have
+    no other natural stopping point). A return either verifies immediately or it doesn't.
+  - `core/surfaceReturn.ts` also exports `detectClosedAdoptedSurfaces(state)`: called once at the
+    very top of every `runStep`, before `page` is resolved for the step, so the rest of the step
+    never observes/dispatches against an already-closed Page. Pops every closed surface in turn
+    (handling a closed surface sitting beneath another closed one) until it finds one still open,
+    or returns to `"main"`. Never closes anything itself -- the surface is already closed by the
+    time this runs; it only updates `RunState`'s own bookkeeping to match reality.
+- `core/loop.ts` substitutes `returnToParentSurface` for the ordinary `dispatchAction` at every
+  point a `go_back` can be dispatched while `state.activeSurface !== MAIN_SURFACE_ID`: the shared
+  main dispatch site (covering an ordinary reasoning-selected `go_back`, an anchor-hop restore,
+  journey replanning, and a zero-hop branch-closure retry -- every one of those callers just sets
+  `effectiveAction = {type: "go_back"}` and falls through to this one site), and the earlier,
+  separate branch-return dispatch used while a bounded branch is actively closing unproductively.
+  Both sites increment `state.surfaceReturnAttempts` and push a `"returned"`/`"return_failed"`
+  `SurfaceAdoptionAttemptDiagnostic`. On `"main"`, nothing about either site changes -- confirmed
+  by the full pre-existing regression suite passing unchanged, including
+  `milestoneAnchoredRecovery.test.ts` and `branchExploration.test.ts` specifically.
+- `RunState` gained `surfaceAdoptionDiagnostics: SurfaceAdoptionAttemptDiagnostic[]` and
+  `surfaceReturnAttempts: number` (`src/core/state.ts`). PR 3's own adoption/rejection handling in
+  `core/loop.ts` now also pushes into this same array (`"adopted"`/`"rejected"` events), so the
+  full adopt/return lifecycle is visible from one diagnostic channel instead of only from
+  `captures.errors`' free-text entries.
+- `TaskResponse.diagnostics.surfaceAdoption` (new, `src/types/recovery.ts`,
+  `src/types/task-response.ts`): `{version, attempts: SurfaceAdoptionAttemptDiagnostic[],
+  returnAttempts}`, wired into `core/engine.ts`'s `buildTerminalResponse` exactly like
+  `recovery`/`alternativeExploration`/`consent` already are -- present only when at least one
+  adopted-surface lifecycle event occurred this run.
+
+### Relationship with existing systems
+
+- Milestone-anchored recovery's own `go_back` hop budget (`MAX_ANCHOR_RESTORE_HOPS_TOTAL`,
+  per-anchor `PER_ANCHOR_HOP_LIMIT`) and bounded branch exploration's `returnHopsBudget` are
+  entirely unaffected: they still govern how many `go_back` hops a run may spend restoring toward
+  a fingerprint-matched decision point on `"main"`. This PR only changes what a `go_back`
+  dispatched while off `"main"` *means* (leave the adopted surface, verified) -- it never changes
+  when the surrounding recovery/branch logic decides to dispatch one in the first place.
+- Every one of those pre-existing callers (anchor-hop restore, journey replanning, bounded
+  branch-closure return) is therefore return-to-parent-aware for free: none of them had to be
+  taught anything about surfaces, since they all already funnel through the same two dispatch
+  sites this PR intercepts.
+
+### Testing
+
+- `tests/unit/surfaceReturn.test.ts`: pure-logic coverage of `returnToParentSurface` (verified
+  restore to main, verified restore to a nested parent surface, an already-closed child page
+  never re-closed, a closed parent reported as `parent_closed`, a parent whose `url()` throws
+  reported as `parent_navigation_unverified`) and `detectClosedAdoptedSurfaces` (no-op on main
+  and on a still-open surface, a single closed surface popped and reported, a chain of nested
+  closed surfaces unwound down to the first still-open/main surface), using fake Page objects.
+- `tests/integration/surfaceReturn.test.ts`: genuine multi-window Playwright coverage --
+  an explicitly reasoning-selected `go_back` off a freshly adopted surface, returning to the
+  parent tab and continuing on it to the milestone; a genuine dead end inside the adopted
+  surface, where the engine's own journey-replanning fallback (not an explicitly scripted
+  `go_back`) substitutes the return; and a site that closes its own adopted tab
+  (`window.close()`, deferred slightly so adoption still observes it first) before any `go_back`
+  was ever dispatched, recovered via `detectClosedAdoptedSurfaces` rather than
+  `returnToParentSurface`. `tests/helpers/scriptedReasoningProvider.ts` gained a literal
+  `"go_back"` queue-step option for the first of these.
+
+### Schema impact
+
+`schemaVersion` (response) bumped `"1.20.0"` -> `"1.21.0"`; `outputSchemaVersion` (request)
+bumped to match; request `schemaVersion` itself unchanged (no request-contract field changed).
+New: `diagnostics.surfaceAdoption` (`{version, attempts: SurfaceAdoptionAttemptDiagnostic[],
+returnAttempts}`), where each attempt is `{stepIndex, surfaceId, event: "adopted" | "rejected" |
+"returned" | "return_failed" | "closed_unexpectedly", pageUrl?, reason?}`. No existing field
+removed, renamed, or had its meaning changed.
+
+### Known limitations
+
+- GA4/dataLayer real-time capture is still not re-attached to an adopted surface (unchanged from
+  PR 3) -- returning to the parent doesn't newly expose or hide anything here, since that capture
+  gap was already scoped to "while an adopted surface is active", not to how it's left.
+- A return verifies only that the parent Page is open and readable, never that it still shows the
+  page a caller might expect (e.g. the parent could itself have navigated away while the adopted
+  surface was active, for a site that drives both tabs from a shared session). Milestone/success-
+  criteria evaluation on the parent after a return is exactly as tolerant (or not) of that as it
+  already is anywhere else in the engine -- no special-casing was added or is needed.

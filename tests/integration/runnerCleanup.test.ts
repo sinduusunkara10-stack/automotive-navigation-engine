@@ -40,7 +40,7 @@ function buildTask(startUrl: string, allowedDomains: string[]): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 

@@ -35,8 +35,9 @@ import {
   getMissingRequiredCriteriaIds,
   type SuccessCriteriaEvidence,
 } from "./successEvaluator.js";
-import type { ActionAnalytics } from "../types/task-response.js";
+import type { ActionAnalytics, ActionResult } from "../types/task-response.js";
 import { MAIN_SURFACE_ID, type RunState } from "./state.js";
+import { detectClosedAdoptedSurfaces, returnToParentSurface } from "./surfaceReturn.js";
 import {
   DEFAULT_MAX_BRANCH_DEPTH,
   MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
@@ -169,6 +170,35 @@ export async function runStep(params: {
     consentAmbiguityResolver,
     isMemoryThresholdBreached,
   } = params;
+  // Return-to-parent recovery (Phase 3 PR 4, see CLAUDE.md and docs/architecture.md
+  // "Return-to-parent recovery"): unexpected-closure detection -- the site itself may have
+  // closed the active adopted surface's own Page (e.g. window.close() from a "Continue"
+  // button inside it) since the previous step, without this engine ever dispatching a
+  // go_back. Checked before `page` is resolved below, so the rest of this step never
+  // observes/dispatches against an already-closed Page; each closed surface popped this way
+  // is recorded as a "closed_unexpectedly" diagnostic.
+  const closedSurfaces = detectClosedAdoptedSurfaces(state);
+  for (const closed of closedSurfaces) {
+    state.surfaceAdoptionDiagnostics.push({
+      stepIndex: state.stepCount,
+      surfaceId: closed.poppedSurfaceId,
+      event: "closed_unexpectedly",
+    });
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        stepIndex: state.stepCount,
+        category: "safety_guard_stop",
+        severity: "info",
+        pageUrl: params.page.url(),
+        message:
+          `Adopted surface "${closed.poppedSurfaceId}" was found closed (the site itself closed it, ` +
+          `not a go_back this engine dispatched); returned to surface "${closed.parentSurfaceId}".`,
+        recoverable: true,
+        stoppedRun: false,
+      });
+    }
+  }
+
   // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
   // adoption"): every read/write of `page` for the rest of this step -- buildObservation,
   // dispatchAction, evaluateSuccessCriteria, readElementState, all of it -- now resolves
@@ -639,16 +669,36 @@ export async function runStep(params: {
           progressEvidence: `return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget}`,
         });
         const forcedAction: SelectedAction = { type: "go_back" };
-        const returnActionResult = await dispatchAction({
-          page,
-          action: forcedAction,
-          captures,
-          stepIndex,
-          captureModules: task.captureModules,
-          allowedDomains: effectiveAllowedDomains,
-          actionNavigationTimeoutMs,
-          settleCeilingMs,
-        });
+        // Return-to-parent recovery (Phase 3 PR 4): off "main", a go_back means leaving the
+        // adopted surface, never an ordinary browser-history navigation on it -- substitute
+        // returnToParentSurface, which the top-of-function unexpected-closure check and the
+        // shared dispatch site below both also use, so all three go_back paths agree on what
+        // "returning" means once a surface has been adopted. On "main", nothing changes.
+        const returnActionResult =
+          state.activeSurface !== MAIN_SURFACE_ID
+            ? await (async () => {
+                state.surfaceReturnAttempts += 1;
+                const result = await returnToParentSurface({ state, mainPage: params.page });
+                state.surfaceAdoptionDiagnostics.push({
+                  stepIndex,
+                  surfaceId: result.poppedSurfaceId,
+                  event: result.restored ? "returned" : "return_failed",
+                  ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
+                  ...(result.reason ? { reason: result.reason } : {}),
+                });
+                const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+                return returnResult;
+              })()
+            : await dispatchAction({
+                page,
+                action: forcedAction,
+                captures,
+                stepIndex,
+                captureModules: task.captureModules,
+                allowedDomains: effectiveAllowedDomains,
+                actionNavigationTimeoutMs,
+                settleCeilingMs,
+              });
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         if (!returnActionResult.success) {
           branch.returnStatus = "restore_failed";
@@ -1319,22 +1369,44 @@ export async function runStep(params: {
       }
     : undefined;
 
-  const actionResult = await dispatchAction({
-    page,
-    action: effectiveAction,
-    captures,
-    stepIndex,
-    captureModules: task.captureModules,
-    allowedDomains: effectiveAllowedDomains,
-    actionNavigationTimeoutMs,
-    settleCeilingMs,
-    reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
-    knownDestinationUrl:
-      effectiveAction.type === "click" && effectiveAction.target
-        ? knownDestinationUrls.get(effectiveAction.target)
-        : undefined,
-    surfaceAdoption: surfaceAdoptionRequest,
-  });
+  // Return-to-parent recovery (Phase 3 PR 4): every go_back this shared dispatch site ever
+  // sees (an ordinary reasoning-selected go_back, an anchor-hop restore, journey replanning,
+  // or a zero-hop branch-closure return) means "leave the adopted surface" once off "main" --
+  // never an ordinary browser-history navigation on it. Substituted here so all of those
+  // callers get the same verified return behaviour without each needing its own special
+  // case; every other action type, and every go_back while still on "main", dispatches
+  // exactly as before.
+  const actionResult =
+    effectiveAction.type === "go_back" && state.activeSurface !== MAIN_SURFACE_ID
+      ? await (async () => {
+          state.surfaceReturnAttempts += 1;
+          const result = await returnToParentSurface({ state, mainPage: params.page });
+          state.surfaceAdoptionDiagnostics.push({
+            stepIndex,
+            surfaceId: result.poppedSurfaceId,
+            event: result.restored ? "returned" : "return_failed",
+            ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
+            ...(result.reason ? { reason: result.reason } : {}),
+          });
+          const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+          return returnResult;
+        })()
+      : await dispatchAction({
+          page,
+          action: effectiveAction,
+          captures,
+          stepIndex,
+          captureModules: task.captureModules,
+          allowedDomains: effectiveAllowedDomains,
+          actionNavigationTimeoutMs,
+          settleCeilingMs,
+          reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
+          knownDestinationUrl:
+            effectiveAction.type === "click" && effectiveAction.target
+              ? knownDestinationUrls.get(effectiveAction.target)
+              : undefined,
+          surfaceAdoption: surfaceAdoptionRequest,
+        });
 
   // Surface adoption: turns a successful adoption into real RunState -- from the *next*
   // runStep call on, `const page = state.activePage ?? params.page` (top of this function)
@@ -1351,6 +1423,12 @@ export async function runStep(params: {
     if (extendedAllowedDomain) {
       state.extendAllowedDomainForCurrentSurface(extendedAllowedDomain);
     }
+    state.surfaceAdoptionDiagnostics.push({
+      stepIndex,
+      surfaceId: newSurfaceId,
+      event: "adopted",
+      ...(adoptedUrl ? { pageUrl: adoptedUrl } : {}),
+    });
     if (task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
         stepIndex,
@@ -1367,7 +1445,15 @@ export async function runStep(params: {
         stoppedRun: false,
       });
     }
-  } else if (actionResult.adoptionRejectedReason && task.captureModules.includes("errors")) {
+  } else if (actionResult.adoptionRejectedReason) {
+    state.surfaceAdoptionDiagnostics.push({
+      stepIndex,
+      surfaceId: state.activeSurface,
+      event: "rejected",
+      reason: actionResult.adoptionRejectedReason,
+    });
+  }
+  if (actionResult.adoptionRejectedReason && task.captureModules.includes("errors")) {
     recordDiagnosticError(captures, {
       stepIndex,
       category: "safety_guard_stop",

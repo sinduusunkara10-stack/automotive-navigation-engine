@@ -225,3 +225,41 @@ export interface ConsentDiagnostics {
   /** How many of this run's bounded consent-retry allowance were used -- see MAX_CONSENT_RETRIES, core/loop.ts. Never drawn from the navigation alternative-exploration budget. */
   consentRetriesUsed: number;
 }
+
+/**
+ * One bounded diagnostic record per surface-adoption lifecycle event
+ * (TaskResponse.diagnostics.surfaceAdoption.attempts) -- see docs/architecture.md "Surface
+ * adoption" and "Return-to-parent recovery". `event` is deliberately a flat, bounded
+ * vocabulary (never a free-form per-step log) so this array grows at most once per
+ * adoption/return/closure, not once per step:
+ * - "adopted": a popup/new-tab was adopted onto the surface stack (mirrors the
+ *   ActionResult.surfaceAdopted=true case already reported in captures.errors).
+ * - "rejected": a popup was offered but not adopted (domain/budget) -- mirrors
+ *   ActionResult.adoptionRejectedReason.
+ * - "returned": returnToParentSurface (core/surfaceReturn.ts) successfully popped back to
+ *   the parent Page.
+ * - "return_failed": a return-to-parent attempt could not verify the parent surface.
+ * - "closed_unexpectedly": the adopted surface's own Page was found closed
+ *   (page.isClosed()) before any go_back-driven return was attempted.
+ */
+export interface SurfaceAdoptionAttemptDiagnostic {
+  stepIndex: number;
+  surfaceId: string;
+  event: "adopted" | "rejected" | "returned" | "return_failed" | "closed_unexpectedly";
+  /** Set on "adopted"/"returned"/"return_failed" when the relevant page's URL was available. */
+  pageUrl?: string;
+  /** Set on "rejected"/"return_failed" -- see ActionResult.adoptionRejectedReason and ReturnToParentResult.reason. */
+  reason?: "domain_rejected" | "budget_exhausted" | "parent_closed" | "parent_navigation_unverified";
+}
+
+/**
+ * TaskResponse.diagnostics.surfaceAdoption -- see docs/architecture.md "Surface adoption"
+ * and "Return-to-parent recovery". Present only when at least one adopted-surface lifecycle
+ * event (adoption, rejection, return, or unexpected closure) occurred this run.
+ */
+export interface SurfaceAdoptionDiagnostics {
+  version: "1.0.0";
+  attempts: SurfaceAdoptionAttemptDiagnostic[];
+  /** How many return-to-parent hops (go_back-while-off-main) this run made, successful or not. */
+  returnAttempts: number;
+}

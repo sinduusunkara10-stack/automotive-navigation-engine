@@ -193,7 +193,7 @@ function task(startUrl: string): TaskRequest {
       allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       consentInteractionPolicy: "accept_optional",
     },
-    outputSchemaVersion: "1.20.0",
+    outputSchemaVersion: "1.21.0",
   };
 }
 
