@@ -13,7 +13,11 @@ const ELEMENT_ID_ATTR = "data-nav-engine-id";
 // controls a configurator, form, or wizard-style journey routinely uses -- tabs, options,
 // radio/checkbox-style selectors, and submit-style inputs -- none of which is specific to
 // any one site or brand.
-const INTERACTIVE_SELECTOR =
+// Exported so core/robustNavigation.ts's adaptive settle probe (see "Adaptive settling" in
+// docs/architecture.md) can use the exact same candidate set for its interactive-element-
+// stability signal -- never a second, independently-maintained selector that could drift
+// out of sync with what the reasoning layer is actually shown.
+export const INTERACTIVE_SELECTOR =
   'a, button, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"], ' +
   '[role="radio"], [role="checkbox"], input[type="submit"], input[type="button"]';
 // h1-h4 (was h1-h2): a configuration step's own heading is frequently an h3/h4 nested

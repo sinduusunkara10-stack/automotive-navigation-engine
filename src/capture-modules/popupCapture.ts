@@ -5,6 +5,7 @@ import { attachGa4NetworkCapture } from "./ga4NetworkEvents.js";
 import { attachDataLayerPushCapture, captureDataLayer } from "./dataLayer.js";
 import { popupContextId } from "./captureContext.js";
 import { POPUP_ADOPTION_WINDOW_MS } from "../config/captureLimits.js";
+import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
 
 export interface AdoptPopupForCaptureResult {
   /** True when at least one real-time capture (GA4 request or dataLayer push/snapshot) was actually recorded from the adopted popup before it closed. */
@@ -76,9 +77,14 @@ export async function adoptPopupForCapture(params: {
     // Bounded settle window: long enough for an already-in-flight beacon/push to land,
     // short enough not to meaningfully slow down a run that opens several such contexts.
     // Never fails the run if the popup navigates slowly or not at all -- both awaits are
-    // best-effort.
+    // best-effort. Adaptive settling (see CLAUDE.md and docs/architecture.md "Adaptive
+    // settling"): the previous fixed POPUP_ADOPTION_WINDOW_MS wait is now this settle's
+    // ceiling rather than an unconditional delay, so a popup whose beacon/push lands (and
+    // whose DOM goes quiet) well before that window elapses no longer holds the run up for
+    // the full fixed duration -- the common case, since a popup's own analytics activity
+    // typically fires immediately on load, not near the end of a multi-second wait.
     await popup.waitForLoadState("domcontentloaded", { timeout: POPUP_ADOPTION_WINDOW_MS }).catch(() => {});
-    await popup.waitForTimeout(POPUP_ADOPTION_WINDOW_MS).catch(() => {});
+    await waitForAdaptiveSettle(popup, { ceilingMs: POPUP_ADOPTION_WINDOW_MS });
 
     if (wantsDataLayer) {
       const snapshot = await captureDataLayer(popup, stepIndex, { contextId, forcedSource: "popup_context" }).catch(

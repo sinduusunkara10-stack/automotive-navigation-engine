@@ -23,6 +23,8 @@ export interface DispatchParams {
   // Only meaningful for a `click` action -- see ExecuteClickParams in actions/click.ts.
   reObservationAttempted?: boolean;
   knownDestinationUrl?: string;
+  /** Task-level override for the adaptive settle ceiling (task.settling.maxSettleMs) -- see core/robustNavigation.ts. */
+  settleCeilingMs?: number;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
@@ -36,6 +38,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     actionNavigationTimeoutMs,
     reObservationAttempted,
     knownDestinationUrl,
+    settleCeilingMs,
   } = params;
   switch (action.type) {
     case "click":
@@ -49,6 +52,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         captureModules,
         reObservationAttempted,
         knownDestinationUrl,
+        settleCeilingMs,
       });
     case "scroll":
       return executeScroll(page, action);
@@ -65,6 +69,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         captures,
         stepIndex,
         captureModules,
+        settleCeilingMs,
       });
     case "capture":
       return executeCapture(page, captures, stepIndex, captureModules);

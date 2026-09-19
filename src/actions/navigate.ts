@@ -14,6 +14,8 @@ export interface ExecuteNavigateParams {
   captures: Captures;
   stepIndex: number;
   captureModules: CaptureModuleName[];
+  /** Task-level override for the adaptive settle ceiling (task.settling.maxSettleMs). */
+  settleCeilingMs?: number;
 }
 
 /**
@@ -27,7 +29,7 @@ export interface ExecuteNavigateParams {
  * the engine's initial-navigation recovery behaviour, rather than as an action failure.
  */
 export async function executeNavigate(params: ExecuteNavigateParams): Promise<ActionResult> {
-  const { page, action, allowedDomains, timeoutMs, captures, stepIndex, captureModules } = params;
+  const { page, action, allowedDomains, timeoutMs, captures, stepIndex, captureModules, settleCeilingMs } = params;
 
   if (!action.target) {
     return { success: false, error: "navigate action requires a target URL" };
@@ -36,7 +38,7 @@ export async function executeNavigate(params: ExecuteNavigateParams): Promise<Ac
     return { success: false, error: `navigate target is outside allowedDomains: ${action.target}` };
   }
 
-  const outcome = await robustGoto({ page, url: action.target, allowedDomains, timeoutMs });
+  const outcome = await robustGoto({ page, url: action.target, allowedDomains, timeoutMs, settleCeilingMs });
 
   if (outcome.status === "failed") {
     return {
@@ -63,5 +65,5 @@ export async function executeNavigate(params: ExecuteNavigateParams): Promise<Ac
     });
   }
 
-  return { success: true, resultingUrl: outcome.url };
+  return { success: true, resultingUrl: outcome.url, ...(outcome.settleDiagnostic ? { settleDiagnostic: outcome.settleDiagnostic } : {}) };
 }

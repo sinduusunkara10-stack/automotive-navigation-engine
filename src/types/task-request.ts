@@ -82,8 +82,22 @@ export interface Safety {
   maxAlternativeCandidatesPerDecisionPoint?: number;
 }
 
+/**
+ * Adaptive settling (see CLAUDE.md and docs/architecture.md "Adaptive settling"): optional
+ * per-task override for how long the engine's post-navigation/post-click settle wait may
+ * run before giving up on the page ever going quiet. Every settle point in the engine
+ * (navigate, click, low-confidence re-observation, popup-adoption capture) uses the same
+ * value. Omitted means the engine default (src/core/robustNavigation.ts's
+ * DEFAULT_SETTLE_CEILING_MS). Never itself a way around any other safety control, and
+ * always clamped to the hard, non-relaxable MAX_SETTLE_CEILING_MS (10000ms) regardless of
+ * what's requested here.
+ */
+export interface Settling {
+  maxSettleMs?: number;
+}
+
 export interface TaskRequest {
-  schemaVersion: "1.18.0";
+  schemaVersion: "1.19.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -105,7 +119,9 @@ export interface TaskRequest {
   captureModules: CaptureModuleName[];
   limits: Limits;
   safety: Safety;
-  outputSchemaVersion: "1.17.0";
+  /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
+  settling?: Settling;
+  outputSchemaVersion: "1.18.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

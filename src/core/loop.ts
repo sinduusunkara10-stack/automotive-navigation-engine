@@ -18,7 +18,7 @@ import { classifyActionFailure, recordDiagnosticError } from "../capture-modules
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import type { RouteMemoryOutcome } from "../types/routeMemory.js";
-import { PAGE_SETTLE_DELAY_MS } from "./robustNavigation.js";
+import { waitForAdaptiveSettle } from "./robustNavigation.js";
 import {
   buildRecoveryAnchor,
   computeCriterionOrder,
@@ -157,6 +157,13 @@ export async function runStep(params: {
   // around maxSteps/maxBacktracks/the other safety controls, which remain independently
   // enforced regardless of this value.
   const alternativeCandidateBudget = task.safety.maxAlternativeCandidatesPerDecisionPoint ?? MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR;
+  // Adaptive settling (see CLAUDE.md and docs/architecture.md "Adaptive settling"): resolved
+  // once per step and threaded into every settle point below (dispatchAction's own
+  // navigate/click settling, and this step's own low-confidence-retry re-observation wait),
+  // so a task.settling.maxSettleMs override applies uniformly regardless of which settle
+  // point actually runs. undefined (the common case) means "use the engine default" all the
+  // way down to waitForAdaptiveSettle itself.
+  const settleCeilingMs = task.settling?.maxSettleMs;
 
   let observation = await buildObservation(page);
   // See RunState.resolveLastActionProgress: fills in observedProgress on the action
@@ -309,6 +316,7 @@ export async function runStep(params: {
         captureModules: task.captureModules,
         allowedDomains: task.allowedDomains,
         actionNavigationTimeoutMs,
+        settleCeilingMs,
       });
       state.recordAction(forcedAction, { url: observation.url, title: observation.title }, consentActionResult.surfaceChangeType);
       // Verify the click was attributable to that control and the surface actually closed
@@ -604,6 +612,7 @@ export async function runStep(params: {
           captureModules: task.captureModules,
           allowedDomains: task.allowedDomains,
           actionNavigationTimeoutMs,
+          settleCeilingMs,
         });
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         if (!returnActionResult.success) {
@@ -770,7 +779,7 @@ export async function runStep(params: {
     const lowConfidenceFingerprint = computeDecisionPointFingerprint(observation);
     if (!state.lowConfidenceRetriedFingerprints.has(lowConfidenceFingerprint)) {
       state.lowConfidenceRetriedFingerprints.add(lowConfidenceFingerprint);
-      await page.waitForTimeout(PAGE_SETTLE_DELAY_MS).catch(() => {});
+      await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
       const freshObservation = await buildObservation(page);
       const lowConfidenceRetry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
       observation = freshObservation;
@@ -1265,6 +1274,7 @@ export async function runStep(params: {
     captureModules: task.captureModules,
     allowedDomains: task.allowedDomains,
     actionNavigationTimeoutMs,
+    settleCeilingMs,
     reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
     knownDestinationUrl:
       effectiveAction.type === "click" && effectiveAction.target
@@ -1957,6 +1967,7 @@ function buildStepLog(params: {
     ...(safetyFlags.length > 0 ? { safetyFlags } : {}),
     ...(reObservationAttempted ? { reObservationAttempted } : {}),
     ...(recoveryAttempts > 0 ? { recoveryAttempts } : {}),
+    ...(actionResult.settleDiagnostic ? { settleDiagnostic: actionResult.settleDiagnostic } : {}),
   };
 }
 

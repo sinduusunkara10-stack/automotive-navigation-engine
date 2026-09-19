@@ -133,6 +133,23 @@ export interface ElementDiscoveryDiagnostics {
   shadowHostCount: number;
 }
 
+/**
+ * Adaptive settling (see CLAUDE.md and docs/architecture.md "Adaptive settling"): the
+ * outcome of one bounded wait for the page to go quiet after an action or navigation,
+ * computed by src/core/robustNavigation.ts's waitForAdaptiveSettle. `elapsedMs` is always
+ * <= the effective ceiling used for that wait (task.settling?.maxSettleMs when the task
+ * set one, else the engine default, itself always <= the hard 10s cap). "quiet_window":
+ * the page went quiet (no DOM mutations, no change in interactive-element count) for the
+ * configured window before the ceiling was reached -- the common, fast-page case.
+ * "ceiling_reached": the page never quieted and the wait was cut off at the ceiling --
+ * worth surfacing distinctly since it's the signal a caller would use to decide whether a
+ * task-level ceiling override is warranted for a given site.
+ */
+export interface SettleDiagnostic {
+  elapsedMs: number;
+  reason: "quiet_window" | "ceiling_reached";
+}
+
 export interface ActionResult {
   success: boolean;
   error?: string;
@@ -216,6 +233,16 @@ export interface ActionResult {
   surfaceChangeDetected?: boolean;
   /** Present only when surfaceChangeDetected is true, naming which heuristic matched: "dialog_appeared", "dialog_changed", or "layer_panel_appeared". Purely explanatory. */
   surfaceChangeType?: string;
+  /**
+   * Adaptive settling (see SettleDiagnostic above): present whenever this action ran a
+   * settle wait against the tracked page at all -- every navigate, and every click that
+   * doesn't fail before dispatch. Absent for an action type that never settles (scroll,
+   * wait, go_back, capture, the stop_* actions) and for a click that opens a popup/new
+   * context (that context's own bounded capture window settles independently -- see
+   * src/capture-modules/popupCapture.ts -- and is never reported here, since this field
+   * always describes the tracked page's own settle wait).
+   */
+  settleDiagnostic?: SettleDiagnostic;
 }
 
 export interface Progress {
@@ -247,6 +274,8 @@ export interface StepLog {
    * when no recovery cycle ran.
    */
   recoveryAttempts?: number;
+  /** Mirrors ActionResult.settleDiagnostic for this step's dispatched action -- see its own doc comment. */
+  settleDiagnostic?: SettleDiagnostic;
 }
 
 export interface PageVisitCapture {
@@ -904,7 +933,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.17.0";
+  schemaVersion: "1.18.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
