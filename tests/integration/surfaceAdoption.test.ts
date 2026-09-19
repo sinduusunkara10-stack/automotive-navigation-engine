@@ -89,6 +89,46 @@ test("adopt -> single click -> milestone (window.open() popup mechanism)", async
   }
 });
 
+test("pages() reconciliation never double-claims a popup the \"popup\" event already claimed (regression: dedup, PR 2)", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/surface-adopt-source-winopen.html`,
+      successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+      safety: {
+        allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+        allowSurfaceAdoption: true,
+      },
+    });
+    // The popup opens immediately on click, well before the first 250ms reconciliation poll
+    // tick -- so the "popup" event claims it first, and every subsequent poll tick (the
+    // popup stays open for the rest of this multi-step journey, well past 250ms) observes the
+    // exact same, already-claimed Page. If the dedup guard in click.ts's claimPopupCandidate
+    // were missing or broken, this would show up as more than one adoption event and/or more
+    // than one distinct adopted-surface identity for what is genuinely a single popup.
+    const reasoning = new ScriptedReasoningProvider([byAccessibleName("Open Offer Tab"), byAccessibleName("Confirm Offer")]);
+
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "success");
+    const adoptionSteps = response.steps.filter((s) => s.actionResult.surfaceAdopted === true);
+    assert.equal(adoptionSteps.length, 1, "expected exactly one adoption event for one popup, even though reconciliation kept polling it");
+    const identities = new Set(
+      response.steps
+        .filter((s) => s.observation.activeSurface?.kind === "adopted_context")
+        .map((s) => s.observation.activeSurface?.identity),
+    );
+    assert.deepEqual([...identities], ["adopted-1"], "expected exactly one distinct adopted-surface identity, not a duplicate");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
 test("adopt -> popup opened after a delay past the old 250ms window is still detected while the page stays visibly active (regression: delayed surface detection, PR 1)", async () => {
   const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
   const browser = await chromium.launch();
@@ -129,8 +169,7 @@ test("adopt -> popup opened after a delay past the old 250ms window is still det
 });
 
 test(
-  "adopt -> popup opened after a delay with NO other page activity is still missed by PR 1 alone (documents the known remaining gap; closed by PR 2's pages() reconciliation, not yet implemented)",
-  { skip: "Expected to fail until PR 2 (browserContext.pages() reconciliation) lands -- see click.ts's own PR 1 doc comment for why this case is out of PR 1's scope." },
+  "adopt -> popup opened after a delay with NO other page activity is still detected via pages() reconciliation (regression: the exact gap PR 1 alone left open, closed by PR 2)",
   async () => {
     const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
     const browser = await chromium.launch();
@@ -147,9 +186,11 @@ test(
       });
       // No correlated DOM activity on the tracked page while the popup's own 1500ms timer
       // runs -- domSettleProbe exits early (quiet_window, ~250ms) well before the popup
-      // opens, the popup listener is torn down at that point, and the popup is missed. This
-      // is the exact shape of the real production evidence that originally surfaced the
-      // detection gap (a same-document, zero-DOM-change result before the tab appeared).
+      // opens, so PR 1's listener-extension alone (tied to that same early exit) would still
+      // miss it. This is the exact shape of the real production evidence that originally
+      // surfaced the detection gap (a same-document, zero-DOM-change result before the tab
+      // appeared). PR 2's pages()-reconciliation polls independently of DOM quietness and
+      // catches it instead.
       const reasoning = new ScriptedReasoningProvider([
         byAccessibleName("Open Offer Tab (Delayed, Quiet)"),
         byAccessibleName("Confirm Offer"),
