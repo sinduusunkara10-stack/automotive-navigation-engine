@@ -239,6 +239,63 @@ test("REGRESSION: disabled, ariaState, and progressIndicatorText -- added to Obs
 });
 
 // ---------------------------------------------------------------------------------------
+// Nested/repeated-control disambiguation (Phase 3 PR 3, see CLAUDE.md and
+// docs/architecture.md "Surface adoption"): observation/observationBuilder.ts's
+// nearestHeadingText already disambiguates route-memory candidate *identity* for a
+// repeated-label control (core/routeMemory.ts's buildClickIdentityKey), but that identity
+// was never itself shown to the reasoning layer -- two visually identical "Select"
+// buttons under different cards previously looked completely indistinguishable in this
+// exact payload, with nothing to tell the model which one to pick. These tests prove
+// nearestHeadingText now reaches the prompt payload verbatim when present, and stays
+// absent (never null/empty string) when it isn't, exactly matching every other optional
+// per-element field's own convention (disabled/ariaState/covered above).
+// ---------------------------------------------------------------------------------------
+
+test("nearestHeadingText reaches the prompt payload verbatim, letting the model tell repeated same-label controls apart", () => {
+  const context = buildTestReasoningContext({
+    observation: {
+      url: "https://example-fictional-oem.test/configurator/offers",
+      title: "Offers",
+      interactiveElements: [
+        { id: "el-0", role: "button", accessibleName: "Select", visible: true, nearestHeadingText: "Compact Sedan" },
+        { id: "el-1", role: "button", accessibleName: "Select", visible: true, nearestHeadingText: "Electric SUV" },
+      ],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { interactiveElements: Array<Record<string, unknown>> };
+  };
+
+  const elements = payload.currentPage.interactiveElements;
+  assert.equal(elements.length, 2);
+  assert.equal(elements[0]?.accessibleName, "Select");
+  assert.equal(elements[0]?.nearestHeadingText, "Compact Sedan");
+  assert.equal(elements[1]?.accessibleName, "Select");
+  assert.equal(elements[1]?.nearestHeadingText, "Electric SUV");
+  // The two otherwise-identical controls are, from this payload alone, now distinguishable.
+  assert.notEqual(elements[0]?.nearestHeadingText, elements[1]?.nearestHeadingText);
+});
+
+test("nearestHeadingText is absent from the prompt payload for an element with no nearby heading (never sent as null/empty)", () => {
+  const context = buildTestReasoningContext({
+    observation: {
+      url: "https://example-fictional-oem.test/configurator/offers",
+      title: "Offers",
+      interactiveElements: [{ id: "el-0", role: "button", accessibleName: "Continue", visible: true }],
+    },
+  });
+
+  const prompt = buildReasoningPrompt(context);
+  const payload = JSON.parse(prompt.user) as {
+    currentPage: { interactiveElements: Array<Record<string, unknown>> };
+  };
+
+  assert.ok(!("nearestHeadingText" in (payload.currentPage.interactiveElements[0] ?? {})));
+});
+
+// ---------------------------------------------------------------------------------------
 // REGRESSION (real production run): a full-viewport overlay (e.g. a consent-style banner)
 // sat on top of the page's real terminal-route controls -- they were visible in the DOM
 // but not actually clickable, while the overlay's own dismiss control was the only

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vehicle Offers</title>
+  </head>
+  <body>
+    <h1>Vehicle Offers</h1>
+
+    <!-- "Button with supporting text": accessibleName must stay exactly "Details" -- the
+         adjacent paragraph is a sibling, never a descendant, so it must never leak into the
+         button's own accessible name. -->
+    <button type="button" id="lineup-details">Details</button>
+    <p>Read more about our current lineup before selecting an offer below.</p>
+
+    <!-- "Card-with-nested-CTA" / "repeated-label controls": three cards, each with its own
+         heading and an identically-labelled "Select" button. Each Select navigates to a
+         distinct, card-specific destination so a test can prove *which* card's button was
+         actually clicked, not merely that some "Select" button was. -->
+    <section class="offer-card">
+      <h3>Compact Sedan</h3>
+      <p>Great fuel economy for city driving.</p>
+      <button type="button" class="select-offer" onclick="location.href='surface-adopt-cards-picked-a.html'">Select</button>
+    </section>
+
+    <section class="offer-card">
+      <h3>Electric SUV</h3>
+      <p>Zero emissions, extended range.</p>
+      <button type="button" class="select-offer" onclick="location.href='surface-adopt-cards-picked-b.html'">Select</button>
+    </section>
+
+    <section class="offer-card">
+      <h3>Sports Coupe</h3>
+      <p>Turbocharged performance trim.</p>
+      <button type="button" class="select-offer" onclick="location.href='surface-adopt-cards-picked-c.html'">Select</button>
+    </section>
+  </body>
+</html>

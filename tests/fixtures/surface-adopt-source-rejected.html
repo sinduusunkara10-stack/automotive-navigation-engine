@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Offer Landing</title>
+  </head>
+  <body>
+    <h1>Configurator complete</h1>
+    <p>Continue to a partner offer in a new tab.</p>
+    <!--
+      Deliberately loads the exact same static server (same port), but addressed by a
+      different hostname ("localhost" rather than "127.0.0.1") -- both resolve to the same
+      loopback server, but src/safety/domainGuard.ts's checkNavigationAllowed only ever
+      compares hostnames, so this genuinely lands outside a task's allowedDomains: ["127.0.0.1"]
+      without needing a second real server.
+    -->
+    <button
+      type="button"
+      id="open-external-offer"
+      onclick="window.open('http://localhost:' + window.location.port + '/surface-adopt-target-single.html', '_blank')"
+    >
+      Open External Offer
+    </button>
+  </body>
+</html>

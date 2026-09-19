@@ -65,7 +65,7 @@ function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules:
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

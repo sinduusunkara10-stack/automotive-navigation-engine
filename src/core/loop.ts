@@ -16,6 +16,7 @@ import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
+import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import type { RouteMemoryOutcome } from "../types/routeMemory.js";
 import { waitForAdaptiveSettle } from "./robustNavigation.js";
@@ -159,7 +160,6 @@ export async function runStep(params: {
   isMemoryThresholdBreached?: () => boolean;
 }): Promise<LoopStepOutcome> {
   const {
-    page,
     task,
     state,
     captures,
@@ -169,7 +169,23 @@ export async function runStep(params: {
     consentAmbiguityResolver,
     isMemoryThresholdBreached,
   } = params;
+  // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
+  // adoption"): every read/write of `page` for the rest of this step -- buildObservation,
+  // dispatchAction, evaluateSuccessCriteria, readElementState, all of it -- now resolves
+  // against whichever Page RunState.activePage names (an adopted popup/new-tab), falling
+  // back to the run's own originally-tracked params.page whenever activeSurface is "main".
+  // This is the *entire* mechanism that makes "the reasoning loop now observes/acts against
+  // the adopted surface" true: every one of this function's ~20 existing page-using call
+  // sites needed zero further changes to pick that up, since they were already written
+  // against a single local `page` binding.
+  const page = state.activePage ?? params.page;
   const stepIndex = state.stepCount;
+  // Surface adoption: the effective allowedDomains for whichever surface is currently
+  // active -- task.allowedDomains, plus a per-surface extended-trust hostname when one was
+  // recorded for it (safety.surfaceAdoptionDomainPolicy "extend_trust_from_landing"). Equals
+  // task.allowedDomains itself (same reference) for every run that never adopts a surface
+  // under that policy.
+  const effectiveAllowedDomains = state.effectiveAllowedDomains(task.allowedDomains);
   // Alternative Route Exploration: the candidate budget per decision point is configurable
   // per task (Safety.maxAlternativeCandidatesPerDecisionPoint, types/task-request.ts),
   // defaulting to MAX_ALTERNATIVE_CANDIDATES_PER_ANCHOR when omitted -- never itself a way
@@ -333,7 +349,7 @@ export async function runStep(params: {
         captures,
         stepIndex,
         captureModules: task.captureModules,
-        allowedDomains: task.allowedDomains,
+        allowedDomains: effectiveAllowedDomains,
         actionNavigationTimeoutMs,
         settleCeilingMs,
       });
@@ -629,7 +645,7 @@ export async function runStep(params: {
           captures,
           stepIndex,
           captureModules: task.captureModules,
-          allowedDomains: task.allowedDomains,
+          allowedDomains: effectiveAllowedDomains,
           actionNavigationTimeoutMs,
           settleCeilingMs,
         });
@@ -1285,13 +1301,31 @@ export async function runStep(params: {
     wantsDataLayerDelta && isClick ? await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] })) : undefined;
   const ga4WindowStartIndex = wantsGa4Window && isClick ? (captures.ga4_network_events?.length ?? 0) : undefined;
 
+  // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
+  // adoption"): built fresh for every click dispatch (the only action type a popup/new-tab
+  // "popup" event can ever originate from), from this run's own current
+  // RunState.adoptedSurfaceCount -- so the per-run budget (safety.maxAdoptedSurfacesPerRun)
+  // is checked against the *live* count, including any nested popup-from-popup already
+  // adopted earlier this same run. `enabled: false` (the default for every pre-existing
+  // task) reproduces actions/click.ts's pre-PR-3 capture-only-and-close popup handling
+  // exactly -- see adoptOrCapturePopup's own doc comment.
+  const surfaceAdoptionRequest: SurfaceAdoptionRequest | undefined = isClick
+    ? {
+        enabled: Boolean(task.safety.allowSurfaceAdoption),
+        domainPolicy: task.safety.surfaceAdoptionDomainPolicy,
+        allowedDomains: effectiveAllowedDomains,
+        adoptedSurfaceCount: state.adoptedSurfaceCount,
+        maxAdoptedSurfacesPerRun: task.safety.maxAdoptedSurfacesPerRun,
+      }
+    : undefined;
+
   const actionResult = await dispatchAction({
     page,
     action: effectiveAction,
     captures,
     stepIndex,
     captureModules: task.captureModules,
-    allowedDomains: task.allowedDomains,
+    allowedDomains: effectiveAllowedDomains,
     actionNavigationTimeoutMs,
     settleCeilingMs,
     reObservationAttempted: effectiveAction.type === "click" ? reObservationAttempted : undefined,
@@ -1299,7 +1333,54 @@ export async function runStep(params: {
       effectiveAction.type === "click" && effectiveAction.target
         ? knownDestinationUrls.get(effectiveAction.target)
         : undefined,
+    surfaceAdoption: surfaceAdoptionRequest,
   });
+
+  // Surface adoption: turns a successful adoption into real RunState -- from the *next*
+  // runStep call on, `const page = state.activePage ?? params.page` (top of this function)
+  // resolves to the adopted Page instead of the tracked one, so buildObservation/
+  // dispatchAction/evaluateSuccessCriteria all naturally operate against it without any
+  // further special-casing anywhere else in this file (including a popup opened *from*
+  // this adopted popup -- actions/click.ts's own "popup" listener is attached to whichever
+  // Page it was actually called against, so a nested chain is handled by this exact same
+  // code path, recursively).
+  if (actionResult.surfaceAdopted && surfaceAdoptionRequest?.adopted) {
+    const { page: adoptedPage, url: adoptedUrl, extendedAllowedDomain } = surfaceAdoptionRequest.adopted;
+    const newSurfaceId = state.nextAdoptedSurfaceId();
+    state.pushSurface(newSurfaceId, adoptedPage);
+    if (extendedAllowedDomain) {
+      state.extendAllowedDomainForCurrentSurface(extendedAllowedDomain);
+    }
+    if (task.captureModules.includes("errors")) {
+      recordDiagnosticError(captures, {
+        stepIndex,
+        category: "safety_guard_stop",
+        severity: "info",
+        pageUrl: adoptedUrl ?? observation.url,
+        message:
+          `Adopted a new browsing context opened by this click as the engine's active surface ` +
+          `("${newSurfaceId}")` +
+          (extendedAllowedDomain
+            ? `, extending domain trust to "${extendedAllowedDomain}" for this surface only.`
+            : "."),
+        recoverable: true,
+        stoppedRun: false,
+      });
+    }
+  } else if (actionResult.adoptionRejectedReason && task.captureModules.includes("errors")) {
+    recordDiagnosticError(captures, {
+      stepIndex,
+      category: "safety_guard_stop",
+      severity: "info",
+      pageUrl: observation.url,
+      message:
+        `A popup/new-context opened by this click was not adopted as the active surface ` +
+        `(${actionResult.adoptionRejectedReason}); captured only (if requested) and closed, exactly as ` +
+        `if surface adoption were disabled.`,
+      recoverable: true,
+      stoppedRun: false,
+    });
+  }
 
   // A staleTarget-classified failure (see actions/click.ts) means the target went stale
   // between decision and dispatch, not that the decision was actually wrong -- it is
@@ -2037,6 +2118,11 @@ async function obtainDecision(params: {
   reasoning: ReasoningProvider;
 }): Promise<{ decision: Decision; safetyResult: SafetyCheckResult; effectiveAction: SelectedAction }> {
   const { task, state, observation, reasoning } = params;
+  // Surface adoption: see runStep's own local of the same name -- keeps the reasoning
+  // layer's own declared allowedDomains, and the safety layer's navigate-target check
+  // below, consistent with what actions/navigate.ts and actions/click.ts's destinationUrl
+  // fallback actually enforce for the currently active surface.
+  const effectiveAllowedDomains = state.effectiveAllowedDomains(task.allowedDomains);
 
   // Route Memory (Phase 1, see core/routeMemory.ts): before asking for a decision, surface
   // whichever candidates have already been tried at this exact decision point -- possibly
@@ -2084,7 +2170,7 @@ async function obtainDecision(params: {
     objective: task.objective,
     successCriteria: task.successCriteria,
     allowedActions: task.safety.allowedActions,
-    allowedDomains: task.allowedDomains,
+    allowedDomains: effectiveAllowedDomains,
     limits: {
       maxSteps: task.limits.maxSteps,
       maxBacktracks: task.limits.maxBacktracks,
@@ -2109,7 +2195,7 @@ async function obtainDecision(params: {
     action: decision.action,
     safety: task.safety,
     limits: task.limits,
-    allowedDomains: task.allowedDomains,
+    allowedDomains: effectiveAllowedDomains,
     state: {
       limits: { stepCount: state.stepCount, backtrackCount: state.backtrackCount, startedAtMs: state.startedAtMs },
       actionHistory: state.actionHistory,

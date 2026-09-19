@@ -182,7 +182,7 @@ function buildTask(params: { startUrl: string; maxBacktracks?: number }): TaskRe
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: params.maxBacktracks ?? 1, maxRepeatedActions: 5 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

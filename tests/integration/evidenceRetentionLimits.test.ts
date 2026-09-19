@@ -38,7 +38,7 @@ function buildTask(startUrl: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 
@@ -142,7 +142,7 @@ test("observation.interactiveElements stored per step is bounded without affecti
         allowPaymentOrPurchase: false,
         allowPersonalDataEntry: false,
       },
-      outputSchemaVersion: "1.19.0",
+      outputSchemaVersion: "1.20.0",
     };
 
     const result = await runTask({ page, task, maxStoredInteractiveElementsPerObservation: 5 });

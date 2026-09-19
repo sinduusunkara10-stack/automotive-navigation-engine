@@ -114,7 +114,7 @@ function buildTask(startUrl: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
   };
 }
 

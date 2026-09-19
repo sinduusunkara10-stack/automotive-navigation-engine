@@ -209,7 +209,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.19.0",
+    outputSchemaVersion: "1.20.0",
     ...overrides,
   };
 }
