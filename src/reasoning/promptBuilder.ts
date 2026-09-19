@@ -320,7 +320,7 @@ function selectPromptInteractiveElements(
   elements: readonly InteractiveElement[],
   relevanceText: string,
   limit: number,
-  hasActiveDialog: boolean,
+  hasActiveOverlay: boolean,
   activeMilestoneText?: string,
 ): { selected: readonly InteractiveElement[]; diagnostic: PromptElementSelectionDiagnostic } {
   if (elements.length <= limit) {
@@ -359,7 +359,7 @@ function selectPromptInteractiveElements(
   // existing "prefer an uncovered control, but a covered one can still matter" prompt
   // guidance below.
   const zeroScorePool = scored.filter(
-    (s) => s.score === 0 && !takenIndices.has(s.index) && !(hasActiveDialog && s.el.covered),
+    (s) => s.score === 0 && !takenIndices.has(s.index) && !(hasActiveOverlay && s.el.covered),
   );
   const remainingBudget = limit - relevantTaken.length;
   const tailAnchors = zeroScorePool.slice(-TAIL_ANCHOR_COUNT).slice(0, remainingBudget);
@@ -573,11 +573,18 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "brochure-style control when a quote-style control did not work out, or vice versa), " +
     "before concluding the objective is unreachable from this page.";
 
+  // Drawer/modal formalization (Phase 3 PR 5, see CLAUDE.md and docs/architecture.md
+  // "Drawer/modal formalization"): the existing activeDialog-only prioritization extended to
+  // any in_document surface (core/inDocumentSurface.ts) -- a non-aria drawer/side panel gets
+  // the same "don't let covered background chrome crowd out its own controls" treatment a
+  // standards-based dialog already did, tied to the same activeSurface field PR2/3/4
+  // introduced rather than to markup alone.
+  const hasActiveOverlay = Boolean(observation.activeDialog) || observation.activeSurface?.kind === "in_document";
   const { selected: interactiveElements, diagnostic: elementSelection } = selectPromptInteractiveElements(
     observation.interactiveElements,
     [objective, ...successCriteria.map((c) => c.description)].filter(Boolean).join(" "),
     MAX_INTERACTIVE_ELEMENTS,
-    Boolean(observation.activeDialog),
+    hasActiveOverlay,
     milestones?.activeSubGoal?.description,
   );
 

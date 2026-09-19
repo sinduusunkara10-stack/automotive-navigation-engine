@@ -3362,3 +3362,127 @@ removed, renamed, or had its meaning changed.
   surface was active, for a site that drives both tabs from a shared session). Milestone/success-
   criteria evaluation on the parent after a return is exactly as tolerant (or not) of that as it
   already is anywhere else in the engine -- no special-casing was added or is needed.
+
+## 28. Drawer/modal formalization (Phase 3 PR 5)
+
+### Problem
+
+PR 2's `activeSurface` scaffolding always reported `{kind: "main"}` for anything happening in the
+main document, even while a drawer/modal/side panel (`Observation.activeDialog`, or the broader
+`ActionResult.surfaceChangeType` heuristic) was clearly the actual focus of the page -- the
+`"in_document"` enum value existed in both schemas since PR 2 but nothing ever produced it. The
+reasoning prompt's own prioritization of a dialog's controls over background chrome
+(`selectPromptInteractiveElements`'s covered-element exclusion) was also gated on
+`Observation.activeDialog` alone, so a non-aria drawer/side panel -- the broader
+`surfaceChangeType` heuristic exists precisely because many real drawers are not marked up as a
+standards-based dialog at all -- never got that same structural protection, only the model-facing
+text instruction (which already covered it).
+
+### Design
+
+- `core/inDocumentSurface.ts` (new): `shouldEnterInDocumentSurface`/`shouldLeaveInDocumentSurface`,
+  pure decision logic mirroring `surfaceAdoption.ts`'s own style.
+  - **Enter**: only while still on `"main"` (a drawer opening from within an already-tracked
+    in_document surface is out of this PR's scope -- no nested-drawer support), and only when
+    this step's fresh observation shows a genuine `activeDialog`, or the immediately preceding
+    action carried a `surfaceChangeType` -- the same two signals the prompt already reasoned
+    about, now also driving `RunState`'s own surface stack.
+  - **Leave**: only for a surface that was entered via a genuine `activeDialog` signal, once that
+    signal disappears on a later observation -- a surface entered only via the one-shot
+    `surfaceChangeType` heuristic has no equivalent persistent "is it still there" signal, so it
+    is left active until an explicit return (see "Known limitations" below) rather than guessed at.
+- `RunState` (`core/state.ts`) reuses its existing Page-less `pushSurface`/`popSurface` (already
+  exercised by PR 2's own pre-adoption stack-mechanics tests) for an in_document surface --
+  `nextInDocumentSurfaceId()` (`"in_document-1"`, ...), its own counter independent of
+  `adoptedSurfaceCounter` (an in_document surface never draws from
+  `safety.maxAdoptedSurfacesPerRun`'s budget, and is never Page-backed). `withActiveSurface`
+  (`core/loop.ts`) tells `"in_document"` apart from `"adopted_context"` purely by the surface id's
+  own prefix, never by re-deriving it from the observation.
+- **Return-to-parent reuse**: `core/surfaceReturn.ts`'s `returnToParentSurface` already worked
+  for a Page-less surface unchanged (its `childPage && ...` close-check is simply skipped) -- the
+  one real gap this PR closed is that popping a Page-less surface never itself changes the real
+  page's DOM, so the very next observation would still show the same `activeDialog`/
+  `surfaceChangeType` evidence and `shouldEnterInDocumentSurface` would immediately re-enter it,
+  defeating the return before whoever asked for it (an explicit `go_back`, or the journey-
+  replanning fallback) ever got a real step on `"main"` instead. Fixed with a one-shot suppression
+  (`RunState.suppressNextInDocumentEntry`/`consumeSuppressInDocumentEntry`): set whenever
+  `returnToParentSurface` pops a Page-less surface, consumed (read-and-cleared) exactly once at
+  the top of the very next `runStep`, immediately before the entry check runs.
+- **Prompt prioritization** (`reasoning/promptBuilder.ts`): `selectPromptInteractiveElements`'s
+  boolean parameter (renamed `hasActiveOverlay`) now also fires for `observation.activeSurface?.
+  kind === "in_document"`, not only a genuine `activeDialog` -- tied to the same `activeSurface`
+  field PR 2/3/4 introduced rather than to markup alone. The model-facing prompt *text* needed no
+  change: it already told the model to prioritize a newly-introduced surface's controls "even
+  when currentPage has no activeDialog value (many drawers/side panels are not marked up as a
+  standards-based dialog at all)" -- what changed is that the underlying element-selection code
+  now actually enforces what that text already promised, for the non-aria case too.
+- **Nested-control disambiguation inside a drawer/modal** needed no new code at all: it is the
+  same generic, surface-agnostic mechanism PR 3 already proved for an adopted popup
+  (`nearestHeadingText`, forwarded into the prompt payload) -- `core/inDocumentSurface.ts` only
+  decides *when* the engine is inside a drawer, never how its controls are told apart once there.
+- **Lifecycle diagnostics**: entering and leaving an in_document surface pushes the same
+  `SurfaceAdoptionAttemptDiagnostic` events (`"adopted"`/`"closed_unexpectedly"`) PR 3/4 already
+  use for adopted tabs, onto the same `state.surfaceAdoptionDiagnostics` array -- `surfaceId`
+  simply carries an `"in_document-N"` id instead of an `"adopted-N"` one, so a caller reading
+  `diagnostics.surfaceAdoption` sees one unified lifecycle regardless of surface kind.
+
+### Relationship with existing systems
+
+- `go_back` substitution at both existing dispatch sites (PR 4) needed zero changes: it was
+  already gated on `state.activeSurface !== "main"`, which is equally true for an in_document
+  surface. `returnToParentSurface` was already Page-optional. The only new code this PR added to
+  that path is the one-shot re-entry suppression described above.
+- Route memory / branch exploration / milestone-anchored recovery are all keyed by decision-point
+  fingerprint and per-surface state buckets (PR 2) that already isolate an in_document surface's
+  own recovery state from `"main"`'s, exactly like an adopted `Page` does -- no changes needed.
+
+### Testing
+
+- `tests/unit/inDocumentSurface.test.ts`: pure-logic coverage of both decision functions (enter on
+  `activeDialog`, enter on `surfaceChangeType` alone, never enters while already off `"main"`,
+  leaves once a dialog-entered surface's signal disappears, never auto-leaves a
+  `surfaceChangeType`-only entry, no-op cases).
+- `tests/unit/surfaceReturn.test.ts` gained two cases: a Page-less return sets the one-shot
+  suppression exactly once; a Page-backed return never sets it.
+- `tests/integration/e2eAcceptance.test.ts`: the two required end-to-end acceptance journeys --
+  (1) new tab with three repeated-label CTA cards, the correct one selected, multi-step, milestone;
+  (2) a same-document drawer with the same repeated-label-card shape, `activeSurface.kind ===
+  "in_document"` asserted directly on the step the drawer opens, correct nested CTA selected,
+  multi-step, milestone; plus (3) a variant proving an explicit `go_back` off a drawer returns to
+  `"main"` and the run continues to the milestone, with `diagnostics.surfaceAdoption` showing both
+  the `"adopted"` and `"returned"` in_document lifecycle events.
+- Regression: full existing suite, including `overlayClickDetection.test.ts`,
+  `coveredControlPreference.test.ts`, and `tests/unit/promptBuilder.test.ts` explicitly (the three
+  most directly exercising `selectPromptInteractiveElements`/`activeDialog` behaviour this PR
+  touched) -- all pass unchanged.
+
+### Schema impact
+
+None. `"in_document"` has been a valid `Observation.activeSurface.kind` enum value since PR 2;
+this PR is the first to actually produce it, which is a behavioural change, not a schema-shape
+one. `diagnostics.surfaceAdoption.attempts[].surfaceId` is already an unconstrained string (PR 4)
+-- an `"in_document-N"` id needs no schema change to be valid there. `RunState.
+suppressNextInDocumentEntry`/`consumeSuppressInDocumentEntry` and `core/inDocumentSurface.ts`'s
+two decision functions are internal boundary logic, never part of either wire schema (matching
+Route Memory's own §16 precedent).
+
+### Known limitations
+
+- Only one level of in_document nesting is supported: a drawer opening a second drawer from
+  within itself is not tracked as a distinct nested surface (unlike a genuinely nested popup-from-
+  popup, which PR 3 does support, since that case has real, separate Page objects to key off).
+  `shouldEnterInDocumentSurface` simply leaves the existing in_document surface active in that
+  case, rather than incorrectly nesting or replacing it.
+- A surface entered only via the one-shot `surfaceChangeType` heuristic (a non-aria drawer/panel)
+  is never auto-left on its own -- there is no symmetric, generic "is it still there" signal for
+  that case the way `activeDialog`'s own presence/absence gives one. It is only left via an
+  explicit return (a dispatched `go_back`, or the journey-replanning/branch-return fallback).
+- Returning from a Page-less in_document surface is bookkeeping-only: it never itself dismisses
+  the drawer/modal's own DOM (there is no single, generically-correct DOM action for that across
+  every real implementation -- pure CSS/JS toggle, `history.pushState`, or a dedicated close
+  button all exist in the wild, and the engine's fixed action vocabulary has no "close this
+  overlay" action to add per CLAUDE.md's own non-negotiable rule against ad hoc actions). A run
+  recovers because the reasoning layer gets a genuine further step against the rest of the page
+  once `activeSurface` correctly reports `"main"` again -- not because the drawer visually
+  disappeared. `tests/integration/e2eAcceptance.test.ts`'s dead-end variant tests exactly this
+  claim, not a stronger one.

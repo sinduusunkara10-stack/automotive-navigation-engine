@@ -119,6 +119,10 @@ export class RunState {
    */
   private readonly pageBySurfaceId = new Map<string, Page>();
   private adoptedSurfaceCounter = 0;
+  /** Drawer/modal formalization (Phase 3 PR 5): its own counter, independent of adoptedSurfaceCounter -- an in_document surface is never Page-backed and never draws from safety.maxAdoptedSurfacesPerRun's budget. */
+  private inDocumentSurfaceCounter = 0;
+  /** Drawer/modal formalization (Phase 3 PR 5): which in_document surface ids were entered via a genuine Observation.activeDialog signal -- see core/inDocumentSurface.ts's shouldLeaveInDocumentSurface for why only those can be auto-left on their own. */
+  private readonly inDocumentEnteredViaActiveDialog = new Set<string>();
 
   get activeSurface(): string {
     // Never empty -- MAIN_SURFACE_ID is pushed once at construction and popSurface refuses
@@ -146,6 +150,40 @@ export class RunState {
   nextAdoptedSurfaceId(): string {
     this.adoptedSurfaceCounter += 1;
     return `adopted-${this.adoptedSurfaceCounter}`;
+  }
+
+  /** A fresh, stable, run-unique id for a newly entered in_document surface (e.g. "in_document-1", ...) -- see core/inDocumentSurface.ts. */
+  nextInDocumentSurfaceId(): string {
+    this.inDocumentSurfaceCounter += 1;
+    return `in_document-${this.inDocumentSurfaceCounter}`;
+  }
+
+  /** Records that `surfaceId` was entered via a genuine Observation.activeDialog signal -- see core/inDocumentSurface.ts's shouldLeaveInDocumentSurface. */
+  markInDocumentEnteredViaActiveDialog(surfaceId: string): void {
+    this.inDocumentEnteredViaActiveDialog.add(surfaceId);
+  }
+
+  wasInDocumentEnteredViaActiveDialog(surfaceId: string): boolean {
+    return this.inDocumentEnteredViaActiveDialog.has(surfaceId);
+  }
+
+  /**
+   * One-shot suppression of the very next shouldEnterInDocumentSurface check -- see
+   * core/surfaceReturn.ts's returnToParentSurface, which sets this when it pops a Page-less
+   * (in_document) surface, and core/loop.ts, which consumes it once at the top of the very
+   * next runStep.
+   */
+  private suppressInDocumentEntryOnce = false;
+
+  suppressNextInDocumentEntry(): void {
+    this.suppressInDocumentEntryOnce = true;
+  }
+
+  /** Reads and clears the one-shot suppression flag in the same call -- never left set for a second step. */
+  consumeSuppressInDocumentEntry(): boolean {
+    const value = this.suppressInDocumentEntryOnce;
+    this.suppressInDocumentEntryOnce = false;
+    return value;
   }
 
   private currentSurfaceState(): SurfaceState {

@@ -51,6 +51,32 @@ test("returnToParentSurface: pops back to main, closes the child page, reports t
   assert.equal(state.activeSurface, MAIN_SURFACE_ID);
 });
 
+test("returnToParentSurface: a Page-less (in_document) surface has nothing to close, and sets the one-shot in_document re-entry suppression", async () => {
+  const state = new RunState();
+  const mainPage = fakePage("main");
+  state.pushSurface("in_document-1"); // no page: matches drawer/modal formalization (Phase 3 PR 5)
+
+  assert.equal(state.consumeSuppressInDocumentEntry(), false, "sanity: nothing suppressed yet");
+
+  const result = await returnToParentSurface({ state, mainPage });
+
+  assert.equal(result.restored, true);
+  assert.equal(result.poppedSurfaceId, "in_document-1");
+  assert.equal(state.activeSurface, MAIN_SURFACE_ID);
+  assert.equal(state.consumeSuppressInDocumentEntry(), true, "expected the return to suppress the next in_document entry check");
+  assert.equal(state.consumeSuppressInDocumentEntry(), false, "the suppression is one-shot -- reading it again must not still be true");
+});
+
+test("returnToParentSurface: a Page-backed surface never sets the in_document re-entry suppression", async () => {
+  const state = new RunState();
+  const mainPage = fakePage("main");
+  state.pushSurface("adopted-1", fakePage("popup-1"));
+
+  await returnToParentSurface({ state, mainPage });
+
+  assert.equal(state.consumeSuppressInDocumentEntry(), false);
+});
+
 test("returnToParentSurface: nested adoption returns to the immediate parent surface, not main", async () => {
   const state = new RunState();
   const mainPage = fakePage("main");

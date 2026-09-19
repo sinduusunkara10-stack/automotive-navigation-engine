@@ -45,6 +45,17 @@ export async function returnToParentSurface(params: { state: RunState; mainPage:
       // a page that refuses to close (already navigating away, torn down by the site
       // itself) is not a reason to fail the return to its still-live parent.
     });
+  } else if (!childPage) {
+    // Drawer/modal formalization (Phase 3 PR 5): a Page-less surface (an in_document
+    // drawer/modal) has no Page to close -- returning from one is bookkeeping-only, and
+    // never itself dismisses the drawer's own DOM (there is no single, generically-correct
+    // DOM action for that -- see docs/architecture.md "Known limitations"). Left alone, the
+    // very next observation would still show the same activeDialog/surfaceChangeType
+    // evidence and core/inDocumentSurface.ts's shouldEnterInDocumentSurface would
+    // immediately re-enter it, defeating the return before the caller who asked for it (a
+    // dead end's journey-replanning fallback, or an explicit go_back) ever gets a real
+    // chance to act on "main" instead. Suppressed for exactly the next step only.
+    state.suppressNextInDocumentEntry();
   }
 
   state.popSurface();

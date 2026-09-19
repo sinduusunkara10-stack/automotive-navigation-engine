@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vehicle Options</title>
+    <style>
+      #finance-drawer {
+        display: none;
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 320px;
+        height: 100%;
+        background: white;
+        border-left: 1px solid #ccc;
+      }
+    </style>
+    <script>
+      function showDrawer() {
+        document.getElementById("finance-drawer").style.display = "block";
+      }
+    </script>
+  </head>
+  <body>
+    <h1>Vehicle Options</h1>
+    <button type="button" onclick="showDrawer()">Open Finance Drawer</button>
+
+    <div id="finance-drawer" role="dialog" aria-modal="true" aria-label="Finance Options">
+      <h2>Finance Options</h2>
+      <section>
+        <h3>Standard Plan</h3>
+        <button type="button" onclick="location.href = 'e2e-drawer-detail-standard.html'">Select</button>
+      </section>
+      <section>
+        <h3>Flex Plan</h3>
+        <button type="button" onclick="location.href = 'e2e-drawer-detail-flex.html'">Select</button>
+      </section>
+      <section>
+        <h3>Premium Plan</h3>
+        <button type="button" onclick="location.href = 'e2e-drawer-detail-premium.html'">Select</button>
+      </section>
+    </div>
+  </body>
+</html>
