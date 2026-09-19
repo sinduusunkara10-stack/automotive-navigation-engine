@@ -7,7 +7,12 @@ import { attachDataLayerPushCapture, captureDataLayer } from "./dataLayer.js";
 import { popupContextId } from "./captureContext.js";
 import { POPUP_ADOPTION_WINDOW_MS } from "../config/captureLimits.js";
 import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
-import { decideSurfaceAdoption, type AdoptionRejectionReason } from "../core/surfaceAdoption.js";
+import { decideSurfaceAdoption, DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN, type AdoptionRejectionReason } from "../core/surfaceAdoption.js";
+import {
+  assessSurfaceRelevance,
+  type SurfaceRelevanceAmbiguityResolver,
+  type SurfaceRelevanceAssessment,
+} from "../core/surfaceRelevance.js";
 
 export interface AdoptPopupForCaptureResult {
   /** True when at least one real-time capture (GA4 request or dataLayer push/snapshot) was actually recorded from the adopted popup before it closed. */
@@ -29,6 +34,18 @@ export interface SurfaceAdoptionRequest {
   adoptedSurfaceCount: number;
   maxAdoptedSurfacesPerRun: number | undefined;
   /**
+   * Surface-relevance assessment (PR 3): free text (task objective + success-criteria
+   * descriptions + journeyType + the triggering CTA's own accessible name, all folded
+   * together by core/loop.ts before this request is built) the candidate's own page signals
+   * are scored against -- see core/surfaceRelevance.ts. Optional and additive: absent or
+   * empty means the relevance gate is skipped entirely and adoption falls through to the
+   * pre-existing domain/budget-only decision, so every test fixture and call site built
+   * before PR 3 keeps its exact prior behaviour without needing to set this.
+   */
+  relevanceObjectiveText?: string;
+  /** See core/surfaceRelevance.ts's own doc comment -- absent by default, same convention as safety/consentClassifier.ts's ConsentAmbiguityResolver. */
+  relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  /**
    * Write-only output slot: actions/click.ts sets this the instant a popup from its own
    * click is actually adopted, since the live Page it needs to hand back to core/loop.ts
    * cannot travel through the JSON-serializable ActionResult (see ActionResult.surfaceAdopted,
@@ -47,6 +64,13 @@ export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
   adoptionRejectedReason?: AdoptionRejectionReason;
   /** Mirrors AdoptionDecision.extendedAllowedDomain -- see core/surfaceAdoption.ts. */
   extendedAllowedDomain?: string;
+  /**
+   * Present only when the relevance gate actually ran (surfaceAdoption.relevanceObjectiveText
+   * was non-empty) -- full detail for diagnostics (PR 6 wires this into
+   * TaskResponse.diagnostics; not yet wire-exposed as of PR 3, same treatment as
+   * adoptionRejectedReason's own new "relevance_rejected" value).
+   */
+  relevanceAssessment?: SurfaceRelevanceAssessment;
 }
 
 /**
@@ -167,8 +191,10 @@ export async function adoptOrCapturePopup(params: {
   stepIndex: number;
   captureModules: CaptureModuleName[];
   surfaceAdoption?: SurfaceAdoptionRequest;
+  /** Bounds the relevance gate's own bounded resettle pass -- see core/surfaceRelevance.ts. Same value actions/click.ts's own settle waits use for this click. */
+  settleCeilingMs?: number;
 }): Promise<AdoptOrCapturePopupResult> {
-  const { popup, captures, stepIndex, captureModules, surfaceAdoption } = params;
+  const { popup, captures, stepIndex, captureModules, surfaceAdoption, settleCeilingMs } = params;
 
   if (!surfaceAdoption?.enabled) {
     return adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
@@ -180,6 +206,35 @@ export async function adoptOrCapturePopup(params: {
     popupUrl = popup.url();
   } catch {
     popupUrl = undefined;
+  }
+
+  // Surface-relevance assessment (PR 3, see CLAUDE.md and docs/architecture.md "Surface
+  // adoption"): consulted before decideSurfaceAdoption, which remains the single,
+  // untouched, authoritative source for the domain/budget decision itself. Cheaply
+  // pre-checks the same budget decideSurfaceAdoption will check anyway, so a candidate that
+  // would be rejected for budget reasons regardless never pays for relevance scoring. A
+  // relevance-rejected candidate is returned immediately here and never reaches
+  // decideSurfaceAdoption at all -- it therefore never increments adoptedSurfaceCount
+  // (that only ever happens via core/loop.ts's RunState.pushSurface on a genuine adoption),
+  // satisfying "relevance-rejected surfaces must not consume maxAdoptedSurfacesPerRun" by
+  // construction. Skipped entirely (byte-for-byte prior behaviour) when the caller never set
+  // relevanceObjectiveText -- see SurfaceAdoptionRequest's own doc comment.
+  let relevanceAssessment: SurfaceRelevanceAssessment | undefined;
+  if (surfaceAdoption.relevanceObjectiveText) {
+    const budget = surfaceAdoption.maxAdoptedSurfacesPerRun ?? DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN;
+    const budgetExhausted = surfaceAdoption.adoptedSurfaceCount >= budget;
+    if (!budgetExhausted) {
+      relevanceAssessment = await assessSurfaceRelevance({
+        page: popup,
+        objectiveText: surfaceAdoption.relevanceObjectiveText,
+        settleCeilingMs,
+        ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
+      });
+      if (!relevanceAssessment.relevant) {
+        const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
+        return { ...captureResult, adoptionRejectedReason: "relevance_rejected", relevanceAssessment };
+      }
+    }
   }
 
   const decision = decideSurfaceAdoption({
@@ -198,9 +253,10 @@ export async function adoptOrCapturePopup(params: {
       adoptedPage: popup,
       adoptedUrl: popupUrl,
       ...(decision.extendedAllowedDomain ? { extendedAllowedDomain: decision.extendedAllowedDomain } : {}),
+      ...(relevanceAssessment ? { relevanceAssessment } : {}),
     };
   }
 
   const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
-  return { ...captureResult, adoptionRejectedReason: decision.reason };
+  return { ...captureResult, adoptionRejectedReason: decision.reason, ...(relevanceAssessment ? { relevanceAssessment } : {}) };
 }

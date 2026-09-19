@@ -28,6 +28,7 @@ import {
 } from "./recoveryAnchors.js";
 import type { RecoveryAnchor, RouteStatus } from "../types/recovery.js";
 import { assessConsentSurface, resolveAmbiguousConsentSurface, type ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
+import type { SurfaceRelevanceAmbiguityResolver } from "./surfaceRelevance.js";
 import {
   computeEstimatedCompletion,
   computeMilestoneRollup,
@@ -167,6 +168,8 @@ export async function runStep(params: {
   /** See runTask's own param of the same name (src/core/engine.ts). */
   consentAmbiguityResolver?: ConsentAmbiguityResolver;
   /** See runTask's own param of the same name (src/core/engine.ts). */
+  relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  /** See runTask's own param of the same name (src/core/engine.ts). */
   isMemoryThresholdBreached?: () => boolean;
 }): Promise<LoopStepOutcome> {
   const {
@@ -177,6 +180,7 @@ export async function runStep(params: {
     actionNavigationTimeoutMs,
     semanticVerifier,
     consentAmbiguityResolver,
+    relevanceAmbiguityResolver,
     isMemoryThresholdBreached,
   } = params;
   // Return-to-parent recovery (Phase 3 PR 4, see CLAUDE.md and docs/architecture.md
@@ -1418,6 +1422,30 @@ export async function runStep(params: {
   // adopted earlier this same run. `enabled: false` (the default for every pre-existing
   // task) reproduces actions/click.ts's pre-PR-3 capture-only-and-close popup handling
   // exactly -- see adoptOrCapturePopup's own doc comment.
+  // Surface-relevance assessment (PR 3, see CLAUDE.md and docs/architecture.md "Surface
+  // adoption"): the free text src/core/surfaceRelevance.ts scores a just-opened candidate's
+  // own page signals against, built once per click dispatch rather than threading a separate
+  // CTA-name field further down through popupCapture.ts/click.ts -- the objective, this
+  // task's own success-criteria wording, the journeyType hint, and (when available) the
+  // clicked CTA's own accessible name, exactly the evidence the approved design doc's own
+  // "triggering CTA's accessible name/context" requirement calls for. Only built for a click
+  // (the one action type a popup/new-tab can ever originate from); every other action type
+  // leaves surfaceAdoptionRequest undefined entirely, unchanged from before this PR.
+  const clickedCtaAccessibleName =
+    isClick && effectiveAction.target
+      ? observation.interactiveElements.find((el) => el.id === effectiveAction.target)?.accessibleName
+      : undefined;
+  const relevanceObjectiveText = isClick
+    ? [
+        task.objective,
+        ...task.successCriteria.map((criterion) => criterion.description),
+        task.journeyType,
+        clickedCtaAccessibleName,
+      ]
+        .filter((part): part is string => Boolean(part && part.trim().length > 0))
+        .join(" ")
+    : "";
+
   const surfaceAdoptionRequest: SurfaceAdoptionRequest | undefined = isClick
     ? {
         enabled: Boolean(task.safety.allowSurfaceAdoption),
@@ -1425,6 +1453,8 @@ export async function runStep(params: {
         allowedDomains: effectiveAllowedDomains,
         adoptedSurfaceCount: state.adoptedSurfaceCount,
         maxAdoptedSurfacesPerRun: task.safety.maxAdoptedSurfacesPerRun,
+        ...(relevanceObjectiveText ? { relevanceObjectiveText } : {}),
+        ...(relevanceAmbiguityResolver ? { relevanceAmbiguityResolver } : {}),
       }
     : undefined;
 

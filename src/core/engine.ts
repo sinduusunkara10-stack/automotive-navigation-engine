@@ -12,6 +12,7 @@ import type { ReasoningProvider } from "../reasoning/reasoningProvider.js";
 import { MockReasoningProvider } from "../reasoning/mockReasoningProvider.js";
 import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import type { ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
+import type { SurfaceRelevanceAmbiguityResolver } from "./surfaceRelevance.js";
 import { RunState } from "./state.js";
 import { runStep, type TerminalStatus } from "./loop.js";
 import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
@@ -113,6 +114,14 @@ export async function runTask(params: {
    */
   consentAmbiguityResolver?: ConsentAmbiguityResolver;
   /**
+   * Optional, opt-in bounded model call used only for the genuinely ambiguous middle band of
+   * a just-opened popup/tab's relevance assessment (see src/core/surfaceRelevance.ts) --
+   * entirely absent by default, same convention as consentAmbiguityResolver above: every
+   * existing caller that doesn't pass this gets byte-for-byte the same deterministic-only
+   * (fail-closed-on-ambiguity) relevance gating as before this parameter existed.
+   */
+  relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  /**
    * Opt-in (MEMORY_CIRCUIT_BREAKER_ENABLED), checked once per step alongside
    * checkLimitsBreach -- see src/safety/containerMemoryGuard.ts. Sampling itself happens
    * independently, on its own timer, in src/api/runner.ts (which owns Redis persistence);
@@ -121,7 +130,7 @@ export async function runTask(params: {
    */
   isMemoryThresholdBreached?: () => boolean;
 }): Promise<TaskResponse> {
-  const { page, task, semanticVerifier, consentAmbiguityResolver, isMemoryThresholdBreached } = params;
+  const { page, task, semanticVerifier, consentAmbiguityResolver, relevanceAmbiguityResolver, isMemoryThresholdBreached } = params;
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -323,6 +332,7 @@ export async function runTask(params: {
         actionNavigationTimeoutMs,
         semanticVerifier,
         consentAmbiguityResolver,
+        relevanceAmbiguityResolver,
         isMemoryThresholdBreached,
       });
       // Bounded for storage only, after everything that needs the step's *live*,

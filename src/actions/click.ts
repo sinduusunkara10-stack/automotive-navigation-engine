@@ -590,6 +590,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       stepIndex,
       captureModules,
       surfaceAdoption,
+      settleCeilingMs,
     }).catch(() => ({ observed: false }));
   };
   const onPopup = (popup: Page) => claimPopupCandidate(popup);
