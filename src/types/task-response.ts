@@ -55,10 +55,39 @@ export interface InteractiveElement {
   nearestHeadingText?: string;
 }
 
+/**
+ * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and
+ * docs/architecture.md "Active surface tracking"): which browsing context this
+ * observation's url/title/interactiveElements actually describe. "main": the engine's
+ * originally-tracked page -- every observation reports this today, since no PR before PR 3
+ * wires an actual adoption path. "adopted_context": a separate Page object (a popup/new
+ * tab) genuinely adopted as the active navigation context (as opposed to
+ * capture-modules/popupCapture.ts's own always-closed, capture-only adoption, which never
+ * changes this). "in_document": a same-document surface (a drawer/modal/side panel) the
+ * engine is now treating as the active context, distinct from "main" only once a later PR
+ * begins tracking it explicitly rather than implicitly observing it inline.
+ */
+export type ActiveSurfaceKind = "main" | "adopted_context" | "in_document";
+
+export interface ActiveSurfaceInfo {
+  kind: ActiveSurfaceKind;
+  /**
+   * Short, generic identity for a non-"main" surface (e.g. its own url or title) -- absent
+   * for "main", which needs no further identity beyond Observation.url/title themselves.
+   */
+  identity?: string;
+}
+
 export interface Observation {
   url: string;
   title: string;
   interactiveElements: InteractiveElement[];
+  /**
+   * Present on every observation once this field ships (absent only for a response built
+   * before Phase 3 PR 2). Makes today's implicit "which page is this" explicit rather than
+   * leaving a caller to infer it from url/title alone.
+   */
+  activeSurface?: ActiveSurfaceInfo;
   notableText?: string[];
   /** Generic, brand-agnostic progress-indicator text (e.g. "Step 2 of 4"), when present. */
   progressIndicatorText?: string[];
@@ -933,7 +962,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.18.0";
+  schemaVersion: "1.19.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

@@ -3037,3 +3037,94 @@ had its meaning changed.
 - `MAX_SETTLE_CEILING_MS` (10000ms) is a hard ceiling per individual settle wait, not a run-wide
   budget — a run with many settle points can still accumulate significant total wait time across
   a run; `limits.maxDurationSeconds` remains the run-level backstop for that, unchanged.
+
+## 25. Active surface tracking scaffolding (Phase 3 PR 2)
+
+### Problem
+
+Every piece of per-run recovery/route state in `src/core/state.ts` -- `lastBlockerTargetId`,
+`lastBlockerSignature`, `blockerSignatureRepeatCount`, `routeMemory`, and
+`lowConfidenceRetriedFingerprints` -- was a single flat field, implicitly scoped to "whatever the
+one `Page` this run navigates is doing right now." That was harmless while a run only ever had one
+`Page`, but it cannot survive Phase 3's genuine surface adoption (PR 3 onward): once a second
+context (a popup, or a same-document drawer/modal treated as its own active surface) can become the
+active navigation target, a blocker signature or a tried-route fingerprint recorded while adopting
+that surface must never bleed into the tracked page's own state, and vice versa, once control
+returns.
+
+### Design
+
+`src/core/state.ts` introduces a small per-surface bucket (`SurfaceState`: the five fields above,
+grouped) keyed by surface id in a `Map`, plus a stack (`surfaceStack`, floored at `MAIN_SURFACE_ID`
+= `"main"`) recording which surface is currently active. `RunState.activeSurface` is a getter
+returning the stack's top; `pushSurface`/`popSurface` enter and leave a surface, and `popSurface`
+refuses to remove the last remaining ("main") entry, so a caller that pops without a matching push
+simply stays on "main" rather than ever leaving the stack empty.
+
+The five fields that used to be flat `RunState` properties are now getters/setters (for the three
+scalar fields) or getters (for the two object-valued ones, `routeMemory`/
+`lowConfidenceRetriedFingerprints`, whose own mutating methods -- `.record()`, `.add()`, etc. --
+still work exactly as before) that resolve against `currentSurfaceState()`, the bucket for whichever
+surface is currently active. Every one of `core/loop.ts`'s many call sites that read or write
+`state.lastBlockerTargetId`, `state.routeMemory.recordBranchResult(...)`, and so on needed **no
+change at all** -- the refactor is entirely inside `RunState`, invisible to every caller.
+
+As of this PR, nothing anywhere in the engine calls `pushSurface`/`popSurface` yet (that is PR 3's
+job), so `activeSurface` is always `"main"` for the whole of every run, `currentSurfaceState()`
+always resolves to the same single bucket it always implicitly was, and every existing behaviour is
+provably unchanged -- not merely expected to be, since the getters/setters are a pure
+indirection layer over what was previously direct field access to the one bucket that now happens to
+be named `"main"` instead of being the object itself.
+
+`Observation.activeSurface` (new, `ActiveSurfaceInfo`: `{kind: "main" | "adopted_context" |
+"in_document", identity?}`) makes today's implicit "which page is this" explicit on every step.
+`core/loop.ts`'s new `withActiveSurface(observation, state)` helper is the single place that
+attaches it, called at every `buildObservation()` call site whose result eventually becomes this
+step's stored `StepLog.observation` or is passed to the reasoning layer (the top-of-step
+observation, and the low-confidence-retry and stale-target-recovery re-observations that get
+assigned back into it) -- never at a call site whose result is only used internally (e.g. the
+post-consent-click verification observation, or the post-action anchor-building observation), which
+never reach the response. `withActiveSurface` derives `kind`/`identity` from `state.activeSurface`
+itself, so it too always reports `{kind: "main"}` today.
+
+`safety.allowSurfaceAdoption` (boolean, default `false`), `safety.surfaceAdoptionDomainPolicy`
+(enum: `require_allowed_domain` default, `extend_trust_from_landing`), and
+`safety.maxAdoptedSurfacesPerRun` (integer, default 5) are added to the request schema now, ahead of
+PR 3 actually consuming them, purely so the contract shape and validation are settled before any
+behaviour depends on them -- setting `allowSurfaceAdoption: true` today changes nothing, since no
+adoption path exists yet.
+
+### Relationship with existing systems
+
+Purely additive scaffolding: no action-selection, safety-enforcement, or recovery logic changed.
+Every existing test that never touches a second surface exercises exactly the same single-bucket
+code path it always did.
+
+### Testing
+
+`tests/unit/runStateSurfaceScoping.test.ts` (new): `RunState` surface-stack push/pop behaviour, and
+per-surface scoping of `lastBlockerTargetId`/`lastBlockerSignature`/`blockerSignatureRepeatCount`/
+`routeMemory`/`lowConfidenceRetriedFingerprints` -- a fixture that pushes a second surface, writes
+state on it, pops back to "main", and confirms "main"'s own state was never touched and the second
+surface's state is preserved (not discarded) if re-entered. `tests/integration/activeSurfaceObservation.test.ts`
+(new): a real run confirms every stored `StepLog.observation.activeSurface` is `{kind: "main"}`
+end to end, and that the full existing regression suite (which never adopts a surface) is
+byte-for-byte unaffected.
+
+### Schema impact
+
+Additive only, `schemaVersion` `"1.18.0"` → `"1.19.0"` (request `schemaVersion` `"1.19.0"` →
+`"1.20.0"`, `outputSchemaVersion` `"1.18.0"` → `"1.19.0"`): new `safety.allowSurfaceAdoption`/
+`safety.surfaceAdoptionDomainPolicy`/`safety.maxAdoptedSurfacesPerRun` (request), new
+`observation.activeSurface` (response, `$defs/observation`). No existing field removed, renamed, or
+had its meaning changed.
+
+### Known limitations
+
+- `identity` on a non-`"main"` `ActiveSurfaceInfo` is unpopulated by this PR (nothing produces a
+  non-`"main"` surface yet) -- its exact content (a URL? a title? both?) is left to PR 3, which is
+  the first PR with a real surface to describe.
+- `SurfaceState` buckets are never evicted once created -- for the small, bounded surface counts
+  `safety.maxAdoptedSurfacesPerRun` (default 5) will enforce starting in PR 3, this is not a
+  practical growth concern, but it is worth noting the map is never pruned even after a surface is
+  permanently closed.

@@ -238,7 +238,7 @@ test("executeClick: a click that leaves the page mutating forever still succeeds
 
 function buildTask(params: { startUrl: string; maxSettleMs?: number }): TaskRequest {
   return {
-    schemaVersion: "1.19.0",
+    schemaVersion: "1.20.0",
     taskId: "adaptive-settling-wiring",
     objective: "Click the trigger control and stop once the destination control is visible.",
     startUrl: params.startUrl,
@@ -250,7 +250,7 @@ function buildTask(params: { startUrl: string; maxSettleMs?: number }): TaskRequ
     limits: { maxSteps: 4, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
     ...(params.maxSettleMs !== undefined ? { settling: { maxSettleMs: params.maxSettleMs } } : {}),
-    outputSchemaVersion: "1.18.0",
+    outputSchemaVersion: "1.19.0",
   };
 }
 

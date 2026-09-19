@@ -98,7 +98,7 @@ async function startConfiguratorFixture(): Promise<{
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.19.0",
+    schemaVersion: "1.20.0",
     taskId: "low-memory-mode-task",
     objective: "Reach the success page by following the visible continue control.",
     startUrl,
@@ -114,7 +114,7 @@ function buildTask(startUrl: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.18.0",
+    outputSchemaVersion: "1.19.0",
   };
 }
 

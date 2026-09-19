@@ -11,6 +11,34 @@ import type {
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 
+/** RunState.activeSurface always starts (and, until Phase 3 PR 3 wires real adoption, stays) here. */
+export const MAIN_SURFACE_ID = "main";
+
+/**
+ * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and docs/architecture.md
+ * §25): the per-surface bucket of state that must never leak between the tracked page
+ * ("main") and a future adopted popup/new-tab/drawer context. Everything in here was
+ * previously a flat RunState field; grouping it lets RunState key a whole bucket by surface
+ * id at once instead of threading a surface id through each field individually.
+ */
+interface SurfaceState {
+  lastBlockerTargetId: string | undefined;
+  lastBlockerSignature: string | undefined;
+  blockerSignatureRepeatCount: number;
+  readonly lowConfidenceRetriedFingerprints: Set<string>;
+  readonly routeMemory: RouteMemory;
+}
+
+function createSurfaceState(): SurfaceState {
+  return {
+    lastBlockerTargetId: undefined,
+    lastBlockerSignature: undefined,
+    blockerSignatureRepeatCount: 0,
+    lowConfidenceRetriedFingerprints: new Set<string>(),
+    routeMemory: new RouteMemory(),
+  };
+}
+
 export class RunState {
   stepCount = 0;
   backtrackCount = 0;
@@ -58,23 +86,101 @@ export class RunState {
   consecutiveStaleTargetFailures = 0;
 
   /**
+   * Active surface tracking scaffolding (Phase 3 PR 2): the surface (see MAIN_SURFACE_ID)
+   * this run is currently dispatching actions and evaluating state against, as a stack so a
+   * future adopted surface can be entered and returned from in nested fashion. Every
+   * existing run stays on a single-element `["main"]` stack for its entire lifetime today --
+   * nothing yet calls pushSurface/popSurface (Phase 3 PR 3 wires real adoption) -- so
+   * activeSurface is always MAIN_SURFACE_ID and every per-surface-scoped field below always
+   * resolves to the same one bucket, exactly reproducing this run's previous flat-field
+   * behaviour.
+   */
+  private readonly surfaceStack: string[] = [MAIN_SURFACE_ID];
+  private readonly surfaceStates = new Map<string, SurfaceState>([[MAIN_SURFACE_ID, createSurfaceState()]]);
+
+  get activeSurface(): string {
+    // Never empty -- MAIN_SURFACE_ID is pushed once at construction and popSurface refuses
+    // to remove the last remaining entry (see popSurface below) -- the fallback is purely to
+    // satisfy noUncheckedIndexedAccess, never a reachable runtime path.
+    return this.surfaceStack[this.surfaceStack.length - 1] ?? MAIN_SURFACE_ID;
+  }
+
+  private currentSurfaceState(): SurfaceState {
+    const id = this.activeSurface;
+    let bucket = this.surfaceStates.get(id);
+    if (!bucket) {
+      bucket = createSurfaceState();
+      this.surfaceStates.set(id, bucket);
+    }
+    return bucket;
+  }
+
+  /**
+   * Enters a new (or re-enters an existing) surface, pushing it onto the stack so it becomes
+   * activeSurface and every per-surface-scoped field below now resolves against its own,
+   * previously-untouched bucket -- never the surface being left, and never shared with any
+   * other surface id. The surface being left keeps its own bucket exactly as it was, ready
+   * to resume unchanged once popSurface returns to it.
+   */
+  pushSurface(surfaceId: string): void {
+    this.surfaceStack.push(surfaceId);
+  }
+
+  /**
+   * Leaves the current surface and returns to the one beneath it, restoring that surface's
+   * own bucket exactly as it was left. Never pops the last remaining entry -- "main" is
+   * always the stack's permanent floor -- so a caller that pops more times than it pushed
+   * simply stays on "main" rather than ever leaving the stack empty. Returns the surface id
+   * that was popped, or undefined if there was nothing above "main" to pop.
+   */
+  popSurface(): string | undefined {
+    if (this.surfaceStack.length <= 1) {
+      return undefined;
+    }
+    return this.surfaceStack.pop();
+  }
+
+  /**
    * Identity (see observation/observationBuilder.ts's ElementState.coveredBySignature) of
    * whatever intercepted the target of the most recent covered/intercepted stale-target
    * failure, and which target it was blocking -- undefined once that obstruction is
    * confirmed cleared (see core/loop.ts). Generic: keyed only on the intercepting
    * element's own tag/role/text, never on what kind of overlay it is (consent or
-   * otherwise), so it applies identically to any blocking overlay.
+   * otherwise), so it applies identically to any blocking overlay. Scoped per activeSurface
+   * (Phase 3 PR 2) so an obstruction tracked on one surface can never be mistaken for one on
+   * another.
    */
-  lastBlockerTargetId: string | undefined;
-  lastBlockerSignature: string | undefined;
+  get lastBlockerTargetId(): string | undefined {
+    return this.currentSurfaceState().lastBlockerTargetId;
+  }
+
+  set lastBlockerTargetId(value: string | undefined) {
+    this.currentSurfaceState().lastBlockerTargetId = value;
+  }
+
+  get lastBlockerSignature(): string | undefined {
+    return this.currentSurfaceState().lastBlockerSignature;
+  }
+
+  set lastBlockerSignature(value: string | undefined) {
+    this.currentSurfaceState().lastBlockerSignature = value;
+  }
+
   /**
    * How many consecutive times lastBlockerSignature has been re-observed unchanged.
    * core/loop.ts allows one reasoning-provider call while this is 0 (a provider always
    * gets at least one chance to react to a freshly-detected obstruction); once it reaches
    * 1, a further reasoning call is skipped in favour of a deterministic stale-target
    * outcome, so no additional call is spent against a page state that hasn't changed.
+   * Scoped per activeSurface (Phase 3 PR 2), same as lastBlockerTargetId/lastBlockerSignature.
    */
-  blockerSignatureRepeatCount = 0;
+  get blockerSignatureRepeatCount(): number {
+    return this.currentSurfaceState().blockerSignatureRepeatCount;
+  }
+
+  set blockerSignatureRepeatCount(value: number) {
+    this.currentSurfaceState().blockerSignatureRepeatCount = value;
+  }
 
   /** Hostname of the previous step's observation, or undefined before the first step -- lets core/loop.ts detect a cross-host transition to trigger the (opt-in) host_context_snapshot capture. */
   lastObservedHostname: string | undefined;
@@ -107,9 +213,15 @@ export class RunState {
    * non-adjacent steps (e.g. after a go_back, or a fresh page load that reassigns every
    * element's own ephemeral id) -- something the existing repeated-action guard, keyed on
    * exact linear-history repetition, cannot see. Never persisted beyond this run, never
-   * surfaced on TaskResponse (Phase 1 scope).
+   * surfaced on TaskResponse (Phase 1 scope). Scoped per activeSurface (Phase 3 PR 2): a
+   * route tried on one surface is never mistaken for one tried on another. Always the same
+   * RouteMemory instance for the life of one surface -- callers may still hold onto or
+   * repeatedly call methods on the returned reference within a single step exactly as
+   * before; only which instance this getter resolves to depends on activeSurface.
    */
-  readonly routeMemory = new RouteMemory();
+  get routeMemory(): RouteMemory {
+    return this.currentSurfaceState().routeMemory;
+  }
 
   /**
    * PR 1C (Low-confidence recovery, see docs/architecture.md): decision-point fingerprints
@@ -118,9 +230,12 @@ export class RunState {
    * per fingerprint per run -- a recurring ambiguous surface can never spend unbounded
    * extra reasoning-provider calls. Never cleared within a run (a fingerprint that needed
    * this once is unlikely to need it differently later), and small by construction (one
-   * entry per genuinely distinct decision point that ever triggered this recovery).
+   * entry per genuinely distinct decision point that ever triggered this recovery). Scoped
+   * per activeSurface (Phase 3 PR 2), same reasoning as routeMemory above.
    */
-  readonly lowConfidenceRetriedFingerprints = new Set<string>();
+  get lowConfidenceRetriedFingerprints(): Set<string> {
+    return this.currentSurfaceState().lowConfidenceRetriedFingerprints;
+  }
 
   /**
    * PR 1C (Low-confidence recovery): consecutive count of decisions whose Decision.
