@@ -89,6 +89,85 @@ test("adopt -> single click -> milestone (window.open() popup mechanism)", async
   }
 });
 
+test("adopt -> popup opened after a delay past the old 250ms window is still detected while the page stays visibly active (regression: delayed surface detection, PR 1)", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/surface-adopt-source-delayed.html`,
+      successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+      safety: {
+        allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+        allowSurfaceAdoption: true,
+      },
+    });
+    // The fixture's click handler opens the popup via setTimeout(..., 1500) -- well past the
+    // previous fixed 250ms popup-listener grace window -- while a periodic status-text update
+    // keeps the tracked page's own DOM demonstrably active (never fully quiet) until the popup
+    // opens, so the settle wait this PR now ties the listener's lifetime to is still running
+    // when the popup appears. Prior to this fix, the popup would have opened after the
+    // listener was already torn down at the old fixed 250ms mark and gone completely
+    // undetected regardless of the page's own activity.
+    const reasoning = new ScriptedReasoningProvider([byAccessibleName("Open Offer Tab (Delayed)"), byAccessibleName("Confirm Offer")]);
+
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "success");
+    assert.equal(response.finalUrl, `${baseUrl}/surface-adopt-milestone.html`);
+
+    const adoptionStep = findAdoptionStep(response.steps);
+    assert.ok(adoptionStep, "expected the delayed popup to still be detected and adopted");
+    assert.equal(adoptionStep?.actionResult.openedNewContext, true);
+    assert.equal(adoptionStep?.actionResult.adoptionRejectedReason, undefined);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test(
+  "adopt -> popup opened after a delay with NO other page activity is still missed by PR 1 alone (documents the known remaining gap; closed by PR 2's pages() reconciliation, not yet implemented)",
+  { skip: "Expected to fail until PR 2 (browserContext.pages() reconciliation) lands -- see click.ts's own PR 1 doc comment for why this case is out of PR 1's scope." },
+  async () => {
+    const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+
+    try {
+      const task = baseTask({
+        startUrl: `${baseUrl}/surface-adopt-source-delayed-quiet.html`,
+        successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+        safety: {
+          allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+          allowSurfaceAdoption: true,
+        },
+      });
+      // No correlated DOM activity on the tracked page while the popup's own 1500ms timer
+      // runs -- domSettleProbe exits early (quiet_window, ~250ms) well before the popup
+      // opens, the popup listener is torn down at that point, and the popup is missed. This
+      // is the exact shape of the real production evidence that originally surfaced the
+      // detection gap (a same-document, zero-DOM-change result before the tab appeared).
+      const reasoning = new ScriptedReasoningProvider([
+        byAccessibleName("Open Offer Tab (Delayed, Quiet)"),
+        byAccessibleName("Confirm Offer"),
+      ]);
+
+      const response = await runTask({ page, task, reasoning });
+
+      assert.equal(response.status, "success");
+      const adoptionStep = findAdoptionStep(response.steps);
+      assert.ok(adoptionStep, "expected the delayed popup to be detected and adopted");
+    } finally {
+      await page.close();
+      await browser.close();
+      await close();
+    }
+  },
+);
+
 test('adopt -> multiple sequential actions -> milestone (target="_blank" popup mechanism)', async () => {
   const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
   const browser = await chromium.launch();

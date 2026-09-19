@@ -35,13 +35,6 @@ import {
 
 const CLICK_ELEMENT_TIMEOUT_MS = 5000;
 
-// Short, fixed grace window (mirrors PAGE_SETTLE_DELAY_MS) to let a navigation that a
-// click's handler triggers a beat late (e.g. via a JS timeout/promise chain, rather than
-// a plain <a href>) register before concluding the click did not navigate at all. Not
-// env-configurable: it only decides whether to enter the robust-navigation wait below, it
-// is never itself the wait for a slow page.
-const NAVIGATION_DETECT_GRACE_MS = 250;
-
 const ALLOWED_FALLBACK_PROTOCOLS = new Set(["http:", "https:"]);
 
 function safePageUrl(page: Page): string | undefined {
@@ -472,7 +465,8 @@ async function resolveUnactionableClick(params: {
  * reached, and the resulting URL (including any redirect) is checked against
  * allowedDomains before the click is reported as successful. A click that never triggers
  * navigation at all (a toggle/expand button, say) is not made to pay this
- * navigation-timeout budget -- see NAVIGATION_DETECT_GRACE_MS. A click that opens a new
+ * navigation-timeout budget -- it only pays the same adaptive settle wait used for detecting
+ * a delayed popup/new-tab below. A click that opens a new
  * browsing context instead of navigating the tracked page (target="_blank", window.open())
  * is never reported as an unqualified success either: the new context is closed and the
  * same generic destinationUrl fallback is attempted on the tracked page, since there is
@@ -702,8 +696,32 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     });
   }
 
+  // Delayed surface detection (surface-relevance corrective work, PR 1 -- see CLAUDE.md and
+  // docs/architecture.md "Surface adoption"): the popup listener must stay armed for at least
+  // as long as this click's own settle wait actually runs, not a fixed short grace window --
+  // previously it was torn down after a fixed 250ms window regardless of what the settle wait
+  // below would otherwise have done, so a popup opening any time after 250ms was missed even
+  // while the page was still demonstrably busy (DOM mutating / interactive-element count
+  // changing). Reusing the exact same wait the non-popup success path already needs (rather
+  // than a second, independent timer) ties detection lifetime to the same "is anything still
+  // happening" signal already used for settling -- no new constant.
+  //
+  // Known, deliberate limitation of this PR alone (confirmed by this file's own regression
+  // test): domSettleProbe (core/robustNavigation.ts) exits *early*, at its floor/quiet-window,
+  // the instant the tracked page itself goes DOM-quiet -- a popup that opens later than that,
+  // with no correlated activity on the tracked page in the meantime (the exact shape of the
+  // real production evidence that originally surfaced this gap: a same-document, zero-DOM-
+  // change result before the tab appeared), is still missed by this mechanism alone, since the
+  // listener is torn down the moment the probe exits early. Deliberately not solved here by
+  // forcing every non-navigating, non-popup click to always pay the full settleCeilingMs (that
+  // would regress every ordinary click's latency for a benefit only a minority of clicks ever
+  // need) -- closing that remaining gap without that cost is exactly what the next PR's
+  // browserContext.pages() reconciliation (polling independently of DOM quietness) is for.
+  // Computed once here, while the listener is still armed, and reused below as this click's
+  // own settleDiagnostic when no popup was found, rather than waiting a second time.
+  let preliminarySettleDiagnostic: SettleOutcome | undefined;
   if (!mainFrameNavigated) {
-    await page.waitForTimeout(NAVIGATION_DETECT_GRACE_MS).catch(() => {});
+    preliminarySettleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
   }
   page.off("framenavigated", onFrameNavigated);
   page.off("popup", onPopup);
@@ -780,8 +798,10 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // PR 1C-a (replace fixed timing dependency), generalized by the Phase 3 adaptive-
     // settling pass: bounded, DOM-mutation/interactive-element-aware readiness wait in place
     // of a fixed sleep -- see waitForPostClickReadiness above. Applies to every non-navigating
-    // click uniformly; nothing here knows or cares what kind of element was clicked.
-    const settleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
+    // click uniformly; nothing here knows or cares what kind of element was clicked. Already
+    // computed above (preliminarySettleDiagnostic) while the popup listener was still armed --
+    // never re-run.
+    const settleDiagnostic = preliminarySettleDiagnostic as SettleOutcome;
     // One additional, single lightweight snapshot (no extra polling/wait budget beyond the
     // settle wait just above) so a click that succeeded outright -- never even looking
     // intercepted -- but opened a same-document modal/drawer is still correctly reported as

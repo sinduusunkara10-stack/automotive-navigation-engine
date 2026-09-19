@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Offer Landing (Delayed Tab)</title>
+  </head>
+  <body>
+    <h1>Configurator complete</h1>
+    <p>Continue to a partner offer in a new tab, opened after a delay (simulating a slow
+      validation call) while the page itself keeps showing visible progress.</p>
+    <p id="status">Checking availability&hellip;</p>
+    <button
+      type="button"
+      id="open-offer-tab-delayed"
+      onclick="
+        var n = 0;
+        var iv = setInterval(function () {
+          n += 1;
+          document.getElementById('status').textContent = 'Checking availability' + '.'.repeat((n % 3) + 1);
+        }, 40);
+        setTimeout(function () {
+          clearInterval(iv);
+          document.getElementById('status').textContent = 'Offer ready.';
+          window.open('surface-adopt-target-single.html', '_blank');
+        }, 1500);
+      "
+    >
+      Open Offer Tab (Delayed)
+    </button>
+  </body>
+</html>

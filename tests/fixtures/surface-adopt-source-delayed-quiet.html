@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Offer Landing (Delayed Tab, No Visible Activity)</title>
+  </head>
+  <body>
+    <h1>Configurator complete</h1>
+    <p>Continue to a partner offer in a new tab, opened after a delay with no other visible
+      page activity in the meantime -- the shape of the real production evidence that
+      originally surfaced the popup-detection gap (a same-document, zero-DOM-change result
+      before the tab appeared).</p>
+    <button
+      type="button"
+      id="open-offer-tab-delayed-quiet"
+      onclick="setTimeout(function () { window.open('surface-adopt-target-single.html', '_blank'); }, 1500)"
+    >
+      Open Offer Tab (Delayed, Quiet)
+    </button>
+  </body>
+</html>
