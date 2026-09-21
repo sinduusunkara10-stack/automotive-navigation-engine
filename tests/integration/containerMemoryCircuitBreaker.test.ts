@@ -27,7 +27,7 @@ test("a breached memory threshold stops the run safely and preserves partial evi
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.20.0",
+      schemaVersion: "1.21.0",
       taskId: "container-memory-breach-task",
       objective: "Reach an unreachable success state so the memory circuit breaker is exercised instead.",
       startUrl: `${baseUrl}/start.html`,
@@ -43,7 +43,7 @@ test("a breached memory threshold stops the run safely and preserves partial evi
       captureModules: ["page_visits", "journey_path", "errors"],
       limits: { maxSteps: 10, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.21.0",
+      outputSchemaVersion: "1.22.0",
     };
 
     const response = await runTask({ page, task, isMemoryThresholdBreached: () => true });
@@ -77,7 +77,7 @@ test("without a breach signal, the same task proceeds normally (no false positiv
 
   try {
     const task: TaskRequest = {
-      schemaVersion: "1.20.0",
+      schemaVersion: "1.21.0",
       taskId: "container-memory-no-breach-task",
       objective: "Reach an unreachable success state so the step ceiling is exercised instead of the breaker.",
       startUrl: `${baseUrl}/start.html`,
@@ -93,7 +93,7 @@ test("without a breach signal, the same task proceeds normally (no false positiv
       captureModules: ["page_visits"],
       limits: { maxSteps: 1, maxBacktracks: 0 },
       safety: { allowedActions: ["click", "stop_success", "stop_failure"] },
-      outputSchemaVersion: "1.21.0",
+      outputSchemaVersion: "1.22.0",
     };
 
     const response = await runTask({ page, task, isMemoryThresholdBreached: () => false });

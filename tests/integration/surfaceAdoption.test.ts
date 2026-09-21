@@ -24,23 +24,30 @@ import { ScriptedReasoningProvider, byAccessibleName, byAccessibleNameAndHeading
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.20.0",
+    schemaVersion: "1.21.0",
     taskId: "surface-adoption-test",
-    objective: "Reach the fixture's confirmed-offer page, following any partner tab it opens.",
+    // Deliberately short and vocabulary-matched to these fixtures' own title text
+    // ("Confirmed Partner Offer") -- surface-relevance corrective work, PR 5 (trust-policy
+    // integration): every click now runs core/surfaceRelevance.ts's relevance gate before a
+    // popup can be adopted, so a candidate's content must genuinely overlap the task's own
+    // objective/success-criteria/CTA vocabulary to clear RELEVANCE_ADOPT_THRESHOLD. This is
+    // the fixture-wording pass the approved PR breakdown's own PR 5 acceptance criteria
+    // flagged as a known, explicit regression risk -- see the PR 3/PR 5 boundary reports.
+    objective: "Reach the confirmed partner offer.",
     startUrl,
     allowedDomains: ["127.0.0.1"],
     successCriteria: [
       {
         id: "reached_milestone",
         type: "url_pattern",
-        description: "The current page URL matches the expected milestone fixture.",
+        description: "The partner offer is confirmed.",
         config: { pattern: successPattern },
       },
     ],
     captureModules: ["page_visits"],
     limits: { maxSteps: 10, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.21.0",
+    outputSchemaVersion: "1.22.0",
     ...rest,
   };
 }
@@ -88,6 +95,126 @@ test("adopt -> single click -> milestone (window.open() popup mechanism)", async
     await close();
   }
 });
+
+test("pages() reconciliation never double-claims a popup the \"popup\" event already claimed (regression: dedup, PR 2)", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/surface-adopt-source-winopen.html`,
+      successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+      safety: {
+        allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+        allowSurfaceAdoption: true,
+      },
+    });
+    // The popup opens immediately on click, well before the first 250ms reconciliation poll
+    // tick -- so the "popup" event claims it first, and every subsequent poll tick (the
+    // popup stays open for the rest of this multi-step journey, well past 250ms) observes the
+    // exact same, already-claimed Page. If the dedup guard in click.ts's claimPopupCandidate
+    // were missing or broken, this would show up as more than one adoption event and/or more
+    // than one distinct adopted-surface identity for what is genuinely a single popup.
+    const reasoning = new ScriptedReasoningProvider([byAccessibleName("Open Offer Tab"), byAccessibleName("Confirm Offer")]);
+
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "success");
+    const adoptionSteps = response.steps.filter((s) => s.actionResult.surfaceAdopted === true);
+    assert.equal(adoptionSteps.length, 1, "expected exactly one adoption event for one popup, even though reconciliation kept polling it");
+    const identities = new Set(
+      response.steps
+        .filter((s) => s.observation.activeSurface?.kind === "adopted_context")
+        .map((s) => s.observation.activeSurface?.identity),
+    );
+    assert.deepEqual([...identities], ["adopted-1"], "expected exactly one distinct adopted-surface identity, not a duplicate");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("adopt -> popup opened after a delay past the old 250ms window is still detected while the page stays visibly active (regression: delayed surface detection, PR 1)", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/surface-adopt-source-delayed.html`,
+      successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+      safety: {
+        allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+        allowSurfaceAdoption: true,
+      },
+    });
+    // The fixture's click handler opens the popup via setTimeout(..., 1500) -- well past the
+    // previous fixed 250ms popup-listener grace window -- while a periodic status-text update
+    // keeps the tracked page's own DOM demonstrably active (never fully quiet) until the popup
+    // opens, so the settle wait this PR now ties the listener's lifetime to is still running
+    // when the popup appears. Prior to this fix, the popup would have opened after the
+    // listener was already torn down at the old fixed 250ms mark and gone completely
+    // undetected regardless of the page's own activity.
+    const reasoning = new ScriptedReasoningProvider([byAccessibleName("Open Offer Tab (Delayed)"), byAccessibleName("Confirm Offer")]);
+
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "success");
+    assert.equal(response.finalUrl, `${baseUrl}/surface-adopt-milestone.html`);
+
+    const adoptionStep = findAdoptionStep(response.steps);
+    assert.ok(adoptionStep, "expected the delayed popup to still be detected and adopted");
+    assert.equal(adoptionStep?.actionResult.openedNewContext, true);
+    assert.equal(adoptionStep?.actionResult.adoptionRejectedReason, undefined);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test(
+  "adopt -> popup opened after a delay with NO other page activity is still detected via pages() reconciliation (regression: the exact gap PR 1 alone left open, closed by PR 2)",
+  async () => {
+    const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+
+    try {
+      const task = baseTask({
+        startUrl: `${baseUrl}/surface-adopt-source-delayed-quiet.html`,
+        successPattern: `${baseUrl}/surface-adopt-milestone.html`,
+        safety: {
+          allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"],
+          allowSurfaceAdoption: true,
+        },
+      });
+      // No correlated DOM activity on the tracked page while the popup's own 1500ms timer
+      // runs -- domSettleProbe exits early (quiet_window, ~250ms) well before the popup
+      // opens, so PR 1's listener-extension alone (tied to that same early exit) would still
+      // miss it. This is the exact shape of the real production evidence that originally
+      // surfaced the detection gap (a same-document, zero-DOM-change result before the tab
+      // appeared). PR 2's pages()-reconciliation polls independently of DOM quietness and
+      // catches it instead.
+      const reasoning = new ScriptedReasoningProvider([
+        byAccessibleName("Open Offer Tab (Delayed, Quiet)"),
+        byAccessibleName("Confirm Offer"),
+      ]);
+
+      const response = await runTask({ page, task, reasoning });
+
+      assert.equal(response.status, "success");
+      const adoptionStep = findAdoptionStep(response.steps);
+      assert.ok(adoptionStep, "expected the delayed popup to be detected and adopted");
+    } finally {
+      await page.close();
+      await browser.close();
+      await close();
+    }
+  },
+);
 
 test('adopt -> multiple sequential actions -> milestone (target="_blank" popup mechanism)', async () => {
   const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);

@@ -9,7 +9,20 @@ import { checkNavigationAllowed } from "../safety/domainGuard.js";
  */
 export const DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN = 5;
 
-export type AdoptionRejectionReason = "adoption_disabled" | "domain_rejected" | "budget_exhausted";
+/**
+ * "relevance_rejected" (surface-relevance corrective work, PR 3) is produced by
+ * capture-modules/popupCapture.ts's own relevance gate (src/core/surfaceRelevance.ts),
+ * before this function is ever called -- decideSurfaceAdoption itself never assesses
+ * relevance and never returns this reason. Internal-only for now, same treatment as
+ * "adoption_disabled" today: not yet exposed on the wire (ActionResult.adoptionRejectedReason,
+ * SurfaceAdoptionAttemptDiagnostic.reason), which is a genuine schema/contract change
+ * deliberately deferred to PR 6 per CLAUDE.md's contract-versioning rule.
+ */
+export type AdoptionRejectionReason =
+  | "adoption_disabled"
+  | "domain_rejected"
+  | "budget_exhausted"
+  | "relevance_rejected";
 
 export interface AdoptionDecision {
   adopt: boolean;

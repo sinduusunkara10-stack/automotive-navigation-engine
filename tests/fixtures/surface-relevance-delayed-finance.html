@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <!--
+      Genuinely blank at first paint AND throughout the loading phase below (no title, no
+      visible body text, no interactive elements) -- used to test
+      assessSurfaceRelevance's "not yet a usable document" bounded resettle path (see
+      tests/integration/surfaceRelevance.test.ts), not the ambiguous-score path.
+
+      core/robustNavigation.ts's domSettleProbe only extends its own quiet-window wait past its
+      250ms floor when it actually observes a DOM mutation close to that floor -- a page with
+      zero activity at all resolves right at the 250ms floor regardless of a later one-shot
+      mutation still to come (the exact same distinction PR 1's own "correlated activity" vs
+      "DOM-quiet" fixtures already document, see surface-adopt-source-delayed.html). A real
+      loading state is rarely perfectly silent, so this fixture mirrors that with a genuine,
+      continuous (but invisible -- an attribute toggle, not visible text) DOM mutation, well
+      under the 100ms quiet window (matching surface-adopt-source-delayed.html's own 40ms
+      interval), until the real content is ready.
+    -->
+    <script>
+      var ticks = 0;
+      var loadingInterval = setInterval(function () {
+        ticks += 1;
+        document.body.setAttribute("data-loading-tick", String(ticks));
+      }, 40);
+      setTimeout(function () {
+        clearInterval(loadingInterval);
+        document.body.removeAttribute("data-loading-tick");
+        document.title = "Vehicle Finance Application";
+        var h1 = document.createElement("h1");
+        h1.textContent = "Vehicle Finance Application";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Start Finance Application";
+        document.body.appendChild(h1);
+        document.body.appendChild(button);
+      }, 400);
+    </script>
+  </body>
+</html>

@@ -23,6 +23,8 @@ import {
   assessNavigationRecovery,
   robustGoto,
   waitForAdaptiveSettle,
+  DEFAULT_SETTLE_CEILING_MS,
+  MAX_SETTLE_CEILING_MS,
   type RobustGotoOutcome,
   type SettleOutcome,
 } from "../core/robustNavigation.js";
@@ -32,15 +34,15 @@ import {
   type AdoptOrCapturePopupResult,
   type SurfaceAdoptionRequest,
 } from "../capture-modules/popupCapture.js";
+import { findNewPages } from "./pagesReconciliation.js";
 
 const CLICK_ELEMENT_TIMEOUT_MS = 5000;
 
-// Short, fixed grace window (mirrors PAGE_SETTLE_DELAY_MS) to let a navigation that a
-// click's handler triggers a beat late (e.g. via a JS timeout/promise chain, rather than
-// a plain <a href>) register before concluding the click did not navigate at all. Not
-// env-configurable: it only decides whether to enter the robust-navigation wait below, it
-// is never itself the wait for a slow page.
-const NAVIGATION_DETECT_GRACE_MS = 250;
+// browserContext.pages() reconciliation (surface-relevance corrective work, PR 2): the
+// interval *between* polling checks, not the total detection window -- that stays tied to
+// this click's own settle ceiling (default DEFAULT_SETTLE_CEILING_MS/3000ms, hard cap
+// MAX_SETTLE_CEILING_MS/10000ms), never a separate, independent duration of its own.
+const PAGES_RECONCILIATION_POLL_MS = 250;
 
 const ALLOWED_FALLBACK_PROTOCOLS = new Set(["http:", "https:"]);
 
@@ -472,7 +474,8 @@ async function resolveUnactionableClick(params: {
  * reached, and the resulting URL (including any redirect) is checked against
  * allowedDomains before the click is reported as successful. A click that never triggers
  * navigation at all (a toggle/expand button, say) is not made to pay this
- * navigation-timeout budget -- see NAVIGATION_DETECT_GRACE_MS. A click that opens a new
+ * navigation-timeout budget -- it only pays the same adaptive settle wait used for detecting
+ * a delayed popup/new-tab below. A click that opens a new
  * browsing context instead of navigating the tracked page (target="_blank", window.open())
  * is never reported as an unqualified success either: the new context is closed and the
  * same generic destinationUrl fallback is attempted on the tracked page, since there is
@@ -561,26 +564,65 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   // page's main frame for that case, so without this the click below would otherwise be
   // reported an unqualified success with the URL/title left completely unchanged.
   let popupOpened: Page | undefined;
-  // Started the instant the "popup" event fires -- before returning control to the event
-  // loop for anything else -- so GA4/dataLayer capture is attached to the new context as
-  // early as possible (item A.3 of the popup/new-context capture fix), well before a fast
-  // local/CDN-hosted destination page could otherwise load and fire its own beacon/push
-  // unobserved. Whichever branch below ends up handling this click simply awaits this
-  // already-in-flight promise rather than starting adoption itself.
+  // Started the instant a popup candidate is claimed (by either the "popup" event below or
+  // the pages()-reconciliation poll) -- before returning control to the event loop for
+  // anything else -- so GA4/dataLayer capture is attached to the new context as early as
+  // possible (item A.3 of the popup/new-context capture fix), well before a fast local/
+  // CDN-hosted destination page could otherwise load and fire its own beacon/push unobserved.
+  // Whichever branch below ends up handling this click simply awaits this already-in-flight
+  // promise rather than starting adoption itself.
   let popupAdoption: Promise<AdoptOrCapturePopupResult> | undefined;
-  const onPopup = (popup: Page) => {
-    popupOpened = popup;
-    popupAdoption = adoptOrCapturePopup({ popup, captures, stepIndex, captureModules, surfaceAdoption }).catch(
-      () => ({ observed: false }),
-    );
+  // browserContext.pages() reconciliation (surface-relevance corrective work, PR 2): both
+  // discovery mechanisms below (the "popup" event and the polling loop) route through this
+  // single claim function so at most one candidate is ever adopted per click (the existing,
+  // unchanged one-popup-per-click model) and the same page is never processed twice if both
+  // mechanisms happen to observe it.
+  const claimedPopupCandidates = new Set<Page>();
+  const claimPopupCandidate = (candidate: Page) => {
+    if (popupOpened || claimedPopupCandidates.has(candidate) || candidate.isClosed()) {
+      return;
+    }
+    claimedPopupCandidates.add(candidate);
+    popupOpened = candidate;
+    popupAdoption = adoptOrCapturePopup({
+      popup: candidate,
+      captures,
+      stepIndex,
+      captureModules,
+      surfaceAdoption,
+      settleCeilingMs,
+    }).catch(() => ({ observed: false }));
   };
+  const onPopup = (popup: Page) => claimPopupCandidate(popup);
   // Registered before the click so a navigation (or popup) that commits fast is never missed.
   page.on("framenavigated", onFrameNavigated);
   page.on("popup", onPopup);
 
+  // browserContext.pages() reconciliation (surface-relevance corrective work, PR 2 -- see
+  // CLAUDE.md and docs/architecture.md "Surface adoption"): a backstop alongside the "popup"
+  // event above, polling browserContext.pages() on a fixed interval for a new Page the
+  // "popup" event might have missed -- including one that opens after the tracked page has
+  // already gone fully DOM-quiet, which is exactly the gap PR 1's own doc comment (below)
+  // documents as still open at the end of that PR. Snapshotting context.pages() here, before
+  // the click, means anything already open (the tracked page itself included) is never
+  // mistaken for a new candidate. Only runs when this run actually requested surface adoption
+  // (surfaceAdoption?.enabled) -- a task that never sets allowSurfaceAdoption pays nothing
+  // extra here, since nothing downstream would ever use a discovered page anyway.
+  const context = page.context();
+  const prePagesSnapshot = context.pages();
+  const clickDispatchedAt = Date.now();
+  const pagesReconciliationTimer: NodeJS.Timeout | undefined = surfaceAdoption?.enabled
+    ? setInterval(() => {
+        for (const candidate of findNewPages(prePagesSnapshot, context.pages())) {
+          claimPopupCandidate(candidate);
+        }
+      }, PAGES_RECONCILIATION_POLL_MS)
+    : undefined;
+
   try {
     await clickTarget.click(selector, { timeout: CLICK_ELEMENT_TIMEOUT_MS });
   } catch (error) {
+    clearInterval(pagesReconciliationTimer);
     page.off("framenavigated", onFrameNavigated);
     page.off("popup", onPopup);
     const openedNewContext = Boolean(popupOpened);
@@ -702,9 +744,42 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     });
   }
 
+  // Delayed surface detection (surface-relevance corrective work, PR 1 -- see CLAUDE.md and
+  // docs/architecture.md "Surface adoption"): the popup listener must stay armed for at least
+  // as long as this click's own settle wait actually runs, not a fixed short grace window --
+  // previously it was torn down after a fixed 250ms window regardless of what the settle wait
+  // below would otherwise have done, so a popup opening any time after 250ms was missed even
+  // while the page was still demonstrably busy (DOM mutating / interactive-element count
+  // changing). Reusing the exact same wait the non-popup success path already needs (rather
+  // than a second, independent timer) ties detection lifetime to the same "is anything still
+  // happening" signal already used for settling -- no new constant. Computed once here, while
+  // the listener is still armed, and reused below as this click's own settleDiagnostic when no
+  // popup was found, rather than waiting a second time.
+  let preliminarySettleDiagnostic: SettleOutcome | undefined;
   if (!mainFrameNavigated) {
-    await page.waitForTimeout(NAVIGATION_DETECT_GRACE_MS).catch(() => {});
+    preliminarySettleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
+    // browserContext.pages() reconciliation (surface-relevance corrective work, PR 2): the
+    // settle probe above can (and often does, on an otherwise DOM-quiet page) resolve well
+    // before this click's own settle ceiling -- that early exit is exactly the gap PR 1's own
+    // history documents as still open (a popup with no correlated tracked-page activity, the
+    // real shape of the production evidence that originally surfaced this whole area). When
+    // reconciliation is active, keep polling for the *remainder* of the same ceiling budget
+    // already committed to above (clickDispatchedAt + ceilingMs) -- never a second, additional
+    // full ceiling stacked on top of the settle probe's own wait -- until either a candidate is
+    // claimed or the ceiling is reached. Deliberate, opt-in latency trade-off, not a free
+    // improvement: a run with allowSurfaceAdoption enabled now waits up to its full settle
+    // ceiling on every non-navigating, non-popup click rather than returning as soon as the
+    // tracked page itself looks quiet -- see this PR's own report for that cost stated
+    // explicitly, not asserted away.
+    if (pagesReconciliationTimer) {
+      const ceilingMs = Math.min(settleCeilingMs ?? DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS);
+      const deadline = clickDispatchedAt + ceilingMs;
+      while (!popupOpened && Date.now() < deadline) {
+        await page.waitForTimeout(Math.min(PAGES_RECONCILIATION_POLL_MS, Math.max(deadline - Date.now(), 0))).catch(() => {});
+      }
+    }
   }
+  clearInterval(pagesReconciliationTimer);
   page.off("framenavigated", onFrameNavigated);
   page.off("popup", onPopup);
 
@@ -739,6 +814,14 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         resultingUrl: popupOutcome.adoptedUrl ?? popupUrl,
         surfaceAdopted: true,
         openedNewContext: true,
+        // Surface-relevance corrective work (PR 6): wire the same relevance/consent evidence
+        // adoptOrCapturePopup already computed onto the JSON-serializable ActionResult, so an
+        // adopted candidate reports *why* it cleared the gate, not only that it was adopted.
+        ...(popupOutcome.relevanceAssessment
+          ? { relevanceScore: popupOutcome.relevanceAssessment.score, relevanceTier: popupOutcome.relevanceAssessment.tier }
+          : {}),
+        ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
+        ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
       };
     }
     const observedNewContext = popupOutcome.observed;
@@ -768,20 +851,33 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // "adoption_disabled" is deliberately never reachable here: this whole popupAdoption
     // path only ever calls decideSurfaceAdoption (core/surfaceAdoption.ts) with
     // allowSurfaceAdoption: true (see adoptOrCapturePopup's own early-return guard) --
-    // ActionResult.adoptionRejectedReason's narrower two-value type reflects that.
+    // ActionResult.adoptionRejectedReason's narrower three-value type reflects that.
     const reportableReason =
-      popupOutcome.adoptionRejectedReason === "domain_rejected" || popupOutcome.adoptionRejectedReason === "budget_exhausted"
+      popupOutcome.adoptionRejectedReason === "domain_rejected" ||
+      popupOutcome.adoptionRejectedReason === "budget_exhausted" ||
+      popupOutcome.adoptionRejectedReason === "relevance_rejected"
         ? popupOutcome.adoptionRejectedReason
         : undefined;
-    return reportableReason ? { ...unactionableResult, adoptionRejectedReason: reportableReason } : unactionableResult;
+    return {
+      ...unactionableResult,
+      ...(reportableReason ? { adoptionRejectedReason: reportableReason } : {}),
+      // Surface-relevance corrective work (PR 6): reported on a rejected candidate too, not
+      // only an adopted one -- this is the evidence for *why* relevance_rejected fired.
+      ...(popupOutcome.relevanceAssessment
+        ? { relevanceScore: popupOutcome.relevanceAssessment.score, relevanceTier: popupOutcome.relevanceAssessment.tier }
+        : {}),
+      ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
+    };
   }
 
   if (!mainFrameNavigated) {
     // PR 1C-a (replace fixed timing dependency), generalized by the Phase 3 adaptive-
     // settling pass: bounded, DOM-mutation/interactive-element-aware readiness wait in place
     // of a fixed sleep -- see waitForPostClickReadiness above. Applies to every non-navigating
-    // click uniformly; nothing here knows or cares what kind of element was clicked.
-    const settleDiagnostic = await waitForPostClickReadiness(page, settleCeilingMs);
+    // click uniformly; nothing here knows or cares what kind of element was clicked. Already
+    // computed above (preliminarySettleDiagnostic) while the popup listener was still armed --
+    // never re-run.
+    const settleDiagnostic = preliminarySettleDiagnostic as SettleOutcome;
     // One additional, single lightweight snapshot (no extra polling/wait budget beyond the
     // settle wait just above) so a click that succeeded outright -- never even looking
     // intercepted -- but opened a same-document modal/drawer is still correctly reported as

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>My Site</title>
+  </head>
+  <body>
+    <!--
+      Surface-relevance corrective work, PR 4 widening (your reject-tier challenge,
+      2026-09-21): the same realistic, vendor-generic consent banner as
+      surface-relevance-consent-reject-tier.html, but the content revealed after "Accept All"
+      is genuinely unrelated to the vehicle-finance objective (a newsletter subscription
+      surface) -- proves that widening the consent-only-candidate trigger to the "reject" tier
+      does not let a genuinely irrelevant popup slip through just because it happens to also
+      carry a consent banner: the resettle-and-rescore after the one bounded click still
+      correctly discards it.
+    -->
+    <div id="cmp-root">
+      <h2>We value your privacy</h2>
+      <p>We use cookies to enhance your browsing experience, serve personalized content, and analyze our traffic.</p>
+      <button type="button" id="accept-all">Accept All</button>
+      <button type="button" id="reject-all">Reject All</button>
+      <button type="button" id="manage">Manage Preferences</button>
+    </div>
+    <script>
+      document.getElementById("accept-all").addEventListener("click", function () {
+        document.getElementById("cmp-root").remove();
+        document.title = "Newsletter Signup";
+        var h1 = document.createElement("h1");
+        h1.textContent = "Subscribe to Our Newsletter";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Subscribe Now";
+        document.body.appendChild(h1);
+        document.body.appendChild(button);
+      });
+    </script>
+  </body>
+</html>

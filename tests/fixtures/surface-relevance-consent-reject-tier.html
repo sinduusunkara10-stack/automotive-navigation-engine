@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>My Site</title>
+  </head>
+  <body>
+    <!--
+      Surface-relevance corrective work, PR 4 widening (your reject-tier challenge,
+      2026-09-21): a realistic, vendor-generic consent-management-platform banner as it
+      actually renders on many client-rendered (SPA) sites -- the route-specific <title> has
+      not been set yet (still the SPA shell's generic default), and the only visible content
+      is the CMP's own boilerplate wording, with zero vehicle/journey/brand vocabulary. This
+      deliberately reproduces core/surfaceRelevance.ts scoring this page at 0 (tier "reject",
+      not "ambiguous") -- see tests/integration/consentOnlyCandidateRejectTier.test.ts.
+
+      The real journey content is not in the DOM at all until "Accept All" is clicked, mirroring
+      a consent-gated hydration boundary.
+    -->
+    <div id="cmp-root">
+      <h2>We value your privacy</h2>
+      <p>We use cookies to enhance your browsing experience, serve personalized content, and analyze our traffic.</p>
+      <button type="button" id="accept-all">Accept All</button>
+      <button type="button" id="reject-all">Reject All</button>
+      <button type="button" id="manage">Manage Preferences</button>
+    </div>
+    <script>
+      document.getElementById("accept-all").addEventListener("click", function () {
+        document.getElementById("cmp-root").remove();
+        document.title = "Vehicle Finance Application";
+        var h1 = document.createElement("h1");
+        h1.textContent = "Vehicle Finance Application";
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Start Finance Application";
+        document.body.appendChild(h1);
+        document.body.appendChild(button);
+      });
+    </script>
+  </body>
+</html>
