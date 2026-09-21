@@ -48,6 +48,20 @@ export const MAX_DATA_LAYER_PUSH_ARGS_PER_CALL = 50;
  */
 export const POPUP_ADOPTION_WINDOW_MS = 1500;
 
+/**
+ * Analytics-capture reliability fix (see docs/architecture.md "Generic action-attributed
+ * analytics capture" and a real-site CTA-click analytics-correlation investigation): after the initial fixed
+ * post-click grace period (GA4_ACTION_WINDOW_MS in capture-modules/ga4NetworkEvents.ts),
+ * a click's own action window is extended in short increments as long as new GA4/dataLayer
+ * evidence keeps arriving, rather than closing at one fixed instant regardless of what a
+ * slower-to-fire destination-page tag (a Dynamic-Yield campaign hit, a delayed GA4 beacon)
+ * is doing. Bounded on both sides -- a chatty or broken page can never stall a run past this
+ * ceiling -- and generic: this reads only "did the count of an already-captured evidence
+ * array grow", never anything about what the evidence contains.
+ */
+export const ACTION_WINDOW_QUIET_PERIOD_MS = 250;
+export const ACTION_WINDOW_MAX_EXTENSION_MS = 1200;
+
 // --- Evidence-retention limits (configurable) -----------------------------------------
 //
 // Unlike the three constants above, these three bound response evidence that a journey

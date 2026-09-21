@@ -599,9 +599,34 @@ export interface DataLayerDelta {
  * capture".
  */
 export interface ActionAnalytics {
+  /**
+   * Stable id for this one physical engine action, format `${taskId}:action:${stepIndex}`
+   * -- see core/loop.ts. Also present on the parent CtaClickCapture record. stepIndex is
+   * unique per dispatched action within a run (see RunState.stepCount), so this is stable
+   * and joinable across cta_clicks, actionAnalytics, and any downstream (e.g. n8n)
+   * transformation without relying on fuzzy timestamp/label matching.
+   */
+  actionId: string;
+  /** ISO timestamp read immediately before this action's own GA4/dataLayer-push correlation window opened -- before dispatch, not the (much later) `timestamp` field, which is when this record was serialised. */
+  captureWindowStartedAt?: string;
+  /** ISO timestamp read once this action's own correlation window closed (after the adaptive settle -- see capture-modules/actionWindowSettle.ts). */
+  captureWindowEndedAt?: string;
+  /** ISO timestamp read immediately before Playwright dispatched the real click -- see actions/click.ts's ActionTimingOut. Absent when the target was never actionable (click never reached dispatch). */
+  physicalClickDispatchedAt?: string;
   dataLayerDelta?: DataLayerDelta;
-  /** GA4-style requests observed within a short, fixed window after this click -- correlation, not causation. */
+  /** GA4-style requests observed within a short, adaptively-extended window after this click -- correlation, not causation. */
   ga4RequestsObservedDuringActionWindow?: Ga4NetworkEventCapture[];
+  /**
+   * Real-time dataLayer.push captures (capture-modules/dataLayer.ts's persistent
+   * push-observer stream, NOT the before/after dataLayerDelta above) observed in this same
+   * window -- this is what recovers a click-handler push that a full-page navigation
+   * otherwise erases from dataLayerDelta (see DataLayerDelta.replaced's own doc comment).
+   */
+  dataLayerPushesObservedDuringActionWindow?: DataLayerCapture[];
+  /** Structural health of this action's own capture mechanism -- see analyticsCaptureClassification.ts's CaptureHealth. Never an interpretation of the target site. */
+  captureHealth?: CaptureHealth;
+  /** This engine's classification of what the analytics evidence above does/doesn't prove -- see analyticsCaptureClassification.ts. */
+  analyticsCapture?: AnalyticsCaptureSummary;
   /** True iff the URL or title changed, or a success criterion newly became satisfied, as a direct result of this click. */
   advancedJourney: boolean;
   /** Ids of success criteria that were unsatisfied before this click and satisfied immediately after it. */
@@ -610,9 +635,49 @@ export interface ActionAnalytics {
   verifierDecisions?: SemanticVerifierDecisionSummary[];
 }
 
+/** See src/capture-modules/analyticsCaptureClassification.ts -- duplicated here (rather than imported) only because task-response.ts is the schema-adjacent type surface every capture-module type already lives in. */
+export type AnalyticsCaptureStatus =
+  | "CAPTURED"
+  | "WEBSITE_NO_OBSERVED_TAG"
+  | "ENGINE_CAPTURE_INCOMPLETE"
+  | "CORRELATION_UNRESOLVED"
+  | "CAPTURE_UNCERTAIN_CONSENT_STATE";
+
+export interface CaptureHealth {
+  captureWindowStartedBeforeClick: boolean;
+  dataLayerReplaced: boolean;
+  dataLayerPushListenerActive: boolean;
+  networkListenerActive: boolean;
+  unobservedDataLayerGapPossible: boolean;
+  captureComplete: boolean;
+  issues: string[];
+}
+
+export interface AnalyticsCaptureConsentSummary {
+  analyticsStorageGranted?: boolean;
+  adStorageGranted?: boolean;
+  observed: boolean;
+  required: boolean;
+  verified: boolean;
+}
+
+export interface AnalyticsCaptureSummary {
+  status: AnalyticsCaptureStatus;
+  classificationReason: string;
+  confirmedGa4Events: Ga4NetworkEventCapture[];
+  unresolvedGa4Candidates: Ga4NetworkEventCapture[];
+  confirmedDataLayerPushes: DataLayerCapture[];
+  unresolvedDataLayerPushes: DataLayerCapture[];
+  measurementIds: string[];
+  consent: AnalyticsCaptureConsentSummary;
+}
+
 export interface CtaClickCapture {
   stepIndex: number;
+  /** Final action-serialisation timestamp -- read once this record is built, well after dispatch/settling/the capture window close. See ActionAnalytics.physicalClickDispatchedAt/captureWindowStartedAt/captureWindowEndedAt for the actual timeline. */
   timestamp: string;
+  /** See ActionAnalytics.actionId's own doc comment. */
+  actionId?: string;
   sourcePageUrl: string;
   sourcePageTitle?: string;
   ctaText: string;

@@ -71,6 +71,14 @@ export class RunState {
   stepCount = 0;
   backtrackCount = 0;
   readonly startedAtMs = Date.now();
+  /**
+   * Analytics-capture reliability fix: whether the run-lifetime dataLayer.push observer
+   * (capture-modules/dataLayer.ts's attachDataLayerPushCapture) actually attached to the
+   * main tracked page -- true by default (meaning "not requested/not yet known"; only ever
+   * set false by a genuine attach failure) so a task that never requests data_layer_evidence
+   * is never penalized by this flag. See analyticsCaptureClassification.ts's CaptureHealth.
+   */
+  mainDataLayerPushListenerActive = true;
   readonly actionHistory: RecordedAction[] = [];
   readonly visitedUrls: string[] = [];
   /**

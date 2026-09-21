@@ -49,8 +49,10 @@ export function buildCtaClickCapture(params: {
   actionResult: ActionResult;
   resultingTitle?: string;
   actionAnalytics?: ActionAnalytics;
+  /** See ActionAnalytics.actionId's own doc comment -- carried on the parent record too, so a consumer that only reads cta_clicks (not actionAnalytics) can still join by it. */
+  actionId?: string;
 }): CtaClickCapture {
-  const { stepIndex, sourcePageUrl, sourcePageTitle, details, actionResult, resultingTitle, actionAnalytics } =
+  const { stepIndex, sourcePageUrl, sourcePageTitle, details, actionResult, resultingTitle, actionAnalytics, actionId } =
     params;
   const resultingUrl = actionResult.resultingUrl;
   const navigationSucceeded = Boolean(actionResult.success && resultingUrl && resultingUrl !== sourcePageUrl);
@@ -58,6 +60,7 @@ export function buildCtaClickCapture(params: {
   return {
     stepIndex,
     timestamp: new Date().toISOString(),
+    ...(actionId ? { actionId } : {}),
     sourcePageUrl,
     ...(sourcePageTitle ? { sourcePageTitle } : {}),
     ctaText: details?.ctaText ?? "",

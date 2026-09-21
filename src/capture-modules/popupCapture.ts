@@ -239,10 +239,12 @@ export async function adoptPopupForCapture(params: {
       });
     }
     if (wantsDataLayer) {
-      detachPush = await attachDataLayerPushCapture(popup, captures, () => stepIndex, {
-        contextId,
-        forcedSource: "popup_context",
-      });
+      detachPush = (
+        await attachDataLayerPushCapture(popup, captures, () => stepIndex, {
+          contextId,
+          forcedSource: "popup_context",
+        })
+      ).detach;
     }
 
     // Bounded settle window: long enough for an already-in-flight beacon/push to land,
