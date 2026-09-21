@@ -212,3 +212,68 @@ test("two calls with identical objective/criterion/pageEvidence but different la
   assert.equal(second.satisfied, true);
   assert.equal(client.requests.length, 2, "different lastActionEvidence must not be served from the same cache entry");
 });
+
+// Item 4 (cache staleness fix, see CLAUDE.md and the BMW-enquire-panel investigation §9B):
+// direct regression coverage on ClaudeSemanticCriterionVerifier's own buildCacheKey/cache
+// behaviour, isolated from the rest of the engine (no Page, no RunState) -- the same
+// content-identical-but-different-run-state shape the investigation found colliding.
+test("item 4: identical page evidence with a different runStateMarker (surface generation/step) is verified independently, not served from a stale cache entry", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: false, confidence: 0.9, evidence: "No panel evidence yet -- nothing clicked." }),
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "Panel evidence now present after the click." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  // Content-identical pageEvidence on both calls -- the exact shape that let a post-close
+  // recheck's reverted DOM collide with a pre-click cache entry in the reported failure.
+  const first = await verifier.verify(buildInput({ runStateMarker: { surfaceGeneration: 0, stepIndex: 2 } }));
+  const second = await verifier.verify(buildInput({ runStateMarker: { surfaceGeneration: 1, stepIndex: 4 } }));
+
+  assert.equal(first.satisfied, false);
+  assert.equal(second.satisfied, true);
+  assert.equal(
+    client.requests.length,
+    2,
+    "a different runStateMarker must always be treated as independent evidence, never a stale cache hit",
+  );
+});
+
+test("item 4: the SAME runStateMarker with identical page evidence still hits cache (the existing repeated-decision optimisation is preserved)", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "Match." })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  const marker = { surfaceGeneration: 1, stepIndex: 4 };
+  const first = await verifier.verify(buildInput({ runStateMarker: marker }));
+  const second = await verifier.verify(buildInput({ runStateMarker: { ...marker } }));
+
+  assert.equal(first.satisfied, true);
+  assert.equal(second.satisfied, true);
+  assert.equal(client.requests.length, 1, "an unchanged runStateMarker plus unchanged evidence must still be a cache hit");
+  assert.equal(verifier.getUsageDiagnostics().cacheHitCount, 1);
+});
+
+test("item 4: panelEvidence, when present, is included in the prompt sent to the model and participates in the cache key", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "Causally-linked panel present." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(
+    buildInput({
+      panelEvidence: {
+        identity: "dialog|Offer details",
+        role: "dialog",
+        headings: ["Offer details"],
+        interactiveText: ["Request a Quote", "Close"],
+        documentUsable: true,
+        relevanceTier: "adopt",
+        relevanceScore: 0.6,
+        causallyLinked: true,
+        causingControlLabel: "View Offer Details",
+      },
+    }),
+  );
+
+  const sentPrompt = JSON.parse(client.requests[0]!.userPrompt) as { panelEvidence?: { identity: string } };
+  assert.equal(sentPrompt.panelEvidence?.identity, "dialog|Offer details");
+});

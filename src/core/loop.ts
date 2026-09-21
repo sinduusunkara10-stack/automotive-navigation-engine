@@ -34,12 +34,15 @@ import {
   computeMilestoneRollup,
   evaluateSuccessCriteria,
   getMissingRequiredCriteriaIds,
+  type PanelMatchContext,
   type SuccessCriteriaEvidence,
 } from "./successEvaluator.js";
 import type { ActionAnalytics, ActionResult } from "../types/task-response.js";
-import { MAIN_SURFACE_ID, type RunState } from "./state.js";
+import { MAIN_SURFACE_ID, type RunState, type SurfaceCausingAction } from "./state.js";
 import { detectClosedAdoptedSurfaces, returnToParentSurface } from "./surfaceReturn.js";
 import { shouldEnterInDocumentSurface, shouldLeaveInDocumentSurface } from "./inDocumentSurface.js";
+import { gatherPanelEvidence, looksLikeGenericDismissControl, type PanelEvidence } from "./panelEvidence.js";
+import { tokenize } from "../discovery/relevance.js";
 import {
   DEFAULT_MAX_BRANCH_DEPTH,
   MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
@@ -148,6 +151,56 @@ function withActiveSurface(observation: Observation, state: RunState): Observati
       kind: surfaceId.startsWith(IN_DOCUMENT_SURFACE_ID_PREFIX) ? "in_document" : "adopted_context",
       identity: surfaceId,
     },
+  };
+}
+
+/**
+ * Panel-attribution corrective pass (item 1, see CLAUDE.md and the BMW-enquire-panel
+ * investigation §13): builds the PanelMatchContext core/successEvaluator.ts's
+ * evaluateSuccessCriteria consults for a semantic_page_match criterion, whenever the active
+ * surface is (or, for `justOpenedThisStep`, was just this step made) in_document.
+ * `justOpenedThisStep` is used only by the immediate post-click check, in the same step the
+ * click dispatched -- surface-entry formalisation (RunState.pushSurface) deliberately
+ * happens one step later (see the investigation's §9E, preserved unchanged by this pass), so
+ * without this the same-step post-click evaluation could never see any panel evidence at
+ * all, defeating item 5's same-evidence-transition chaining. Every later call (the pre_action
+ * check at the top of a subsequent step, or a post_action recheck once the surface is
+ * already formally tracked) uses the ordinary `observation.activeSurface`/RunState path.
+ */
+async function buildPanelMatchContext(params: {
+  page: Page;
+  state: RunState;
+  task: ResolvedTaskRequest;
+  observation: Observation;
+  justOpenedThisStep?: SurfaceCausingAction;
+}): Promise<PanelMatchContext | undefined> {
+  const { page, state, task, observation, justOpenedThisStep } = params;
+  const objectiveText = [task.objective, ...task.successCriteria.map((c) => c.description)]
+    .filter(Boolean)
+    .join(" ");
+
+  if (justOpenedThisStep) {
+    const evidence = await gatherPanelEvidence(page, { kind: "in_document" }, objectiveText);
+    return {
+      evidence,
+      causallyLinked: justOpenedThisStep.verifiedSuccessType !== undefined,
+      ...(justOpenedThisStep.accessibleName || justOpenedThisStep.ctaText
+        ? { causingControlLabel: justOpenedThisStep.accessibleName ?? justOpenedThisStep.ctaText }
+        : {}),
+    };
+  }
+
+  if (observation.activeSurface?.kind !== "in_document") {
+    return undefined;
+  }
+  const causingAction = state.getSurfaceCausingAction(state.activeSurface);
+  const evidence = await gatherPanelEvidence(page, observation.activeSurface, objectiveText);
+  return {
+    evidence,
+    causallyLinked: Boolean(causingAction && causingAction.verifiedSuccessType !== undefined),
+    ...(causingAction?.accessibleName || causingAction?.ctaText
+      ? { causingControlLabel: causingAction.accessibleName ?? causingAction.ctaText }
+      : {}),
   };
 }
 
@@ -270,6 +323,18 @@ export async function runStep(params: {
     if (rawObservation.activeDialog) {
       state.markInDocumentEnteredViaActiveDialog(newSurfaceId);
     }
+    // Panel-attribution corrective pass (item 2): the causing click was necessarily the
+    // *previous* step's own recorded action (surface entry is detected exactly one step
+    // after the click that opened it -- see the investigation's §9E off-by-one, confirmed
+    // intentional and preserved unchanged by this pass). lastDispatchedClickDetails is set
+    // unconditionally on every click dispatch, so this is never gated on cta_clicks.
+    if (state.lastDispatchedClickDetails && state.lastDispatchedClickDetails.stepIndex === stepIndex - 1) {
+      state.recordSurfaceCausingAction(newSurfaceId, state.lastDispatchedClickDetails);
+    }
+    if (state.pendingJustOpenedPanelVerified) {
+      state.pendingJustOpenedPanelVerified = false;
+      state.markSurfaceVerifiedAgainstMilestone(newSurfaceId);
+    }
     state.surfaceAdoptionDiagnostics.push({
       stepIndex,
       surfaceId: newSurfaceId,
@@ -326,6 +391,12 @@ export async function runStep(params: {
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), ...dataLayerEntries];
   }
 
+  // Panel-attribution corrective pass (item 1, see CLAUDE.md and the BMW-enquire-panel
+  // investigation): the pre_action check can legitimately be what confirms a
+  // resulting-surface milestone -- e.g. a later step's recheck of an already-open,
+  // already-causally-linked panel (not only the immediate post-click check) -- so panel
+  // evidence is gathered here too, never just once.
+  const panelContextPreAction = await buildPanelMatchContext({ page, state, task, observation });
   (
     await evaluateSuccessCriteria(
       page,
@@ -336,8 +407,16 @@ export async function runStep(params: {
       undefined,
       buildCriteriaEvidence(captures),
       { sink: state.milestoneEvidence, stepIndex, phase: "pre_action" },
+      undefined,
+      panelContextPreAction,
+      { surfaceGeneration: state.surfaceGeneration, stepIndex },
     )
-  ).forEach((id) => state.satisfiedCriteriaIds.add(id));
+  ).forEach((id) => {
+    state.satisfiedCriteriaIds.add(id);
+    if (observation.activeSurface?.kind === "in_document") {
+      state.markSurfaceVerifiedAgainstMilestone(state.activeSurface);
+    }
+  });
 
   const limitsBreach = checkLimitsBreach(
     {
@@ -951,6 +1030,69 @@ export async function runStep(params: {
     }
   }
 
+  // Panel-attribution corrective pass (item 3, see CLAUDE.md and the BMW-enquire-panel
+  // investigation §13.3): guards against the engine immediately closing a newly-opened,
+  // causally-linked, not-yet-verified in_document surface that was produced by the active
+  // milestone's own CTA -- the exact destructive step the investigation found (closing the
+  // one panel that carried the milestone's own evidence). Scoped to in_document surfaces
+  // only (an adopted "adopted_context" surface is a separate Page a go_back already handles
+  // through the dedicated, already-verified returnToParentSurface path -- see PR 4).
+  {
+    const activeSurfaceForGuard = observation.activeSurface;
+    const guardCausingAction =
+      activeSurfaceForGuard?.kind === "in_document" ? state.getSurfaceCausingAction(state.activeSurface) : undefined;
+    if (
+      guardCausingAction &&
+      effectiveAction.type === "click" &&
+      effectiveAction.target &&
+      !state.wasSurfaceVerifiedAgainstMilestone(state.activeSurface)
+    ) {
+      const clickedEl = observation.interactiveElements.find((el) => el.id === effectiveAction.target);
+      const looksLikeDismiss = looksLikeGenericDismissControl(clickedEl?.accessibleName);
+      if (looksLikeDismiss) {
+        const relevanceObjectiveTextForGuard = [task.objective, ...task.successCriteria.map((c) => c.description)]
+          .filter(Boolean)
+          .join(" ");
+        const guardPanelEvidence = await gatherPanelEvidence(page, activeSurfaceForGuard, relevanceObjectiveTextForGuard);
+        // Override (b): strong evidence the surface is unrelated to the objective -- the
+        // same generic relevance scoring as item 1's negative-evidence signal.
+        const unrelatedEvidence = guardPanelEvidence?.relevance.tier === "reject";
+        // Override (c): the task's own criteria explicitly call for dismissing/closing this
+        // surface -- generic, caller-supplied text, never a core-defined vocabulary.
+        const criteriaRequireClosure = task.successCriteria.some((criterion) =>
+          tokenize(criterion.description).some((token) => token === "close" || token === "dismiss"),
+        );
+        if (!unrelatedEvidence && !criteriaRequireClosure) {
+          const guardKey = state.activeSurface;
+          const attemptedTargetId = effectiveAction.target;
+          if (!state.surfaceCloseGuardRedirected.has(guardKey)) {
+            state.surfaceCloseGuardRedirected.add(guardKey);
+            if (task.safety.allowedActions.includes("wait")) {
+              effectiveAction = { type: "wait" };
+            }
+            if (task.captureModules.includes("errors")) {
+              recordDiagnosticError(captures, {
+                stepIndex,
+                category: "safety_guard_stop",
+                severity: "info",
+                pageUrl: observation.url,
+                actionType: "click",
+                ...(attemptedTargetId ? { targetElementId: attemptedTargetId } : {}),
+                message:
+                  `Blocked an attempt to close a newly-opened, causally-linked surface (opened by this ` +
+                  `run's own step ${guardCausingAction.stepIndex} action) before it was verified against the ` +
+                  `active milestone -- redirected to a safe, non-destructive action so the surface stays ` +
+                  `open for inspection.`,
+                recoverable: true,
+                stoppedRun: false,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
   // PR 1C: Alternative Route Exploration -- exhausted-candidate protection (see
   // docs/architecture.md "Alternative route exploration"). state.pendingAlternativeExploration
   // is set (below, at the point a journey-replanning go_back substitution actually fires)
@@ -1405,6 +1547,16 @@ export async function runStep(params: {
     wantsCtaClickCapture && isClick && effectiveAction.target
       ? await readClickedElementDetails(page, effectiveAction.target)
       : undefined;
+  // Panel-attribution corrective pass (item 2, see CLAUDE.md and the BMW-enquire-panel
+  // investigation): read unconditionally for every click -- independent of whether the
+  // cta_clicks capture module was requested -- so a causally-linked surface this click
+  // opens can be attributed to it (RunState.recordSurfaceCausingAction below) even on a run
+  // that never asked for the cta_clicks capture at all. Reuses clickedElementDetails when
+  // it was already read above rather than reading the DOM a second time.
+  const causalClickDetailsForThisClick =
+    isClick && effectiveAction.target
+      ? (clickedElementDetails ?? (await readClickedElementDetails(page, effectiveAction.target)))
+      : undefined;
 
   // Generic, action-attributed analytics capture (see docs/n8n-integration.md "Generic
   // action-attributed analytics capture"): before-state evidence for the dataLayer delta
@@ -1498,6 +1650,24 @@ export async function runStep(params: {
           surfaceAdoption: surfaceAdoptionRequest,
         });
 
+  // Panel-attribution corrective pass (item 2): recorded unconditionally for every click
+  // dispatch, whatever the outcome -- only ever consulted, one step later, if this exact
+  // click turns out to be the one that caused entry into a new in_document surface (see the
+  // top-of-function pushSurface(newSurfaceId) call above). Never affects "main" or an
+  // "adopted_context" surface's own same-step causal attribution below.
+  if (isClick && causalClickDetailsForThisClick) {
+    const causingAction: SurfaceCausingAction = {
+      stepIndex,
+      ...(causalClickDetailsForThisClick.ctaText ? { ctaText: causalClickDetailsForThisClick.ctaText } : {}),
+      ...(causalClickDetailsForThisClick.accessibleName
+        ? { accessibleName: causalClickDetailsForThisClick.accessibleName }
+        : {}),
+      ...(causalClickDetailsForThisClick.elementType ? { elementType: causalClickDetailsForThisClick.elementType } : {}),
+      ...(actionResult.verifiedSuccessType ? { verifiedSuccessType: actionResult.verifiedSuccessType } : {}),
+    };
+    state.lastDispatchedClickDetails = causingAction;
+  }
+
   // Surface adoption: turns a successful adoption into real RunState -- from the *next*
   // runStep call on, `const page = state.activePage ?? params.page` (top of this function)
   // resolves to the adopted Page instead of the tracked one, so buildObservation/
@@ -1512,6 +1682,13 @@ export async function runStep(params: {
     state.pushSurface(newSurfaceId, adoptedPage);
     if (extendedAllowedDomain) {
       state.extendAllowedDomainForCurrentSurface(extendedAllowedDomain);
+    }
+    // Panel-attribution corrective pass (item 2): unlike an in_document surface (detected
+    // one step after its causing click), an adopted context's own causing click is *this*
+    // same step's click -- state.lastDispatchedClickDetails was just set above, in this
+    // same step, to exactly that click's details.
+    if (state.lastDispatchedClickDetails && state.lastDispatchedClickDetails.stepIndex === stepIndex) {
+      state.recordSurfaceCausingAction(newSurfaceId, state.lastDispatchedClickDetails);
     }
     state.surfaceAdoptionDiagnostics.push({
       stepIndex,
@@ -1843,31 +2020,89 @@ export async function runStep(params: {
 
   const satisfiedCountBeforeThisAction = state.satisfiedCriteriaIds.size;
   const verifierDecisionCountBefore = semanticVerifier?.getUsageDiagnostics?.()?.decisions?.length ?? 0;
-  const newlySatisfied = await evaluateSuccessCriteria(
+
+  // Panel-attribution corrective pass (item 1): a panel this exact step's own click just
+  // opened has not yet been formalised as RunState's active surface (that happens one step
+  // later, by design -- see buildPanelMatchContext's own doc comment), so it is detected
+  // here directly from this step's own ActionResult instead.
+  const justOpenedPanelDetails: SurfaceCausingAction | undefined =
+    isClick &&
+    actionResult.surfaceChangeDetected === true &&
+    (actionResult.surfaceChangeType === "layer_panel_appeared" ||
+      actionResult.surfaceChangeType === "dialog_appeared" ||
+      actionResult.surfaceChangeType === "dialog_changed") &&
+    causalClickDetailsForThisClick
+      ? {
+          stepIndex,
+          ...(causalClickDetailsForThisClick.ctaText ? { ctaText: causalClickDetailsForThisClick.ctaText } : {}),
+          ...(causalClickDetailsForThisClick.accessibleName
+            ? { accessibleName: causalClickDetailsForThisClick.accessibleName }
+            : {}),
+          ...(causalClickDetailsForThisClick.elementType ? { elementType: causalClickDetailsForThisClick.elementType } : {}),
+          ...(actionResult.verifiedSuccessType ? { verifiedSuccessType: actionResult.verifiedSuccessType } : {}),
+        }
+      : undefined;
+  const panelContextPostAction = await buildPanelMatchContext({
     page,
-    task.successCriteria,
-    task.objective,
-    semanticVerifier,
-    state.satisfiedCriteriaIds,
-    // Click-success/milestone-evidence corrective work (2026-09-21, see BMW live-site
-    // investigation and ActionResult.verifiedSuccessType's own doc comment): this click's own
-    // declared destination/ctaText is only forwarded as corroborating evidence to the
-    // semantic verifier when the click's success was itself established via one of a fixed
-    // set of directly-observed evidence classes (verifiedSuccessType present) -- never for a
-    // click actionResult.success reports true only via the weaker signals (a target becoming
-    // covered/disappearing/re-rendering with no dialog/panel/navigation/new-context to back
-    // it up), and never for a click that failed outright. Previously gated only on
-    // wantsCtaClickCapture && isClick, with no dependency on the click's own outcome at all.
-    wantsCtaClickCapture && isClick && actionResult.verifiedSuccessType !== undefined ? clickedElementDetails : undefined,
-    buildCriteriaEvidence(captures),
-    { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
-    // PR 1D (surface-scoped evidence, docs/architecture.md §21): scope semantic_page_match
-    // evidence to the currently-uncovered surface whenever this step's own action just
-    // opened one (PR 1C-a's ActionResult.surfaceChangeDetected) -- never for an ordinary
-    // click/navigate with no detected surface change, which behaves exactly as before.
-    actionResult.surfaceChangeDetected === true,
-  );
-  newlySatisfied.forEach((id) => state.satisfiedCriteriaIds.add(id));
+    state,
+    task,
+    observation,
+    ...(justOpenedPanelDetails ? { justOpenedThisStep: justOpenedPanelDetails } : {}),
+  });
+
+  // Item 5 (ordered milestone completion within one evidence transition, see CLAUDE.md and
+  // the BMW-enquire-panel investigation §13): computeEligibleCriteriaIds's own one-required-
+  // milestone-per-call gate is preserved untouched -- each individual evaluateSuccessCriteria
+  // call below still only ever newly satisfies at most one required milestone. This bounded
+  // outer loop only *chains* multiple such calls, re-invoking with the updated
+  // satisfiedCriteriaIds after each newly-satisfied criterion, against the identical
+  // page/panel-evidence snapshot already gathered above -- no new page interaction, no new
+  // step -- so a click that completes milestone N and, from that same evidence, also already
+  // satisfies milestone N+1 (e.g. the very panel that appeared is what N+1 was watching for)
+  // does not need a further click merely to re-observe evidence that already exists. Capped
+  // small so this can never itself become an unbounded loop.
+  const MAX_CHAINED_MILESTONE_EVALUATIONS = 3;
+  const newlySatisfied: string[] = [];
+  for (let chainIteration = 0; chainIteration < MAX_CHAINED_MILESTONE_EVALUATIONS; chainIteration += 1) {
+    const chainResult = await evaluateSuccessCriteria(
+      page,
+      task.successCriteria,
+      task.objective,
+      semanticVerifier,
+      state.satisfiedCriteriaIds,
+      // Click-success/milestone-evidence corrective work (2026-09-21, see BMW live-site
+      // investigation and ActionResult.verifiedSuccessType's own doc comment): this click's own
+      // declared destination/ctaText is only forwarded as corroborating evidence to the
+      // semantic verifier when the click's success was itself established via one of a fixed
+      // set of directly-observed evidence classes (verifiedSuccessType present) -- never for a
+      // click actionResult.success reports true only via the weaker signals (a target becoming
+      // covered/disappearing/re-rendering with no dialog/panel/navigation/new-context to back
+      // it up), and never for a click that failed outright. Previously gated only on
+      // wantsCtaClickCapture && isClick, with no dependency on the click's own outcome at all.
+      wantsCtaClickCapture && isClick && actionResult.verifiedSuccessType !== undefined ? clickedElementDetails : undefined,
+      buildCriteriaEvidence(captures),
+      { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
+      // PR 1D (surface-scoped evidence, docs/architecture.md §21): scope semantic_page_match
+      // evidence to the currently-uncovered surface whenever this step's own action just
+      // opened one (PR 1C-a's ActionResult.surfaceChangeDetected) -- never for an ordinary
+      // click/navigate with no detected surface change, which behaves exactly as before.
+      actionResult.surfaceChangeDetected === true,
+      panelContextPostAction,
+      { surfaceGeneration: state.surfaceGeneration, stepIndex },
+    );
+    if (chainResult.length === 0) {
+      break;
+    }
+    newlySatisfied.push(...chainResult);
+    chainResult.forEach((id) => state.satisfiedCriteriaIds.add(id));
+    if (panelContextPostAction?.evidence) {
+      if (observation.activeSurface?.kind === "in_document") {
+        state.markSurfaceVerifiedAgainstMilestone(state.activeSurface);
+      } else if (justOpenedPanelDetails) {
+        state.pendingJustOpenedPanelVerified = true;
+      }
+    }
+  }
 
   // Milestone-anchored recovery (see core/recoveryAnchors.ts and docs/architecture.md
   // "Milestone-anchored recovery"): the moment a required criterion first becomes
@@ -2358,6 +2593,26 @@ async function obtainDecision(params: {
         }
       : undefined;
 
+  // Panel-attribution corrective pass (item 2): built only when the current observation's
+  // own activeSurface is a non-"main" surface whose causing action was recorded (see
+  // RunState.recordSurfaceCausingAction/core/loop.ts's two pushSurface call sites).
+  const activeSurfaceInfo = observation.activeSurface;
+  const causingAction =
+    activeSurfaceInfo && activeSurfaceInfo.kind !== "main" ? state.getSurfaceCausingAction(state.activeSurface) : undefined;
+  const expectedSurface =
+    activeSurfaceInfo && activeSurfaceInfo.kind !== "main" && causingAction
+      ? {
+          surfaceIdentity: activeSurfaceInfo.identity ?? state.activeSurface,
+          causingActionStepIndex: causingAction.stepIndex,
+          ...(causingAction.ctaText || causingAction.accessibleName
+            ? { causingControlLabel: causingAction.accessibleName ?? causingAction.ctaText }
+            : {}),
+          ...(causingAction.verifiedSuccessType ? { causingActionVerifiedSuccessType: causingAction.verifiedSuccessType } : {}),
+          stillOpen: true,
+          alreadyVerifiedAgainstMilestone: state.wasSurfaceVerifiedAgainstMilestone(state.activeSurface),
+        }
+      : undefined;
+
   const decision = await reasoning.decide({
     objective: task.objective,
     successCriteria: task.successCriteria,
@@ -2381,6 +2636,7 @@ async function obtainDecision(params: {
       : state.pendingAlternativeExploration
         ? { alternativeExploration: { justFailedLabels: state.pendingAlternativeExploration.exhaustedCandidateLabels } }
         : {}),
+    ...(expectedSurface ? { expectedSurface } : {}),
   });
 
   const safetyResult = validateDecision({

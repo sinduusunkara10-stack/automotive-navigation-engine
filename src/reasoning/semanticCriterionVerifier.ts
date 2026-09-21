@@ -46,6 +46,27 @@ export interface LastActionEvidence {
   elementType?: string;
 }
 
+/**
+ * Panel-attribution corrective pass (item 1/2, see CLAUDE.md and the BMW-enquire-panel
+ * investigation §13): generic, container-scoped evidence for an in-document surface (a
+ * drawer/modal/side panel), mirroring core/panelEvidence.ts's PanelEvidence but kept as its
+ * own, independently-typed shape here -- this module stays decoupled from src/core (see this
+ * file's own doc comment above), so it never imports PanelEvidence directly.
+ */
+export interface SemanticPanelEvidence {
+  identity: string;
+  role: string;
+  headings: string[];
+  interactiveText: string[];
+  documentUsable: boolean;
+  relevanceTier: "adopt" | "reject" | "ambiguous";
+  relevanceScore: number;
+  /** True only when this exact surface was opened by the active milestone's own already-verified causing click. */
+  causallyLinked: boolean;
+  /** The causing click's own accessible name/text, when known -- never an opaque element id. */
+  causingControlLabel?: string;
+}
+
 export interface SemanticVerificationInput {
   /** The task's objective text, verbatim -- may be written in any language. */
   objective: string;
@@ -55,6 +76,21 @@ export interface SemanticVerificationInput {
   pageEvidence: SemanticPageEvidence;
   /** Optional -- see LastActionEvidence. Absent for the common case (no specific click to attribute). */
   lastActionEvidence?: LastActionEvidence;
+  /** Optional -- see SemanticPanelEvidence. Present only when the active surface is in_document and a scoped container was found. */
+  panelEvidence?: SemanticPanelEvidence;
+  /**
+   * Item 4 (cache staleness fix, see CLAUDE.md and the BMW-enquire-panel investigation
+   * §9B/§13.4): an opaque run-state/evidence-generation marker -- core/state.ts's
+   * RunState.surfaceGeneration (a monotonic count of every surface ever entered this run,
+   * combining the previously-independent adopted/in_document counters) plus the current
+   * step index -- folded into buildCacheKey below so a DOM reverting to near-identical
+   * content after a surface opens then closes can never collide with a cache entry computed
+   * at an earlier generation/step, purely because the flattened page text happens to look
+   * similar. Optional and additive: a caller that never passes it (this module's own unit
+   * tests, and any future caller with no RunState of its own) reproduces the exact prior,
+   * content-only cache-key behaviour.
+   */
+  runStateMarker?: { surfaceGeneration: number; stepIndex: number };
 }
 
 export interface SemanticVerificationOutcome {
@@ -101,7 +137,17 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "activated (e.g. a final completion control, by whatever label the page itself uses), " +
     "you must find evidence of that specific control in the given page/click evidence -- an " +
     "unrelated control being clicked, or the right-looking page being reached by some other " +
-    "route, is not sufficient. Never output an action, URL, selector, or code. Give an honest " +
+    "route, is not sufficient. When \"panelEvidence\" is present, it describes a panel/drawer " +
+    "surface the engine has already scoped and, when \"causallyLinked\" is true, already " +
+    "confirmed was opened directly by this run's own verified click (never merely inferred by " +
+    "you) -- in that case do NOT require the panel's own headings/interactiveElementText to " +
+    "share identical vocabulary with the criterion description before confirming a match; " +
+    "causal linkage plus the panel genuinely being present, stable, and not contradicted by " +
+    "negative evidence is sufficient on its own for a milestone that only asks whether that " +
+    "surface appeared. Still require the panel's own \"relevanceTier\" to not be \"reject\", and " +
+    "still fail closed (do not confirm) when \"causallyLinked\" is false, \"documentUsable\" is " +
+    "false, or \"relevanceTier\" is \"ambiguous\" with nothing else corroborating a genuine " +
+    "match. Never output an action, URL, selector, or code. Give an honest " +
     "confidence for how sure you are, and always cite the specific page evidence (a short " +
     "quote) that supports your verdict, even when the verdict is that the page does not match.";
 
@@ -116,11 +162,30 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
       ...(input.pageEvidence.progressText ? { progressIndicatorText: input.pageEvidence.progressText } : {}),
     },
     ...(input.lastActionEvidence ? { lastActionEvidence: input.lastActionEvidence } : {}),
+    ...(input.panelEvidence ? { panelEvidence: input.panelEvidence } : {}),
   };
 
   return { system, user: JSON.stringify(payload) };
 }
 
+/**
+ * Item 4 (cache staleness fix, see CLAUDE.md and the BMW-enquire-panel investigation §9B):
+ * purely content-based before this pass -- {objective, criterionDescription, title,
+ * headings, interactiveText, ariaState, progressText, lastActionEvidence} -- with no
+ * run-history component at all. A page reverting to near-identical content after a surface
+ * opens then closes (e.g. a panel closed by a premature dismiss, or simply settling back to
+ * its pre-click layout) could therefore collide with a cache entry computed at an entirely
+ * different point in the run's own history, silently returning a stale verdict (confirmed:
+ * a pre-click "not yet clicked" verdict served, verbatim, for a genuinely later, post-close
+ * recheck). Now additionally incorporates `runStateMarker` (RunState.surfaceGeneration plus
+ * the current step index) and `panelEvidence` (both optional -- see their own doc comments
+ * on SemanticVerificationInput): two page states that are content-identical but occurred at
+ * a different surface-generation/step now produce different cache keys, so they can never
+ * collide. The existing "identical evidence is never re-verified" optimisation (this class's
+ * own doc comment below) is fully preserved for the case that actually matters: the *same*
+ * unchanged surface generation/step re-proposing the same content (e.g. two consecutive
+ * stop_success attempts against the same still-open, still-unchanged page) still hits cache.
+ */
 function buildCacheKey(input: SemanticVerificationInput): string {
   return JSON.stringify({
     objective: input.objective,
@@ -131,6 +196,8 @@ function buildCacheKey(input: SemanticVerificationInput): string {
     ariaState: input.pageEvidence.ariaState,
     progressText: input.pageEvidence.progressText,
     lastActionEvidence: input.lastActionEvidence,
+    panelEvidence: input.panelEvidence,
+    runStateMarker: input.runStateMarker,
   });
 }
 

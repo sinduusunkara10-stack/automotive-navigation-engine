@@ -477,6 +477,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     milestones,
     branch,
     alternativeExploration,
+    expectedSurface,
   } = context;
 
   const system =
@@ -571,7 +572,29 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "different visible control that could plausibly serve the same objective (for example a " +
     "sibling call-to-action offering a related path -- a finance/valuation/test-drive/" +
     "brochure-style control when a quote-style control did not work out, or vice versa), " +
-    "before concluding the objective is unreachable from this page.";
+    "before concluding the objective is unreachable from this page. " +
+    "When \"expectedSurface\" is present, the currently active surface (the panel/drawer/popup " +
+    "\"currentPage\" now describes) is structurally known -- not merely inferred -- to have been " +
+    "opened by this run's own action at step \"causingActionStepIndex\" (its control's own label, " +
+    "when known, is given as \"causingControlLabel\"); never require yourself to re-derive that " +
+    "connection from a bare opaque element id or an older, several-steps-back string when this " +
+    "field already gives it to you directly. Do not close, dismiss, or navigate away from this " +
+    "surface as your next action merely because a generic close/dismiss control is visible on it, " +
+    "and do not re-click \"causingControlLabel\" again while this surface is still open -- a " +
+    "close control existing on a panel is not, by itself, evidence the panel is an obstruction; " +
+    "the engine has already confirmed this specific surface is this action's own direct result. " +
+    "Prefer inspecting its own newly-introduced controls/content toward the objective. Only close " +
+    "it when you have specific, positive evidence it is unrelated to the objective (e.g. it looks " +
+    "like an unrelated advert, survey, newsletter signup, or unrelated chat widget genuinely " +
+    "distinct from what this action was for), or when the task's own successCriteria explicitly " +
+    "call for dismissing/closing it. \"alreadyVerifiedAgainstMilestone\": true means the engine's " +
+    "own evaluation has already independently confirmed this exact surface satisfies the current " +
+    "milestone -- in that case a \"stop_success\" (when otherwise appropriate) needs no further " +
+    "action here. Never propose \"stop_success\" based only on your own memory of an earlier " +
+    "step's evidence or your own narrative reasoning -- propose it only when the current " +
+    "observation/evidence you were just given genuinely supports every required milestone; the " +
+    "engine mechanically rejects an unsupported \"stop_success\" regardless of your rationale, so " +
+    "an ungrounded proposal only wastes a turn.";
 
   // Drawer/modal formalization (Phase 3 PR 5, see CLAUDE.md and docs/architecture.md
   // "Drawer/modal formalization"): the existing activeDialog-only prioritization extended to
@@ -697,6 +720,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
       : {}),
     ...(branch ? { branch } : {}),
     ...(alternativeExploration ? { alternativeExploration } : {}),
+    ...(expectedSurface ? { expectedSurface } : {}),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };

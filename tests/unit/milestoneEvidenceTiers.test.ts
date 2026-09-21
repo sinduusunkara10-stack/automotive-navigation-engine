@@ -19,7 +19,15 @@ import { computeEvidenceTier } from "../../src/core/successEvaluator.js";
 // type/evidence source is ever added to successEvaluator.ts without a corresponding update
 // here.
 const KNOWN_OBSERVED_EVIDENCE_SOURCES = ["url_pattern", "element_present", "data_layer_event", "network_event"];
-const KNOWN_INFERRED_EVIDENCE_SOURCES = ["semantic_page_match:deterministic", "semantic_page_match:verifier"];
+const KNOWN_INFERRED_EVIDENCE_SOURCES = [
+  "semantic_page_match:deterministic",
+  "semantic_page_match:verifier",
+  // Panel-attribution corrective pass (item 1/5, see CLAUDE.md and the BMW-enquire-panel
+  // investigation): a resulting-surface milestone satisfied deterministically by combining
+  // verified causal-click evidence with a scored, panel-scoped relevance judgement -- still
+  // a vocabulary-overlap/relevance inference, never a literal, directly-observed fact.
+  "semantic_page_match:panel_causal",
+];
 
 test("every observed evidence source maps to the observed tier", () => {
   for (const source of KNOWN_OBSERVED_EVIDENCE_SOURCES) {

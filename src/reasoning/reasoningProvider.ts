@@ -98,6 +98,32 @@ export interface ReasoningContext {
    * existing convention for optional context fields.
    */
   alternativeExploration?: { justFailedLabels: string[] };
+  /**
+   * Panel-attribution corrective pass (item 2 of the approved design -- see CLAUDE.md and
+   * the BMW-enquire-panel investigation): present only when the current observation's own
+   * activeSurface is a non-"main" surface (in_document or adopted_context) whose causing
+   * action this run was able to attribute (core/state.ts's RunState.recordSurfaceCausingAction).
+   * Gives the planner the same structural "this is my own action's result" identity the
+   * investigation found was previously only ever advisory prose -- never require the model
+   * to infer the connection from a bare opaque element id or a several-steps-old string
+   * alone when this field is present. Omitted entirely otherwise, matching this repo's
+   * existing convention for optional context fields.
+   */
+  expectedSurface?: {
+    /** The surface's own stable identity (see core/panelEvidence.ts's PanelEvidence.identity for in_document; the surface id itself otherwise). */
+    surfaceIdentity: string;
+    /** Which step's action caused this surface to open. */
+    causingActionStepIndex: number;
+    /** The causing control's own accessible name/text, when known -- never an opaque element id. */
+    causingControlLabel?: string;
+    /** See ActionResult.verifiedSuccessType/RecordedAction.surfaceChangeType. */
+    causingActionVerifiedSuccessType?: string;
+    causingActionSurfaceChangeType?: string;
+    /** True while this surface is still the active one (it has not since been closed/left). */
+    stillOpen: boolean;
+    /** True once a scoped verifier/deterministic check has already confirmed this surface satisfies the active milestone. */
+    alreadyVerifiedAgainstMilestone: boolean;
+  };
 }
 
 export interface ReasoningProvider {
