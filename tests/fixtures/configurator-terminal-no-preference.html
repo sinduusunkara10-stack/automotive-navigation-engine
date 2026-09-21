@@ -23,13 +23,21 @@
       window.dataLayer = window.dataLayer || [];
       window.dataLayer.push({ event: "page_view", page: "configurator-terminal-no-pref", fictionalId: "FIX-NOPREF-001" });
 
+      // See configurator-terminal-fr.html's own comment: a genuine role="dialog" summary
+      // panel (not a bare heading) so the click is corroborated by a standards-based dialog
+      // signal, one of the fixed evidence classes strong enough for LastActionEvidence to
+      // reach the terminal criterion's verifier.
       document.getElementById("summary-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Résumé de la configuration terminée</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Résumé de la configuration terminée</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-NOPREF-002" });
       });
 
       document.getElementById("continue-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Continuation confirmée</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Continuation confirmée</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-NOPREF-003" });
       });
 

@@ -55,14 +55,22 @@
 
       // Same plain-ASCII-vs-accented split as configurator-terminal-fr.html -- see that
       // fixture's comment for why.
+      // See configurator-terminal-fr.html's own comment: a genuine role="dialog" summary
+      // panel (not a bare heading) so the click is corroborated by a standards-based dialog
+      // signal, one of the fixed evidence classes strong enough for LastActionEvidence to
+      // reach the terminal criterion's verifier.
       document.getElementById("summary-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Resume de la configuration terminee : affiche</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Resume de la configuration terminee : affiche</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-TERM-OVERLAY-003" });
         fireGa4("configuration_summary_shown");
       });
 
       document.getElementById("continue-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Continuation : configuration continue en toute securite</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Continuation : configuration continue en toute securite</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-TERM-OVERLAY-004" });
         fireGa4("configuration_continued");
       });

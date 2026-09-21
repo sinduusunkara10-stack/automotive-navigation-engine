@@ -344,6 +344,39 @@ export interface ActionResult {
    * allowedDomains, or the domain policy was "require_allowed_domain" (the default).
    */
   extendedAllowedDomain?: string;
+  /**
+   * Click-success/milestone-evidence corrective work (2026-09-21, see actions/click.ts and
+   * core/successEvaluator.ts): present only on a `click` action's ActionResult, and only when
+   * `success` is true on the strength of one of a fixed set of directly-observed evidence
+   * classes strong enough to justify letting this click's own details (LastActionEvidence)
+   * corroborate a semantic_page_match milestone -- never on the weaker, uncorroborated
+   * evidence that a target became covered/disappeared, or that unrelated elements changed,
+   * with no dialog/panel/navigation/new-context to back it up. core/loop.ts forwards
+   * LastActionEvidence to the milestone verifier only when this field is present.
+   * - "same_tab_navigation": the click caused a real, allowedDomains-checked navigation of
+   *   the tracked page (a "framenavigated" event was observed and followed through).
+   * - "new_context_adopted": the click's popup/new-context event was kept open as the
+   *   engine's new active surface (see surfaceAdopted) -- already relevance-gated.
+   * - "dialog": a standards-based dialog/modal signal (role="dialog", aria-modal="true", or
+   *   a native <dialog>) appeared or changed -- a page-author-declared fact, not a heuristic.
+   * - "settled_panel": after the same bounded settle wait used elsewhere, a large newly-
+   *   appeared panel co-occurred with several new controls (classifyObservedSurfaceChange's
+   *   "layer_panel_appeared") -- corroborated, not just an instantaneous target-local read.
+   * - "destination_fallback_verified": the generic destinationUrl navigation fallback was
+   *   used and its resulting page state was verified as a genuine, target-attributable
+   *   change (fallbackVerified true).
+   * Absent whenever success is false, or true only via the weaker signals above (an
+   * uneventful click with no observable further effect, or a target-local
+   * covered/disappeared/aria-expanded change with no dialog/panel to corroborate it) --
+   * `success` itself is unaffected by this narrower field; the engine's own loop continues
+   * exactly as before for any of those weaker-evidence successes.
+   */
+  verifiedSuccessType?:
+    | "same_tab_navigation"
+    | "new_context_adopted"
+    | "dialog"
+    | "settled_panel"
+    | "destination_fallback_verified";
 }
 
 export interface Progress {
@@ -1041,7 +1074,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.22.0";
+  schemaVersion: "1.23.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
