@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Local test-run artifacts (e.g. capture-module screenshots from the local PoC)
 test-artifacts/
+
+# Claude Code agent worktree scratch state (isolated background-agent checkouts)
+.claude/
