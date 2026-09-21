@@ -17,6 +17,21 @@ import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 export const MAIN_SURFACE_ID = "main";
 
 /**
+ * Panel-attribution corrective pass (item 2 of the approved design -- see CLAUDE.md and the
+ * BMW-enquire-panel investigation, §13.2): the action that caused entry into a given
+ * in-document/adopted surface, recorded generically (step index plus whatever accessible
+ * identity the clicked control had) -- never a brand/site-specific field.
+ */
+export interface SurfaceCausingAction {
+  stepIndex: number;
+  ctaText?: string;
+  accessibleName?: string;
+  elementType?: string;
+  /** See ActionResult.verifiedSuccessType -- present only when the causing click's own success was established via one of the fixed, directly-observed evidence classes, never merely because actionResult.success was true. */
+  verifiedSuccessType?: string;
+}
+
+/**
  * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and docs/architecture.md
  * §25): the per-surface bucket of state that must never leak between the tracked page
  * ("main") and a future adopted popup/new-tab/drawer context. Everything in here was
@@ -123,6 +138,81 @@ export class RunState {
   private inDocumentSurfaceCounter = 0;
   /** Drawer/modal formalization (Phase 3 PR 5): which in_document surface ids were entered via a genuine Observation.activeDialog signal -- see core/inDocumentSurface.ts's shouldLeaveInDocumentSurface for why only those can be auto-left on their own. */
   private readonly inDocumentEnteredViaActiveDialog = new Set<string>();
+
+  /**
+   * Panel-attribution corrective pass (item 2 of the approved design -- see CLAUDE.md and
+   * the BMW-enquire-panel investigation): which action caused entry into a given surface
+   * id, recorded once at the same pushSurface call site that enters it. Never overwritten
+   * for a surface id once set -- a surface is only ever entered (caused) once; re-entering
+   * an already-popped id (never done today) would simply keep its original causing action.
+   */
+  private readonly surfaceCausingAction = new Map<string, SurfaceCausingAction>();
+
+  /** See surfaceCausingAction's own doc comment above. */
+  recordSurfaceCausingAction(surfaceId: string, causingAction: SurfaceCausingAction): void {
+    if (!this.surfaceCausingAction.has(surfaceId)) {
+      this.surfaceCausingAction.set(surfaceId, causingAction);
+    }
+  }
+
+  getSurfaceCausingAction(surfaceId: string): SurfaceCausingAction | undefined {
+    return this.surfaceCausingAction.get(surfaceId);
+  }
+
+  /**
+   * Panel-attribution corrective pass (item 3): surface ids for which the close-guard
+   * (core/loop.ts) has already substituted one bounded redirect for an attempted premature
+   * close -- a second attempt on the same surface id is let through rather than blocked
+   * again indefinitely, so the guard can never itself deadlock a run.
+   */
+  readonly surfaceCloseGuardRedirected = new Set<string>();
+
+  /**
+   * Panel-attribution corrective pass (item 1/5): set when this step's own post-click check
+   * satisfied a milestone using the just-opened (not yet formally tracked -- see
+   * core/loop.ts's buildPanelMatchContext) panel's own evidence, so the very next step's
+   * surface-entry detection can immediately mark the newly-formalised surface id as already
+   * verified against the milestone, without a second, redundant evaluator call.
+   */
+  pendingJustOpenedPanelVerified = false;
+
+  /**
+   * The most recently dispatched click's own generic causal details (step index, accessible
+   * identity, verifiedSuccessType), set unconditionally for every click this run dispatches
+   * -- independent of whether the cta_clicks capture module was requested -- so
+   * recordSurfaceCausingAction above can attribute a newly-entered surface to it the moment
+   * entry is detected, one step later (see core/loop.ts).
+   */
+  lastDispatchedClickDetails: SurfaceCausingAction | undefined;
+
+  /**
+   * Panel-attribution corrective pass (item 3): which surface ids have already been
+   * confirmed, by a scoped verifier/deterministic check, to satisfy the active milestone --
+   * consulted by the close-guard (core/loop.ts) so a surface already known to satisfy the
+   * milestone is never treated as "not yet verified" a second time.
+   */
+  private readonly surfacesVerifiedAgainstMilestone = new Set<string>();
+
+  markSurfaceVerifiedAgainstMilestone(surfaceId: string): void {
+    this.surfacesVerifiedAgainstMilestone.add(surfaceId);
+  }
+
+  wasSurfaceVerifiedAgainstMilestone(surfaceId: string): boolean {
+    return this.surfacesVerifiedAgainstMilestone.has(surfaceId);
+  }
+
+  /**
+   * Panel-attribution corrective pass (item 2/4): a single monotonic counter combining the
+   * two independent, only-ever-incrementing surface counters above -- never decremented by
+   * popSurface, so it changes exactly when a *new* surface (adopted or in_document) has
+   * ever been entered this run, regardless of how many have since closed. Used by item 4 to
+   * put a run-state/evidence-generation marker into the semantic verifier's cache key, so a
+   * DOM reverting to near-identical content after a surface closes cannot collide with a
+   * cache entry computed before that surface (and its own generation) ever existed.
+   */
+  get surfaceGeneration(): number {
+    return this.adoptedSurfaceCounter + this.inDocumentSurfaceCounter;
+  }
 
   get activeSurface(): string {
     // Never empty -- MAIN_SURFACE_ID is pushed once at construction and popSurface refuses

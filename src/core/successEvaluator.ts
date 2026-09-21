@@ -11,6 +11,56 @@ import {
   scoreSemanticPageMatch,
   type SemanticSignalName,
 } from "./semanticPageMatch.js";
+import type { PanelEvidence } from "./panelEvidence.js";
+import { RELEVANCE_ADOPT_THRESHOLD, RELEVANCE_REJECT_THRESHOLD, type RelevanceTier } from "./surfaceRelevance.js";
+
+/**
+ * Panel-attribution corrective pass (item 1, see CLAUDE.md and the BMW-enquire-panel
+ * investigation §13): PanelEvidence.relevance (core/panelEvidence.ts) is scored once per
+ * step against a *blended* objective+all-criteria text (core/loop.ts's
+ * buildPanelMatchContext), since panel evidence is gathered once and may be reused across
+ * more than one criterion evaluation. A single required milestone is ever eligible per
+ * evaluateSuccessCriteria call (see computeEligibleCriteriaIds), but scoring must still be
+ * done against *this specific criterion's* own anchorText -- not the blended one -- or an
+ * unrelated milestone's vocabulary could inflate/deflate another milestone's own relevance
+ * tier. Recomputed fresh here, cheaply (pure token overlap, no further page I/O), the exact
+ * same way core/surfaceRelevance.ts's own three-tier thresholds already classify an adopted
+ * surface -- never a bespoke keyword blocklist.
+ */
+function computePanelRelevanceForCriterion(
+  anchorText: string,
+  evidence: PanelEvidence,
+): { tier: RelevanceTier; score: number } {
+  if (!evidence.containerFound) {
+    return { tier: "reject", score: 0 };
+  }
+  const score = scoreSemanticPageMatch(
+    anchorText,
+    { title: "", headings: evidence.headings, interactiveText: evidence.interactiveText },
+    ALL_SEMANTIC_SIGNALS,
+  ).overall;
+  const tier: RelevanceTier =
+    score >= RELEVANCE_ADOPT_THRESHOLD ? "adopt" : score <= RELEVANCE_REJECT_THRESHOLD ? "reject" : "ambiguous";
+  return { tier, score };
+}
+
+/**
+ * Panel-attribution corrective pass (item 1/5, see CLAUDE.md and the BMW-enquire-panel
+ * investigation §13): optional, additive context for a semantic_page_match criterion whose
+ * active surface is `in_document` -- `evidence` is item 1's panel-scoped evidence (undefined
+ * when the active surface isn't in_document, or no scoped container was found);
+ * `causallyLinked` is true only when this exact surface was opened by the active milestone's
+ * own already-verified causing click (RunState.getSurfaceCausingAction, item 2) --
+ * `causingControlLabel` is that click's own accessible name/text, forwarded to the verifier
+ * as extra evidence when the deterministic panel-causal path below cannot itself resolve the
+ * criterion. Omitted entirely by every caller not currently scoped to an in_document surface,
+ * reproducing prior behaviour exactly.
+ */
+export interface PanelMatchContext {
+  evidence?: PanelEvidence;
+  causallyLinked: boolean;
+  causingControlLabel?: string;
+}
 
 /**
  * Already-accumulated, generic run evidence a data_layer_event/network_event criterion can
@@ -120,6 +170,8 @@ export async function evaluateSuccessCriteria(
   criteriaEvidence?: SuccessCriteriaEvidence,
   milestoneEvidenceContext?: MilestoneEvidenceContext,
   surfaceScoped?: boolean,
+  panelContext?: PanelMatchContext,
+  runStateMarker?: { surfaceGeneration: number; stepIndex: number },
 ): Promise<string[]> {
   const satisfiedAtCallStart = alreadySatisfiedCriteriaIds ?? new Set<string>();
   const eligibleCriteriaIds = computeEligibleCriteriaIds(criteria, satisfiedAtCallStart);
@@ -140,6 +192,8 @@ export async function evaluateSuccessCriteria(
       lastActionEvidence,
       criteriaEvidence,
       surfaceScoped,
+      panelContext,
+      runStateMarker,
     );
     if (result.satisfied) {
       satisfied.push(criterion.id);
@@ -195,7 +249,11 @@ export function computeEvidenceTier(evidenceSource: string): "observed" | "infer
   ) {
     return "observed";
   }
-  if (evidenceSource === "semantic_page_match:deterministic" || evidenceSource === "semantic_page_match:verifier") {
+  if (
+    evidenceSource === "semantic_page_match:deterministic" ||
+    evidenceSource === "semantic_page_match:verifier" ||
+    evidenceSource === "semantic_page_match:panel_causal"
+  ) {
     return "inferred";
   }
   return "assumed";
@@ -420,6 +478,8 @@ async function evaluateSingle(
   lastActionEvidence?: LastActionEvidence,
   criteriaEvidence?: SuccessCriteriaEvidence,
   surfaceScoped?: boolean,
+  panelContext?: PanelMatchContext,
+  runStateMarker?: { surfaceGeneration: number; stepIndex: number },
 ): Promise<SingleCriterionResult> {
   switch (criterion.type) {
     case "url_pattern": {
@@ -455,7 +515,16 @@ async function evaluateSingle(
       };
     }
     case "semantic_page_match": {
-      return evaluateSemanticPageMatch(page, criterion, objective, semanticVerifier, lastActionEvidence, surfaceScoped);
+      return evaluateSemanticPageMatch(
+        page,
+        criterion,
+        objective,
+        semanticVerifier,
+        lastActionEvidence,
+        surfaceScoped,
+        panelContext,
+        runStateMarker,
+      );
     }
     case "data_layer_event": {
       return evaluateDataLayerEvent(page, criterion, criteriaEvidence);
@@ -595,6 +664,8 @@ async function evaluateSemanticPageMatch(
   semanticVerifier?: SemanticCriterionVerifier,
   lastActionEvidence?: LastActionEvidence,
   surfaceScoped?: boolean,
+  panelContext?: PanelMatchContext,
+  runStateMarker?: { surfaceGeneration: number; stepIndex: number },
 ): Promise<SingleCriterionResult> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
@@ -625,6 +696,60 @@ async function evaluateSemanticPageMatch(
     };
   }
 
+  // Panel-attribution corrective pass (items 1/5, see CLAUDE.md and the BMW-enquire-panel
+  // investigation §13): a resulting-surface milestone ("once you see the panel appear")
+  // combines a verified causal link from the milestone's own causing click to this
+  // in_document surface, the surface's stable identity, confirmation it is still present
+  // (both implicit in panelContext.causallyLinked, which core/loop.ts only ever sets true
+  // for the *currently* active surface), panel-local evidence where available, and the
+  // absence of strong contradictory evidence -- never a hard requirement that the panel's
+  // own text share identical vocabulary with the criterion description (see the CORE
+  // COMPLETION RULE in the approved design). Strong negative evidence (relevance tier
+  // "reject") short-circuits to not-satisfied without ever consulting a semanticVerifier --
+  // fail-closed, and never wastes a model call on an already-known-unrelated surface. This
+  // only ever applies when a panel container was actually found and scanned: containerFound
+  // false means no panel evidence exists to judge relevance from at all (e.g. a click opened
+  // a role="dialog" that isn't a fixed/absolute/sticky-positioned floating container -- the
+  // structural shape gatherPanelEvidence's own scan looks for), which must never be treated
+  // as strong contradictory evidence of its own -- see REGRESSION coveredControlPreference
+  // .test.ts's own dialog-in-normal-flow shape, which this distinction exists to preserve.
+  const panelRelevanceForThisCriterion = panelContext?.evidence
+    ? computePanelRelevanceForCriterion(anchorText, panelContext.evidence)
+    : undefined;
+  if (panelContext?.evidence?.containerFound && panelRelevanceForThisCriterion) {
+    if (panelRelevanceForThisCriterion.tier === "reject") {
+      return {
+        satisfied: false,
+        evidenceSource: "semantic_page_match:panel_relevance_rejected",
+        score: panelRelevanceForThisCriterion.score,
+        reason:
+          `The currently open panel's own content scored below the relevance-reject threshold ` +
+          `(${panelRelevanceForThisCriterion.score.toFixed(2)}) against this criterion's own objective/description ` +
+          `-- treated as strong evidence it is unrelated, regardless of any causal click link.`,
+      };
+    }
+    if (
+      panelContext.causallyLinked &&
+      panelContext.evidence.containerFound &&
+      panelContext.evidence.documentUsable &&
+      panelRelevanceForThisCriterion.tier === "adopt"
+    ) {
+      return {
+        satisfied: true,
+        evidenceSource: "semantic_page_match:panel_causal",
+        score: panelRelevanceForThisCriterion.score,
+        reason:
+          `A stable, causally-linked in-document surface (identity "${panelContext.evidence.identity}") opened by ` +
+          `this run's own verified click is present, still open, and its own scoped content scored above the ` +
+          `relevance-adopt threshold (${panelRelevanceForThisCriterion.score.toFixed(2)}) against this criterion's own objective/description.`,
+      };
+    }
+    // Ambiguous relevance tier, or causal linkage/stability/container evidence missing or
+    // weak: fail-closed by design (do not auto-satisfy) -- fall through to the verifier
+    // (if configured) with the panel evidence forwarded as extra context, rather than
+    // silently completing on an unresolved signal.
+  }
+
   if (!semanticVerifier) {
     return {
       satisfied: false,
@@ -639,6 +764,22 @@ async function evaluateSemanticPageMatch(
     criterionDescription: criterion.description,
     pageEvidence: pageSignals,
     ...(lastActionEvidence ? { lastActionEvidence } : {}),
+    ...(panelContext?.evidence && panelRelevanceForThisCriterion
+      ? {
+          panelEvidence: {
+            identity: panelContext.evidence.identity,
+            role: panelContext.evidence.role,
+            headings: panelContext.evidence.headings,
+            interactiveText: panelContext.evidence.interactiveText,
+            documentUsable: panelContext.evidence.documentUsable,
+            relevanceTier: panelRelevanceForThisCriterion.tier,
+            relevanceScore: panelRelevanceForThisCriterion.score,
+            causallyLinked: panelContext.causallyLinked,
+            ...(panelContext.causingControlLabel ? { causingControlLabel: panelContext.causingControlLabel } : {}),
+          },
+        }
+      : {}),
+    ...(runStateMarker ? { runStateMarker } : {}),
   });
   return {
     satisfied: verification.satisfied,
