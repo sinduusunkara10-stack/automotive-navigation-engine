@@ -1518,6 +1518,10 @@ export async function runStep(params: {
       surfaceId: newSurfaceId,
       event: "adopted",
       ...(adoptedUrl ? { pageUrl: adoptedUrl } : {}),
+      ...(actionResult.relevanceScore !== undefined ? { relevanceScore: actionResult.relevanceScore } : {}),
+      ...(actionResult.relevanceTier ? { relevanceTier: actionResult.relevanceTier } : {}),
+      ...(actionResult.consentActionTaken ? { consentActionTaken: true } : {}),
+      ...(extendedAllowedDomain ? { extendedAllowedDomain } : {}),
     });
     if (task.captureModules.includes("errors")) {
       recordDiagnosticError(captures, {
@@ -1541,6 +1545,9 @@ export async function runStep(params: {
       surfaceId: state.activeSurface,
       event: "rejected",
       reason: actionResult.adoptionRejectedReason,
+      ...(actionResult.relevanceScore !== undefined ? { relevanceScore: actionResult.relevanceScore } : {}),
+      ...(actionResult.relevanceTier ? { relevanceTier: actionResult.relevanceTier } : {}),
+      ...(actionResult.consentActionTaken ? { consentActionTaken: true } : {}),
     });
   }
   if (actionResult.adoptionRejectedReason && task.captureModules.includes("errors")) {

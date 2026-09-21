@@ -234,7 +234,7 @@ export interface ConsentDiagnostics {
  * adoption/return/closure, not once per step:
  * - "adopted": a popup/new-tab was adopted onto the surface stack (mirrors the
  *   ActionResult.surfaceAdopted=true case already reported in captures.errors).
- * - "rejected": a popup was offered but not adopted (domain/budget) -- mirrors
+ * - "rejected": a popup was offered but not adopted (domain/budget/relevance) -- mirrors
  *   ActionResult.adoptionRejectedReason.
  * - "returned": returnToParentSurface (core/surfaceReturn.ts) successfully popped back to
  *   the parent Page.
@@ -249,7 +249,15 @@ export interface SurfaceAdoptionAttemptDiagnostic {
   /** Set on "adopted"/"returned"/"return_failed" when the relevant page's URL was available. */
   pageUrl?: string;
   /** Set on "rejected"/"return_failed" -- see ActionResult.adoptionRejectedReason and ReturnToParentResult.reason. */
-  reason?: "domain_rejected" | "budget_exhausted" | "parent_closed" | "parent_navigation_unverified";
+  reason?: "domain_rejected" | "budget_exhausted" | "relevance_rejected" | "parent_closed" | "parent_navigation_unverified";
+  /** Mirrors ActionResult.relevanceScore -- see its own doc comment. Set on "adopted"/"rejected" whenever the relevance gate ran for this attempt. */
+  relevanceScore?: number;
+  /** Mirrors ActionResult.relevanceTier -- see its own doc comment. */
+  relevanceTier?: "adopt" | "reject" | "ambiguous";
+  /** Mirrors ActionResult.consentActionTaken -- see its own doc comment. */
+  consentActionTaken?: boolean;
+  /** Mirrors ActionResult.extendedAllowedDomain -- see its own doc comment. Set only on "adopted". */
+  extendedAllowedDomain?: string;
 }
 
 /**

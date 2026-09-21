@@ -291,13 +291,59 @@ export interface ActionResult {
    * Present only when Safety.allowSurfaceAdoption was true and this click opened a popup/
    * new context that adoption considered but did not keep open -- naming why: "domain_rejected"
    * (the landing hostname was outside allowedDomains under the "require_allowed_domain"
-   * policy, or never resolved to a real document at all) or "budget_exhausted"
-   * (Safety.maxAdoptedSurfacesPerRun was already reached). Never "adoption_disabled" here --
-   * that case never even attempts a decision, and this field is simply absent for it, same
-   * as for every run that never opts in. Purely explanatory; the context was still
-   * capture-only-instrumented-and-closed exactly as if adoption had never been attempted.
+   * policy, or never resolved to a real document at all), "budget_exhausted"
+   * (Safety.maxAdoptedSurfacesPerRun was already reached), or "relevance_rejected"
+   * (surface-relevance corrective work, PR 6: core/surfaceRelevance.ts scored the candidate's
+   * page signals -- optionally after one bounded consent-only-candidate interaction, see
+   * consentActionTaken below -- against the task's objective/success-criteria/journeyType/
+   * triggering-CTA text and it did not clear the adopt bar; see relevanceScore/relevanceTier
+   * for the evidence). Never "adoption_disabled" here -- that case never even attempts a
+   * decision, and this field is simply absent for it, same as for every run that never opts
+   * in. Purely explanatory; the context was still capture-only-instrumented-and-closed
+   * exactly as if adoption had never been attempted.
    */
-  adoptionRejectedReason?: "domain_rejected" | "budget_exhausted";
+  adoptionRejectedReason?: "domain_rejected" | "budget_exhausted" | "relevance_rejected";
+  /**
+   * Surface-relevance corrective work (PR 6, wiring PR 3's core/surfaceRelevance.ts onto the
+   * wire): present whenever the relevance gate actually ran for this click's popup/new-context
+   * candidate (Safety.allowSurfaceAdoption true, a non-empty relevance objective text was
+   * built, and the per-run adoption budget was not already exhausted) -- on both the adopted
+   * and the relevance_rejected outcome, never only one. The final deterministic token-overlap
+   * score (0-1) against RELEVANCE_ADOPT_THRESHOLD/RELEVANCE_REJECT_THRESHOLD -- both still
+   * initial, unvalidated calibration values pending PR 7's live-site validation, never to be
+   * read as production-proven. Reflects the reassessment after a consentActionTaken
+   * interaction when one occurred.
+   */
+  relevanceScore?: number;
+  /**
+   * Companion to relevanceScore above, present under the exact same condition: the three-tier
+   * classification ("adopt", "reject", or "ambiguous") core/surfaceRelevance.ts assigned.
+   * "ambiguous" only ever appears here if it was never resolved to a confident verdict (no
+   * ambiguityResolver supplied, or resolution failed independent verification) -- a resolved
+   * ambiguous candidate is reported as whichever of "adopt"/"reject" the resolution and any
+   * following consent interaction settled on.
+   */
+  relevanceTier?: "adopt" | "reject" | "ambiguous";
+  /**
+   * Consent-only-candidate handling (PR 4, widened to every non-relevant tier -- see
+   * capture-modules/popupCapture.ts's attemptConsentOnlyCandidateResolution): true only when
+   * this candidate's only visible content was a genuine, classifier-identified consent
+   * surface and the one bounded, policy-approved ("accept_optional") click against it actually
+   * succeeded, after which relevanceScore/relevanceTier above reflect the reassessment of the
+   * revealed content. Absent (never false) whenever no such interaction was attempted, was
+   * attempted but failed, or no consent surface was ever detected on the candidate.
+   */
+  consentActionTaken?: boolean;
+  /**
+   * Surface adoption (Phase 3 PR 3, wired onto the wire in PR 6): present only when this
+   * candidate was actually adopted (surfaceAdopted true) under
+   * Safety.surfaceAdoptionDomainPolicy "extend_trust_from_landing" and its own landing
+   * hostname was outside the run's allowedDomains -- names that hostname, the domain this
+   * one adopted surface's own lifetime was trusted for. Never widens the run's own
+   * allowedDomains; absent whenever the adopted candidate's hostname was already within
+   * allowedDomains, or the domain policy was "require_allowed_domain" (the default).
+   */
+  extendedAllowedDomain?: string;
 }
 
 export interface Progress {
@@ -995,7 +1041,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.21.0";
+  schemaVersion: "1.22.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

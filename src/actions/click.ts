@@ -814,6 +814,14 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         resultingUrl: popupOutcome.adoptedUrl ?? popupUrl,
         surfaceAdopted: true,
         openedNewContext: true,
+        // Surface-relevance corrective work (PR 6): wire the same relevance/consent evidence
+        // adoptOrCapturePopup already computed onto the JSON-serializable ActionResult, so an
+        // adopted candidate reports *why* it cleared the gate, not only that it was adopted.
+        ...(popupOutcome.relevanceAssessment
+          ? { relevanceScore: popupOutcome.relevanceAssessment.score, relevanceTier: popupOutcome.relevanceAssessment.tier }
+          : {}),
+        ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
+        ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
       };
     }
     const observedNewContext = popupOutcome.observed;
@@ -843,12 +851,23 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     // "adoption_disabled" is deliberately never reachable here: this whole popupAdoption
     // path only ever calls decideSurfaceAdoption (core/surfaceAdoption.ts) with
     // allowSurfaceAdoption: true (see adoptOrCapturePopup's own early-return guard) --
-    // ActionResult.adoptionRejectedReason's narrower two-value type reflects that.
+    // ActionResult.adoptionRejectedReason's narrower three-value type reflects that.
     const reportableReason =
-      popupOutcome.adoptionRejectedReason === "domain_rejected" || popupOutcome.adoptionRejectedReason === "budget_exhausted"
+      popupOutcome.adoptionRejectedReason === "domain_rejected" ||
+      popupOutcome.adoptionRejectedReason === "budget_exhausted" ||
+      popupOutcome.adoptionRejectedReason === "relevance_rejected"
         ? popupOutcome.adoptionRejectedReason
         : undefined;
-    return reportableReason ? { ...unactionableResult, adoptionRejectedReason: reportableReason } : unactionableResult;
+    return {
+      ...unactionableResult,
+      ...(reportableReason ? { adoptionRejectedReason: reportableReason } : {}),
+      // Surface-relevance corrective work (PR 6): reported on a rejected candidate too, not
+      // only an adopted one -- this is the evidence for *why* relevance_rejected fired.
+      ...(popupOutcome.relevanceAssessment
+        ? { relevanceScore: popupOutcome.relevanceAssessment.score, relevanceTier: popupOutcome.relevanceAssessment.tier }
+        : {}),
+      ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
+    };
   }
 
   if (!mainFrameNavigated) {

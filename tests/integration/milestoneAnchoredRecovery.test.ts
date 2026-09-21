@@ -128,7 +128,7 @@ function isSatisfied(context: ReasoningContext): boolean {
 
 function combinedSequenceTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.20.0",
+    schemaVersion: "1.21.0",
     taskId: "milestone-anchored-recovery-combined-sequence",
     allowedDomains: ["127.0.0.1"],
     startUrl,
@@ -173,7 +173,7 @@ function combinedSequenceTask(startUrl: string): TaskRequest {
       allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       consentInteractionPolicy: "accept_optional",
     },
-    outputSchemaVersion: "1.21.0",
+    outputSchemaVersion: "1.22.0",
   };
 }
 
