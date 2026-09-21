@@ -147,7 +147,11 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "surface appeared. Still require the panel's own \"relevanceTier\" to not be \"reject\", and " +
     "still fail closed (do not confirm) when \"causallyLinked\" is false, \"documentUsable\" is " +
     "false, or \"relevanceTier\" is \"ambiguous\" with nothing else corroborating a genuine " +
-    "match. Never output an action, URL, selector, or code. Give an honest " +
+    "match. This relevanceTier requirement governs only a criterion that is itself asking " +
+    "whether that panel/surface appeared -- it never disqualifies a different criterion (e.g. " +
+    "that a specific control was clicked) whose own completion \"lastActionEvidence\" alone " +
+    "already genuinely supports, regardless of what relevanceTier says about an unrelated " +
+    "panel that happens to be open. Never output an action, URL, selector, or code. Give an honest " +
     "confidence for how sure you are, and always cite the specific page evidence (a short " +
     "quote) that supports your verdict, even when the verdict is that the page does not match.";
 
