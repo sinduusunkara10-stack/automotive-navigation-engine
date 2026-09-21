@@ -156,7 +156,7 @@ function isSatisfied(context: ReasoningContext): boolean {
 
 function task(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.21.0",
+    schemaVersion: "1.22.0",
     taskId: "multilingual-consent-every-journey-stage",
     allowedDomains: ["127.0.0.1"],
     startUrl,
@@ -193,7 +193,7 @@ function task(startUrl: string): TaskRequest {
       allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       consentInteractionPolicy: "accept_optional",
     },
-    outputSchemaVersion: "1.22.0",
+    outputSchemaVersion: "1.23.0",
   };
 }
 

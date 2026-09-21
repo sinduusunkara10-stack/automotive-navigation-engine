@@ -90,14 +90,26 @@
       // deterministic semantic_page_match evaluator only scans headings (h1-h4) and
       // interactive-element accessible names (src/core/semanticPageMatch.ts), never
       // arbitrary paragraph text, matching what the real engine actually reads.
+      // The revealed terminal state is rendered as a genuine role="dialog" summary panel
+      // (realistic for a "show completed configuration" control -- a modal, not a bare
+      // heading), so a successful click here is corroborated by a standards-based dialog
+      // signal (see ActionResult.verifiedSuccessType's own doc comment in
+      // src/types/task-response.ts) and is one of the fixed evidence classes strong enough
+      // for core/loop.ts to forward this click's own LastActionEvidence to the terminal
+      // semantic_page_match criterion's verifier below -- exactly like a real completion
+      // modal would be.
       document.getElementById("summary-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Resume de la configuration terminee : affiche</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Resume de la configuration terminee : affiche</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_summary_shown", fictionalId: "FIX-TERM-002" });
         fireGa4("configuration_summary_shown");
       });
 
       document.getElementById("continue-control").addEventListener("click", function () {
-        document.getElementById("result-area").innerHTML = "<h2>Continuation : configuration continue en toute securite</h2>";
+        document.getElementById("result-area").innerHTML =
+          '<div role="dialog" aria-modal="true"><h2>Continuation : configuration continue en toute securite</h2>' +
+          '<button type="button">Modifier</button><button type="button">Fermer</button></div>';
         window.dataLayer.push({ event: "configuration_continued", fictionalId: "FIX-TERM-003" });
         fireGa4("configuration_continued");
       });

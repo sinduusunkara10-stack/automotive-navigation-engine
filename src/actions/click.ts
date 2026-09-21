@@ -437,6 +437,11 @@ async function resolveUnactionableClick(params: {
       fallbackVerified: fallbackVerification?.verified ?? true,
       ...(fallbackVerification ? { fallbackVerificationReason: fallbackVerification.reason } : {}),
       ...(openedNewContext ? { openedNewContext, observedNewContext: Boolean(observedNewContext) } : {}),
+      // Click-success/milestone-evidence corrective work: a verified destinationUrl fallback
+      // is one of the fixed evidence classes strong enough for core/loop.ts to forward this
+      // click's LastActionEvidence to the milestone verifier -- see ActionResult.
+      // verifiedSuccessType's own doc comment.
+      verifiedSuccessType: "destination_fallback_verified",
     };
   }
 
@@ -690,6 +695,65 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
           observedSurfaceChange.type === "layer_panel_appeared"
             ? observedSurfaceChange.type
             : undefined;
+
+        // Click-success/milestone-evidence corrective work (2026-09-21, see BMW live-site
+        // investigation): sideEffect.detected alone -- the target's own covered/disappeared/
+        // aria-expanded state flipping, with no corroboration -- is not sufficient evidence
+        // this click actually opened a real surface. It can equally mean the target was
+        // covered or replaced by something unrelated to the click succeeding (a re-render, a
+        // lazy-load reflow, a transient hover layer Playwright's own actionability retries
+        // can themselves induce). A standards-based dialog signal (detectDialogSideEffect,
+        // reused inside detectTargetAttributableSideEffect -- sideEffect.type
+        // "dialog_appeared"/"dialog_changed") stays trusted unconditionally, exactly as
+        // before: that markup is a page-author-declared fact, not a heuristic. The weaker
+        // covered/disappeared/aria-expanded signal now additionally requires the same
+        // settled, corroborating classification already computed above for an unrelated
+        // purpose (reportableSurfaceChangeType) to agree -- a genuine dialog or a settled,
+        // multi-control panel that survived the same bounded settle wait every other
+        // click-success path already goes through. Never anything BMW/site-specific: purely
+        // structural signals the engine already computes.
+        const isStandardsBasedDialogSignal = sideEffect.type === "dialog_appeared" || sideEffect.type === "dialog_changed";
+        const verifiedSuccessType: ActionResult["verifiedSuccessType"] = isStandardsBasedDialogSignal
+          ? "dialog"
+          : reportableSurfaceChangeType === "dialog_appeared" || reportableSurfaceChangeType === "dialog_changed"
+            ? "dialog"
+            : reportableSurfaceChangeType === "layer_panel_appeared"
+              ? "settled_panel"
+              : undefined;
+
+        if (verifiedSuccessType) {
+          if (captureModules.includes("errors")) {
+            recordDiagnosticError(captures, {
+              stepIndex,
+              category: "stale_target_recovery",
+              severity: "info",
+              pageUrl: safePageUrl(page),
+              actionType: "click",
+              targetElementId,
+              message:
+                `Click target appeared to fail (${category}), but a bounded post-click check found generic ` +
+                `evidence (${sideEffect.type}), corroborated by a settled ${verifiedSuccessType} signal, that ` +
+                `the click actually succeeded and the target became covered by the very interactive surface ` +
+                `it opened; reporting success without using the destinationUrl fallback. Original click error: ${message}`,
+              recoverable: true,
+              stoppedRun: false,
+            });
+          }
+          return {
+            success: true,
+            resultingUrl: safePageUrl(page) ?? urlBeforeClick,
+            clickSideEffectDetected: true,
+            verifiedSuccessType,
+            ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
+            ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
+            settleDiagnostic,
+          };
+        }
+
+        // Uncorroborated: the target's own state changed, but neither a standards-based
+        // dialog nor a settled multi-control panel backs it up. Do not report success on
+        // this evidence alone -- fall through to the same destinationUrl fallback and bounded
+        // stale-target recovery every other unactionable-click category already uses.
         if (captureModules.includes("errors")) {
           recordDiagnosticError(captures, {
             stepIndex,
@@ -699,22 +763,14 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
             actionType: "click",
             targetElementId,
             message:
-              `Click target appeared to fail (${category}), but a bounded post-click check found generic ` +
-              `evidence (${sideEffect.type}) that the click actually succeeded and the target became ` +
-              `covered by the very interactive surface it opened; reporting success without using the ` +
-              `destinationUrl fallback. Original click error: ${message}`,
+              `Click target appeared to fail (${category}); a bounded post-click check found only weak, ` +
+              `uncorroborated evidence (${sideEffect.type}) that the target's own state changed, with no ` +
+              `standards-based dialog or settled panel to corroborate it -- not reporting this as a ` +
+              `successful action; continuing to the destinationUrl fallback. Original click error: ${message}`,
             recoverable: true,
             stoppedRun: false,
           });
         }
-        return {
-          success: true,
-          resultingUrl: safePageUrl(page) ?? urlBeforeClick,
-          clickSideEffectDetected: true,
-          ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
-          ...(openedNewContext ? { openedNewContext, observedNewContext } : {}),
-          settleDiagnostic,
-        };
       }
     }
 
@@ -814,6 +870,10 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         resultingUrl: popupOutcome.adoptedUrl ?? popupUrl,
         surfaceAdopted: true,
         openedNewContext: true,
+        // Click-success/milestone-evidence corrective work: an adopted surface already
+        // cleared PR 3's relevance gate -- strong enough evidence for core/loop.ts to forward
+        // LastActionEvidence to the milestone verifier. See ActionResult.verifiedSuccessType.
+        verifiedSuccessType: "new_context_adopted",
         // Surface-relevance corrective work (PR 6): wire the same relevance/consent evidence
         // adoptOrCapturePopup already computed onto the JSON-serializable ActionResult, so an
         // adopted candidate reports *why* it cleared the gate, not only that it was adopted.
@@ -906,11 +966,24 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
       observedSurfaceChange.type === "layer_panel_appeared"
         ? observedSurfaceChange.type
         : undefined;
+    // Click-success/milestone-evidence corrective work: this click dispatched cleanly (no
+    // Playwright-level error at all), which is already stronger evidence than the recovered-
+    // from-failure path above -- but a plain click with no further observable effect (a
+    // toggle/checkbox, say) still isn't strong enough on its own to let LastActionEvidence
+    // corroborate a milestone describing a destination reached. Only tag it when the same
+    // settled dialog/panel corroboration used above is also present here.
+    const verifiedSuccessType: ActionResult["verifiedSuccessType"] =
+      reportableSurfaceChangeType === "dialog_appeared" || reportableSurfaceChangeType === "dialog_changed"
+        ? "dialog"
+        : reportableSurfaceChangeType === "layer_panel_appeared"
+          ? "settled_panel"
+          : undefined;
     return {
       success: true,
       resultingUrl: safePageUrl(page) ?? urlBeforeClick,
       ...(sideEffect.detected ? { clickSideEffectDetected: true } : {}),
       ...(reportableSurfaceChangeType ? { surfaceChangeDetected: true, surfaceChangeType: reportableSurfaceChangeType } : {}),
+      ...(verifiedSuccessType ? { verifiedSuccessType } : {}),
       settleDiagnostic,
     };
   }
@@ -959,5 +1032,13 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     });
   }
 
-  return { success: true, resultingUrl: outcomeUrl, settleDiagnostic };
+  return {
+    success: true,
+    resultingUrl: outcomeUrl,
+    settleDiagnostic,
+    // Click-success/milestone-evidence corrective work: a confirmed, allowedDomains-checked
+    // same-tab navigation is the strongest evidence class -- see ActionResult.
+    // verifiedSuccessType's own doc comment.
+    verifiedSuccessType: "same_tab_navigation",
+  };
 }

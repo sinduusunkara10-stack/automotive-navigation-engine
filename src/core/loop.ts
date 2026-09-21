@@ -1849,7 +1849,16 @@ export async function runStep(params: {
     task.objective,
     semanticVerifier,
     state.satisfiedCriteriaIds,
-    wantsCtaClickCapture && isClick ? clickedElementDetails : undefined,
+    // Click-success/milestone-evidence corrective work (2026-09-21, see BMW live-site
+    // investigation and ActionResult.verifiedSuccessType's own doc comment): this click's own
+    // declared destination/ctaText is only forwarded as corroborating evidence to the
+    // semantic verifier when the click's success was itself established via one of a fixed
+    // set of directly-observed evidence classes (verifiedSuccessType present) -- never for a
+    // click actionResult.success reports true only via the weaker signals (a target becoming
+    // covered/disappearing/re-rendering with no dialog/panel/navigation/new-context to back
+    // it up), and never for a click that failed outright. Previously gated only on
+    // wantsCtaClickCapture && isClick, with no dependency on the click's own outcome at all.
+    wantsCtaClickCapture && isClick && actionResult.verifiedSuccessType !== undefined ? clickedElementDetails : undefined,
     buildCriteriaEvidence(captures),
     { sink: state.milestoneEvidence, stepIndex, phase: "post_action" },
     // PR 1D (surface-scoped evidence, docs/architecture.md §21): scope semantic_page_match
