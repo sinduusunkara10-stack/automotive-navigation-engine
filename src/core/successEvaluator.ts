@@ -704,33 +704,19 @@ async function evaluateSemanticPageMatch(
   // for the *currently* active surface), panel-local evidence where available, and the
   // absence of strong contradictory evidence -- never a hard requirement that the panel's
   // own text share identical vocabulary with the criterion description (see the CORE
-  // COMPLETION RULE in the approved design). Strong negative evidence (relevance tier
-  // "reject") short-circuits to not-satisfied without ever consulting a semanticVerifier --
-  // fail-closed, and never wastes a model call on an already-known-unrelated surface. This
-  // only ever applies when a panel container was actually found and scanned: containerFound
-  // false means no panel evidence exists to judge relevance from at all (e.g. a click opened
-  // a role="dialog" that isn't a fixed/absolute/sticky-positioned floating container -- the
-  // structural shape gatherPanelEvidence's own scan looks for), which must never be treated
-  // as strong contradictory evidence of its own -- see REGRESSION coveredControlPreference
-  // .test.ts's own dialog-in-normal-flow shape, which this distinction exists to preserve.
+  // COMPLETION RULE in the approved design). This only ever applies when a panel container
+  // was actually found and scanned: containerFound false means no panel evidence exists to
+  // judge relevance from at all (e.g. a click opened a role="dialog" that isn't a
+  // fixed/absolute/sticky-positioned floating container -- the structural shape
+  // gatherPanelEvidence's own scan looks for), which must never be treated as strong
+  // contradictory evidence of its own -- see REGRESSION coveredControlPreference.test.ts's
+  // own dialog-in-normal-flow shape, which this distinction exists to preserve.
   const panelRelevanceForThisCriterion = panelContext?.evidence
     ? computePanelRelevanceForCriterion(anchorText, panelContext.evidence)
     : undefined;
   if (panelContext?.evidence?.containerFound && panelRelevanceForThisCriterion) {
-    if (panelRelevanceForThisCriterion.tier === "reject") {
-      return {
-        satisfied: false,
-        evidenceSource: "semantic_page_match:panel_relevance_rejected",
-        score: panelRelevanceForThisCriterion.score,
-        reason:
-          `The currently open panel's own content scored below the relevance-reject threshold ` +
-          `(${panelRelevanceForThisCriterion.score.toFixed(2)}) against this criterion's own objective/description ` +
-          `-- treated as strong evidence it is unrelated, regardless of any causal click link.`,
-      };
-    }
     if (
       panelContext.causallyLinked &&
-      panelContext.evidence.containerFound &&
       panelContext.evidence.documentUsable &&
       panelRelevanceForThisCriterion.tier === "adopt"
     ) {
@@ -744,10 +730,23 @@ async function evaluateSemanticPageMatch(
           `relevance-adopt threshold (${panelRelevanceForThisCriterion.score.toFixed(2)}) against this criterion's own objective/description.`,
       };
     }
-    // Ambiguous relevance tier, or causal linkage/stability/container evidence missing or
-    // weak: fail-closed by design (do not auto-satisfy) -- fall through to the verifier
-    // (if configured) with the panel evidence forwarded as extra context, rather than
-    // silently completing on an unresolved signal.
+    // Reject/ambiguous relevance tier, or causal linkage/stability missing: fail-closed by
+    // design for *this panel's own evidence* -- never auto-satisfied. But this panel is not
+    // necessarily what the *currently eligible* criterion is even about: the eligible
+    // criterion could equally be an action-execution milestone (e.g. "click X") whose own
+    // completion the CORE COMPLETION RULE says must be decidable from page-state and
+    // verified-action evidence alone, without needing the panel's content -- a panel that
+    // happens to be open (perhaps opened by that very click, for a *later* milestone's
+    // benefit) must never veto a different milestone's independent evidence. So a
+    // low-relevance panel is never treated as a hard rejection here; it only means "this
+    // panel's own content cannot itself satisfy this criterion" -- always fall through to
+    // the verifier (when configured), forwarding the panel evidence (including its
+    // relevance tier, reject included) as context so the model can judge each kind of
+    // evidence on its own terms. The verifier's own instructions (see
+    // reasoning/semanticCriterionVerifier.ts's buildPrompt) already require it to fail
+    // closed on a reject/ambiguous tier for a criterion that is itself about the panel
+    // appearing, so this removes a redundant, overeager code-level veto without weakening
+    // that fail-closed guarantee.
   }
 
   if (!semanticVerifier) {

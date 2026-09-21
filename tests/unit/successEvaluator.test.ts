@@ -8,9 +8,11 @@ import {
   evaluateSuccessCriteria,
   getMissingRequiredCriteriaIds,
   type MilestoneEvidenceContext,
+  type PanelMatchContext,
 } from "../../src/core/successEvaluator.js";
 import type { MilestoneEvidenceRecord } from "../../src/types/task-response.js";
 import { gatherSemanticPageSignals, scoreSemanticPageMatch } from "../../src/core/semanticPageMatch.js";
+import type { PanelEvidence } from "../../src/core/panelEvidence.js";
 import type {
   SemanticCriterionVerifier,
   SemanticVerificationInput,
@@ -1533,4 +1535,66 @@ test('a link inside <header>, <footer>, or [role="navigation"] is excluded ident
   assert.equal(await isSatisfied(inHeader, "", criterion), false);
   assert.equal(await isSatisfied(inFooter, "", criterion), false);
   assert.equal(await isSatisfied(inAriaNav, "", criterion), false);
+});
+
+// ---------------------------------------------------------------------------------------
+// Panel-relevance-veto corrective pass (see CLAUDE.md and the BMW post-PR61 live-run
+// investigation): a resulting-surface milestone must still fail closed when the panel's own
+// causal attribution is missing, even when its content would otherwise score adopt-tier.
+// This isolates the `panelContext.causallyLinked` gate directly (real evaluateSuccessCriteria
+// code, a real SemanticCriterionVerifier double, no full click/adoption pipeline needed to
+// exercise this one condition) -- panelAttribution.test.ts already covers same-step panel
+// evidence availability and the close guard end-to-end.
+// ---------------------------------------------------------------------------------------
+
+test("a panel without causal attribution fails closed for the resulting-surface milestone, even with adopt-tier content", async () => {
+  const criterion: SuccessCriterion = {
+    id: "panel_visible",
+    type: "semantic_page_match",
+    description: "Your enquiry panel with your own contact details is now clearly visible.",
+  };
+  const evidence: PanelEvidence = {
+    containerFound: true,
+    identity: "div|Your Enquiry Panel",
+    role: "div",
+    headings: ["Your Enquiry Panel", "Your Contact Details"],
+    interactiveText: ["First Name", "Submit", "Cancel"],
+    documentUsable: true,
+    relevance: { tier: "adopt", score: 0.5, adoptThreshold: 0.35, rejectThreshold: 0.08 },
+  };
+  const panelContextNotCausallyLinked: PanelMatchContext = { evidence, causallyLinked: false };
+
+  const verifier: SemanticCriterionVerifier & { calls: SemanticVerificationInput[] } = (() => {
+    const calls: SemanticVerificationInput[] = [];
+    return {
+      calls,
+      async verify(input: SemanticVerificationInput): Promise<SemanticVerificationOutcome> {
+        calls.push(input);
+        const p = input.panelEvidence;
+        const confirmed = p !== undefined && p.causallyLinked && p.documentUsable && p.relevanceTier === "adopt";
+        return confirmed
+          ? { satisfied: true, confidence: 0.9, evidence: "Causally-linked panel confirmed." }
+          : { satisfied: false, confidence: 0.2, evidence: `Not causally linked (causallyLinked: ${p?.causallyLinked}).` };
+      },
+    };
+  })();
+
+  await withPage(page_(""), async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      "Complete the item journey.",
+      verifier,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      panelContextNotCausallyLinked,
+    );
+    assert.equal(satisfied.length, 0, "an adopt-tier panel with no causal attribution must never satisfy the milestone");
+  });
+
+  assert.equal(verifier.calls.length, 1, "the verifier must still have been consulted (the deterministic panel_causal path requires causallyLinked)");
+  assert.equal(verifier.calls[0]!.panelEvidence?.causallyLinked, false);
 });
