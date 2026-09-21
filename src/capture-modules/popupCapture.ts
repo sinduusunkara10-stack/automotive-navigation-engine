@@ -112,16 +112,18 @@ export interface ConsentOnlyCandidateOutcome {
 }
 
 /**
- * Consent-only-candidate handling (surface-relevance corrective work, PR 4, see CLAUDE.md and
- * docs/architecture.md "Surface adoption"): only ever called when core/surfaceRelevance.ts's
- * own assessment has already run its bounded resettle-and-rescore and optional model-assist
- * and STILL come back unresolved ("ambiguous" tier, uncertain: true) -- this is the one
- * additional, narrowly-scoped thing tried before finally failing closed. Distinct from (and
- * never invoked for) a surface that already has other non-consent content: that case is
- * handled by ordinary relevance scoring alone, which already sees covered-but-present real
- * content as soon as it's uncovered. Distinct also from a consent banner appearing on an
- * *already-adopted* surface -- that's the existing, unchanged, working per-step consent
- * handling in core/loop.ts.
+ * Consent-only-candidate handling (surface-relevance corrective work, PR 4, widened after your
+ * reject-tier challenge -- see CLAUDE.md and docs/architecture.md "Surface adoption"): called
+ * whenever core/surfaceRelevance.ts's own assessment (including its bounded resettle-and-
+ * rescore and optional model-assist) did not come back relevant, in ANY tier -- "reject" as
+ * well as "ambiguous". A genuinely irrelevant candidate does not become adoptable just because
+ * this function ran: it is a safe no-op unless assessConsentSurface positively identifies a
+ * real consent surface, and even then the reassessment after the one bounded click is what
+ * actually decides relevance, not this trigger. Distinct from (and never invoked for) a
+ * surface that already has other non-consent content: that case is handled by ordinary
+ * relevance scoring alone, which already sees covered-but-present real content as soon as it's
+ * uncovered. Distinct also from a consent banner appearing on an *already-adopted* surface --
+ * that's the existing, unchanged, working per-step consent handling in core/loop.ts.
  *
  * Reuses safety/consentClassifier.ts's assessConsentSurface verbatim (no new consent-
  * detection logic) against a fresh observation of the candidate. When it finds a genuine
@@ -134,9 +136,9 @@ export interface ConsentOnlyCandidateOutcome {
  * retried, never escalated to a broader interaction.
  *
  * Exported so this specific mechanism can be exercised directly in a focused test, without
- * needing to first drive a full assessSurfaceRelevance call into the exact ambiguous/
- * uncertain state that gates it in adoptOrCapturePopup below -- see
- * tests/integration/consentOnlyCandidate.test.ts.
+ * needing to first drive a full assessSurfaceRelevance call into the not-relevant state that
+ * gates it in adoptOrCapturePopup below -- see tests/integration/consentOnlyCandidate.test.ts
+ * and tests/integration/consentOnlyCandidateRejectTier.test.ts.
  */
 export async function attemptConsentOnlyCandidateResolution(params: {
   popup: Page;
@@ -352,11 +354,22 @@ export async function adoptOrCapturePopup(params: {
           ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
         });
 
-        // Consent-only-candidate handling (PR 4): only tried once core/surfaceRelevance.ts's
-        // own bounded resettle-and-rescore and optional model-assist have already run and
-        // still come back unresolved -- see attemptConsentOnlyCandidateResolution's own doc
-        // comment.
-        if (relevanceAssessment.tier === "ambiguous" && relevanceAssessment.uncertain) {
+        // Consent-only-candidate handling (PR 4, widened per your reject-tier challenge --
+        // see CLAUDE.md and docs/architecture.md "Surface adoption"): tried whenever
+        // core/surfaceRelevance.ts's own result did not clear the adopt bar, regardless of
+        // which tier it landed in. A realistic, vendor-generic consent banner with zero
+        // journey vocabulary (no accidental title-tag overlap with the objective) scores 0
+        // and lands in "reject", not "ambiguous" -- gating this only on "ambiguous" +
+        // uncertain silently discarded a genuine journey tab hidden behind such a banner
+        // before consent recovery ever ran. Widening the *trigger* adds no new detection
+        // logic: attemptConsentOnlyCandidateResolution already only acts when
+        // assessConsentSurface (generic, multilingual, vendor-agnostic) positively identifies
+        // a real accept/decline choice shape, and is a safe no-op otherwise. Safety is
+        // unchanged either way: the resettle-and-rescore inside that function is what decides
+        // adoption, never this trigger condition, so a genuinely irrelevant popup that merely
+        // happens to carry a consent banner is rescored after the one bounded click and still
+        // correctly rejected.
+        if (!relevanceAssessment.relevant) {
           consentOnlyCandidateHandling = await attemptConsentOnlyCandidateResolution({
             popup,
             objectiveText: surfaceAdoption.relevanceObjectiveText,
