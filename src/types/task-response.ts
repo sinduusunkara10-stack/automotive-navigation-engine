@@ -661,6 +661,32 @@ export interface AnalyticsCaptureConsentSummary {
   verified: boolean;
 }
 
+/** See src/capture-modules/analyticsCaptureClassification.ts -- duplicated here for the same reason as AnalyticsCaptureStatus above. */
+export type UrlRelationship =
+  | "EXACT_MATCH"
+  | "TRACKING_PARAMETERS_ONLY_DIFFERENCE"
+  | "SAME_PHYSICAL_PAGE"
+  | "DIFFERENT_ANALYTICS_VIRTUAL_STATE"
+  | "DIFFERENT_DESTINATION"
+  | "UNAVAILABLE";
+
+export type TriggerSegment =
+  | "PHYSICAL_CLICK"
+  | "POPUP_OR_NEW_TAB"
+  | "FALLBACK_NAVIGATION"
+  | "DESTINATION_SETTLEMENT"
+  | "RECOVERY"
+  | "BACKTRACK";
+
+export interface AnalyticsVirtualPageMetadata {
+  virtualPageUrl?: string;
+  pageName?: string;
+  pageCategory?: string;
+  formName?: string;
+  stepName?: string;
+  stepNumber?: string | number;
+}
+
 export interface AnalyticsCaptureSummary {
   status: AnalyticsCaptureStatus;
   classificationReason: string;
@@ -670,6 +696,23 @@ export interface AnalyticsCaptureSummary {
   unresolvedDataLayerPushes: DataLayerCapture[];
   measurementIds: string[];
   consent: AnalyticsCaptureConsentSummary;
+  /** The clicked CTA element's own href/destination, unchanged -- supporting/diagnostic context, never analytics evidence itself. */
+  ctaElementDestinationUrl?: string;
+  /** GA4 Enhanced Measurement link_url (or an equivalent dataLayer push field) -- the destination URL the analytics event itself emitted. */
+  analyticsEventDestinationUrl?: string;
+  /** GA4's own `dl` / a dataLayer push's own page_location field, verbatim -- never overwritten by browserResultingUrl. */
+  analyticsPageLocation?: string;
+  /** A dataLayer push's own full_url-shaped field, verbatim -- never overwritten by browserResultingUrl. */
+  analyticsFullUrl?: string;
+  /** A dataLayer push's own virtualpage_url-shaped field, verbatim -- confirms a virtual/SPA destination even when the browser URL never changes. */
+  analyticsVirtualPageUrl?: string;
+  analyticsVirtualPageMetadata?: AnalyticsVirtualPageMetadata;
+  /** The tracked page's actual resulting URL after this action -- supporting navigation/diagnostic evidence only, never a confirmation gate. */
+  browserResultingUrl?: string;
+  /** Diagnostic-only relationship between the analytics-emitted location and the browser/CTA URLs -- never used to gate confirmation. */
+  urlRelationship?: UrlRelationship;
+  /** Which phase of this action produced the primary confirming evidence. Absent when no evidence confirmed this action at all. */
+  triggerSegment?: TriggerSegment;
 }
 
 export interface CtaClickCapture {

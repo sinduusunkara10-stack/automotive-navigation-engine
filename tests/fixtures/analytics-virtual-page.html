@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Analytics Virtual Page</title>
+    <meta
+      name="description"
+      content="Fixture SPA-style page proving: a click that advances a virtual page/form step (virtualpage_url/page_name/page_category/step_name/step_number) without ever navigating the browser must still be confirmed -- see the VIRTUAL PAGE OR FORM STATE rule."
+    />
+  </head>
+  <body>
+    <h1>Configurator</h1>
+    <h2 id="status">Step 1 of 2.</h2>
+    <button type="button" id="advance-step">Continue to step 2</button>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "analytics-virtual-page", fictionalId: "FIX-VPAGE-000" });
+
+      document.getElementById("advance-step").addEventListener("click", function () {
+        document.getElementById("status").textContent = "Step 2 of 2.";
+        window.dataLayer.push({
+          event: "virtual_page_view",
+          virtualpage_url: "/configurator/step-2",
+          page_name: "configurator_step_2",
+          page_category: "configurator",
+          step_name: "trim_selection",
+          step_number: 2,
+          fictionalId: "FIX-VPAGE-001",
+        });
+      });
+    </script>
+  </body>
+</html>

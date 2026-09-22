@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   classifyActionAnalyticsCapture,
   computeCaptureHealth,
+  computeUrlRelationship,
   extractGa4PageLocation,
 } from "../../src/capture-modules/analyticsCaptureClassification.js";
 import { readConsentStorageEvidence } from "../../src/capture-modules/consentEvidence.js";
@@ -16,6 +17,13 @@ import type { DataLayerCapture, Ga4NetworkEventCapture } from "../../src/types/t
  * AnalyticsCaptureStatus values. No browser needed: every input here is synthetic
  * evidence shaped exactly like what capture-modules/{dataLayer,ga4NetworkEvents}.ts
  * already produce.
+ *
+ * URL-gate correction: resulting browser URL equality is no longer a mandatory
+ * confirmation gate (see the CLICK EVENT / PHYSICAL PAGE ANALYTICS / VIRTUAL PAGE OR FORM
+ * STATE rules) -- window/segment ownership, an analytics event destination URL, or virtual-
+ * page/form-state metadata each independently confirm evidence; only a genuinely different,
+ * unrelated destination (urlRelationship DIFFERENT_DESTINATION) with none of those signals
+ * still excludes an event.
  */
 
 function ga4Event(overrides: Partial<Ga4NetworkEventCapture> = {}): Ga4NetworkEventCapture {
@@ -50,6 +58,21 @@ const healthyCaptureHealth = computeCaptureHealth({
   ga4ModuleRequested: true,
 });
 
+function classify(overrides: Partial<Parameters<typeof classifyActionAnalyticsCapture>[0]> = {}) {
+  return classifyActionAnalyticsCapture({
+    dataLayerReplaced: false,
+    dataLayerHasNewEntries: false,
+    ga4EventsInWindow: [],
+    dataLayerPushesInWindow: [],
+    ga4EventsBeforeMid: [],
+    dataLayerPushesBeforeMid: [],
+    captureHealth: healthyCaptureHealth,
+    consentRequired: false,
+    consentEvidence: { observed: false },
+    ...overrides,
+  });
+}
+
 test("extractGa4PageLocation reads dl from query params first, then from a POST-batched param entry", () => {
   const fromQuery = ga4Event({ params: { dl: "https://example.com/a" } });
   assert.equal(extractGa4PageLocation(fromQuery), "https://example.com/a");
@@ -61,50 +84,159 @@ test("extractGa4PageLocation reads dl from query params first, then from a POST-
   assert.equal(extractGa4PageLocation(absent), undefined);
 });
 
-test("CAPTURED: a GA4 event whose dl exactly matches resultingUrl is confirmed, not left unresolved", () => {
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
-    dataLayerReplaced: false,
-    dataLayerHasNewEntries: false,
-    ga4EventsInWindow: [ga4Event({ params: { dl: "https://example.com/destination", tid: "G-ABC" }, measurementId: "G-ABC" })],
-    dataLayerPushesInWindow: [],
-    captureHealth: healthyCaptureHealth,
-    consentRequired: false,
-    consentEvidence: { observed: false },
+test("CAPTURED: a GA4 event whose dl exactly matches browserResultingUrl is confirmed, not left unresolved", () => {
+  const event = ga4Event({ params: { dl: "https://example.com/destination", tid: "G-ABC" }, measurementId: "G-ABC" });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [event],
+    ga4EventsBeforeMid: [event],
   });
   assert.equal(result.status, "CAPTURED");
   assert.equal(result.confirmedGa4Events.length, 1);
   assert.equal(result.unresolvedGa4Candidates.length, 0);
   assert.deepEqual(result.measurementIds, ["G-ABC"]);
+  assert.equal(result.urlRelationship, "EXACT_MATCH");
 });
 
-test("exact URL matching is never fuzzy: a GA4 event naming a different page is left as an unresolved candidate, never silently attributed", () => {
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
-    dataLayerReplaced: false,
-    dataLayerHasNewEntries: false,
+test("a genuinely unrelated analytics destination (DIFFERENT_DESTINATION, no confirming signal) is left as an unresolved candidate, never silently attributed [test 6]", () => {
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
     ga4EventsInWindow: [ga4Event({ params: { dl: "https://example.com/SOME-OTHER-PAGE" } })],
-    dataLayerPushesInWindow: [],
-    captureHealth: healthyCaptureHealth,
-    consentRequired: false,
-    consentEvidence: { observed: false },
   });
   assert.equal(result.status, "CORRELATION_UNRESOLVED");
   assert.equal(result.confirmedGa4Events.length, 0);
   assert.equal(result.unresolvedGa4Candidates.length, 1);
 });
 
-test("WEBSITE_NO_OBSERVED_TAG: healthy, complete capture window with no evidence at all", () => {
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
-    dataLayerReplaced: false,
-    dataLayerHasNewEntries: false,
-    ga4EventsInWindow: [],
-    dataLayerPushesInWindow: [],
-    captureHealth: healthyCaptureHealth,
-    consentRequired: false,
-    consentEvidence: { observed: false },
+test("CLICK EVENT: a click-tracking GA4 event whose dl still names the SOURCE page is confirmed via its own analyticsEventDestinationUrl (link_url), even though it never matches browserResultingUrl [test 1]", () => {
+  const clickEvent = ga4Event({
+    params: { dl: "https://example.com/source", link_url: "https://example.com/destination", tid: "G-ABC" },
   });
+  const result = classify({
+    ctaElementDestinationUrl: "https://example.com/destination",
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [clickEvent],
+    ga4EventsBeforeMid: [clickEvent],
+  });
+  assert.equal(result.status, "CAPTURED", "the browser resulting URL never had to match dl for this to confirm");
+  assert.equal(result.confirmedGa4Events.length, 1);
+  assert.equal(result.unresolvedGa4Candidates.length, 0);
+  assert.equal(result.analyticsEventDestinationUrl, "https://example.com/destination");
+  assert.equal(result.triggerSegment, "PHYSICAL_CLICK");
+});
+
+test("PHYSICAL PAGE ANALYTICS: analyticsPageLocation is retained exactly as emitted, never overwritten by a differing browserResultingUrl [test 2]", () => {
+  const push = dataLayerPush({
+    raw: [{ event: "page_view", page_location: "https://example.com/destination" }],
+  });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination?session=abc123",
+    dataLayerPushesInWindow: [push],
+    dataLayerPushesBeforeMid: [],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.analyticsPageLocation, "https://example.com/destination");
+  assert.equal(result.browserResultingUrl, "https://example.com/destination?session=abc123");
+});
+
+test("URL RELATIONSHIP: a browser URL carrying a linker/tracking parameter never overwrites analyticsFullUrl, and the relationship is reported as TRACKING_PARAMETERS_ONLY_DIFFERENCE, not a mismatch [test 3, test 7]", () => {
+  const canonical = "https://example.com/destination";
+  const push = dataLayerPush({ raw: [{ event: "page_view", full_url: canonical }] });
+  const browserResultingUrl = `${canonical}?_gl=1*abc123*_ga*fictional`;
+  const result = classify({
+    ctaElementDestinationUrl: `${canonical}?_gl=1*abc123*_ga*fictional`,
+    browserResultingUrl,
+    dataLayerPushesInWindow: [push],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.analyticsFullUrl, canonical, "the analytics-emitted full_url must survive unmodified");
+  assert.equal(result.urlRelationship, "TRACKING_PARAMETERS_ONLY_DIFFERENCE");
+  // Original values preserved unchanged -- never normalised in place.
+  assert.equal(result.browserResultingUrl, browserResultingUrl);
+  assert.equal(result.ctaElementDestinationUrl, `${canonical}?_gl=1*abc123*_ga*fictional`);
+});
+
+test("VIRTUAL PAGE OR FORM STATE: a dataLayer push naming a virtual page/step is confirmed even though the browser URL never changed, and even though it doesn't resemble the physical URL at all [test 4]", () => {
+  const push = dataLayerPush({
+    url: "https://example.com/configurator",
+    raw: [
+      {
+        event: "virtual_page_view",
+        virtualpage_url: "/configurator/step-2",
+        page_name: "configurator_step_2",
+        page_category: "configurator",
+        step_name: "trim_selection",
+        step_number: 2,
+      },
+    ],
+  });
+  const result = classify({
+    browserResultingUrl: "https://example.com/configurator",
+    dataLayerPushesInWindow: [push],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.analyticsVirtualPageUrl, "/configurator/step-2");
+  assert.deepEqual(result.analyticsVirtualPageMetadata, {
+    virtualPageUrl: "/configurator/step-2",
+    pageName: "configurator_step_2",
+    pageCategory: "configurator",
+    stepName: "trim_selection",
+    stepNumber: 2,
+  });
+  assert.equal(result.confirmedDataLayerPushes.length, 1);
+  assert.equal(result.unresolvedDataLayerPushes.length, 0);
+});
+
+test("SEGMENT ATTRIBUTION: evidence observed before the mid-index is PHYSICAL_CLICK; evidence observed after is DESTINATION_SETTLEMENT, or FALLBACK_NAVIGATION when the destinationUrl fallback was used [test 5]", () => {
+  const afterMidEvent = ga4Event({ params: { dl: "https://example.com/destination" } });
+
+  const settlement = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [afterMidEvent],
+    ga4EventsBeforeMid: [],
+  });
+  assert.equal(settlement.triggerSegment, "DESTINATION_SETTLEMENT");
+
+  const fallback = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [afterMidEvent],
+    ga4EventsBeforeMid: [],
+    fallbackVerified: true,
+  });
+  assert.equal(fallback.triggerSegment, "FALLBACK_NAVIGATION");
+
+  const beforeMidEvent = ga4Event({ params: { dl: "https://example.com/destination" } });
+  const physicalClick = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [beforeMidEvent],
+    ga4EventsBeforeMid: [beforeMidEvent],
+    fallbackVerified: true,
+  });
+  assert.equal(
+    physicalClick.triggerSegment,
+    "PHYSICAL_CLICK",
+    "evidence owned by the physical-click segment takes precedence over a fallback that happened later in the same window",
+  );
+
+  const popup = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [afterMidEvent],
+    openedNewContext: true,
+  });
+  assert.equal(popup.triggerSegment, "POPUP_OR_NEW_TAB");
+});
+
+test("computeUrlRelationship: the full diagnostic vocabulary", () => {
+  assert.equal(computeUrlRelationship("https://a.com/x", "https://a.com/x"), "EXACT_MATCH");
+  assert.equal(computeUrlRelationship("https://a.com/x?utm_source=y", "https://a.com/x"), "TRACKING_PARAMETERS_ONLY_DIFFERENCE");
+  assert.equal(computeUrlRelationship("https://a.com/x?session=1", "https://a.com/x"), "SAME_PHYSICAL_PAGE");
+  assert.equal(computeUrlRelationship("/virtual/step-2", "https://a.com/x"), "DIFFERENT_ANALYTICS_VIRTUAL_STATE");
+  assert.equal(computeUrlRelationship("https://a.com/y", "https://a.com/x"), "DIFFERENT_DESTINATION");
+  assert.equal(computeUrlRelationship(undefined, "https://a.com/x"), "UNAVAILABLE");
+});
+
+test("WEBSITE_NO_OBSERVED_TAG: healthy, complete capture window with no evidence at all", () => {
+  const result = classify({ browserResultingUrl: "https://example.com/destination" });
   assert.equal(result.status, "WEBSITE_NO_OBSERVED_TAG");
 });
 
@@ -121,15 +253,11 @@ test("ENGINE_CAPTURE_INCOMPLETE: dataLayer was replaced by a navigation and no p
   assert.equal(unhealthy.captureComplete, false);
   assert.equal(unhealthy.unobservedDataLayerGapPossible, true);
 
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
     dataLayerReplaced: true,
     dataLayerHasNewEntries: true,
-    ga4EventsInWindow: [],
-    dataLayerPushesInWindow: [],
     captureHealth: unhealthy,
-    consentRequired: false,
-    consentEvidence: { observed: false },
   });
   assert.equal(result.status, "ENGINE_CAPTURE_INCOMPLETE");
   assert.match(result.classificationReason, /dataLayer was replaced/);
@@ -164,27 +292,14 @@ test("a navigation-replaced dataLayer with a matching push-observer entry inside
 });
 
 test("CAPTURE_UNCERTAIN_CONSENT_STATE: accept_optional policy but no analytics_storage=granted evidence observed -- never WEBSITE_NO_OBSERVED_TAG in this case", () => {
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
-    dataLayerReplaced: false,
-    dataLayerHasNewEntries: false,
-    ga4EventsInWindow: [],
-    dataLayerPushesInWindow: [],
-    captureHealth: healthyCaptureHealth,
-    consentRequired: true,
-    consentEvidence: { observed: false },
-  });
+  const result = classify({ browserResultingUrl: "https://example.com/destination", consentRequired: true });
   assert.equal(result.status, "CAPTURE_UNCERTAIN_CONSENT_STATE");
 });
 
 test("consent required and analytics_storage=granted observed: consent gate passes, falls through to ordinary classification", () => {
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
-    dataLayerReplaced: false,
-    dataLayerHasNewEntries: false,
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
     ga4EventsInWindow: [ga4Event({ params: { dl: "https://example.com/destination" } })],
-    dataLayerPushesInWindow: [],
-    captureHealth: healthyCaptureHealth,
     consentRequired: true,
     consentEvidence: { analyticsStorageGranted: true, observed: true },
   });
@@ -227,7 +342,7 @@ test("readConsentStorageEvidence: gcs denied for both is decoded correctly, and 
   assert.equal(noSignal.observed, false);
 });
 
-test("dataLayer push in the window matching resultingUrl is confirmed even when dataLayerDelta itself was replaced (the click-before-navigation recovery)", () => {
+test("dataLayer push in the window is confirmed via window ownership even when dataLayerDelta itself was replaced (the click-before-navigation recovery), with no URL match required", () => {
   const health = computeCaptureHealth({
     isClick: true,
     dataLayerReplaced: true,
@@ -237,15 +352,12 @@ test("dataLayer push in the window matching resultingUrl is confirmed even when 
     dataLayerModuleRequested: true,
     ga4ModuleRequested: false,
   });
-  const result = classifyActionAnalyticsCapture({
-    resultingUrl: "https://example.com/destination",
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
     dataLayerReplaced: true,
     dataLayerHasNewEntries: true,
-    ga4EventsInWindow: [],
-    dataLayerPushesInWindow: [dataLayerPush({ url: "https://example.com/destination" })],
+    dataLayerPushesInWindow: [dataLayerPush({ url: "https://example.com/source-before-navigation" })],
     captureHealth: health,
-    consentRequired: false,
-    consentEvidence: { observed: false },
   });
   assert.equal(result.status, "CAPTURED");
   assert.equal(result.confirmedDataLayerPushes.length, 1);

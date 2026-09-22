@@ -1669,6 +1669,16 @@ export async function runStep(params: {
           timingOut: isClick ? clickTimingOut : undefined,
         });
 
+  // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured
+  // the instant actionResult resolves -- the boundary between "during physical dispatch"
+  // and "during post-dispatch settle/fallback" this action's own capture window spans. Ga4/
+  // dataLayer evidence observed before this index is attributed to the PHYSICAL_CLICK
+  // segment; evidence from this index onward is DESTINATION_SETTLEMENT (or
+  // FALLBACK_NAVIGATION when the destinationUrl fallback was used) -- see
+  // capture-modules/analyticsCaptureClassification.ts's TriggerSegment.
+  const ga4MidIndex = wantsGa4Window && isClick ? (captures.ga4_network_events?.length ?? 0) : undefined;
+  const dataLayerPushMidIndex = wantsDataLayerPushWindow && isClick ? (captures.data_layer_evidence?.length ?? 0) : undefined;
+
   // Panel-attribution corrective pass (item 2): recorded unconditionally for every click
   // dispatch, whatever the outcome -- only ever consulted, one step later, if this exact
   // click turns out to be the one that caused entry into a new in_document surface (see the
@@ -2218,6 +2228,12 @@ export async function runStep(params: {
     const dataLayerPushesInWindow = wantsDataLayerPushWindow
       ? (captures.data_layer_evidence ?? []).slice(dataLayerPushWindowStartIndex, dataLayerPushWindowEndIndex)
       : [];
+    const ga4EventsBeforeMid = wantsGa4Window
+      ? (captures.ga4_network_events ?? []).slice(ga4WindowStartIndex, ga4MidIndex)
+      : [];
+    const dataLayerPushesBeforeMid = wantsDataLayerPushWindow
+      ? (captures.data_layer_evidence ?? []).slice(dataLayerPushWindowStartIndex, dataLayerPushMidIndex)
+      : [];
 
     // Analytics-capture reliability fix: actionId/timestamps/captureHealth/analyticsCapture
     // are only ever built from evidence this engine already captures elsewhere (see the
@@ -2241,12 +2257,16 @@ export async function runStep(params: {
     const analyticsCapture =
       wantsGa4Window || wantsDataLayerPushWindow
         ? classifyActionAnalyticsCapture({
-            resultingUrl: actionResult.resultingUrl,
-            destinationUrl: clickedElementDetails?.destinationUrl,
+            browserResultingUrl: actionResult.resultingUrl,
+            ctaElementDestinationUrl: clickedElementDetails?.destinationUrl,
             dataLayerReplaced: Boolean(dataLayerDelta?.replaced),
             dataLayerHasNewEntries: Boolean(dataLayerDelta?.newEntries.length),
             ga4EventsInWindow,
             dataLayerPushesInWindow,
+            ga4EventsBeforeMid,
+            dataLayerPushesBeforeMid,
+            fallbackVerified: actionResult.fallbackVerified,
+            openedNewContext: actionResult.openedNewContext,
             captureHealth,
             consentRequired,
             consentEvidence,

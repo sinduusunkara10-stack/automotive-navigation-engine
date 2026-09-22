@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Analytics Unrelated Destination</title>
+    <meta
+      name="description"
+      content="Fixture proving: a stray beacon that fires inside this click's own capture window but names a page_location entirely unrelated to this page/click must still be excluded -- the one case the URL-gate correction keeps excluded."
+    />
+  </head>
+  <body>
+    <h1>Analytics Unrelated Destination</h1>
+    <button type="button" id="do-nothing-relevant">Click me</button>
+
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push({ event: "page_view", page: "analytics-unrelated-destination", fictionalId: "FIX-UNRELATED-000" });
+
+      document.getElementById("do-nothing-relevant").addEventListener("click", function () {
+        // A stray third-party beacon whose own page_location names a page entirely
+        // unrelated to this click's own page or destination -- no navigation happens, no
+        // dataLayer push confirms this click at all.
+        var unrelatedUrl = location.origin + "/success.html?utm_source=unrelated_campaign";
+        var ga4Params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          en: "page_view",
+          dl: unrelatedUrl,
+        });
+        new Image().src = "/g/collect?" + ga4Params.toString();
+      });
+    </script>
+  </body>
+</html>

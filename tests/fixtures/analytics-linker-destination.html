@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Analytics Linker Destination</title>
+    <meta name="description" content="Destination page for analytics-linker-source.html: emits a canonical page_location/full_url that never carries the source link's own _gl tracking parameter." />
+  </head>
+  <body>
+    <h1>Analytics Linker Destination</h1>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      var canonicalUrl = location.origin + location.pathname;
+      window.dataLayer.push({
+        event: "page_view",
+        page_location: canonicalUrl,
+        full_url: canonicalUrl,
+        fictionalId: "FIX-LINKER-001",
+      });
+
+      var ga4Params = new URLSearchParams({
+        v: "2",
+        tid: "G-FICTIONALTEST1",
+        cid: "555.123456",
+        en: "page_view",
+        dl: canonicalUrl,
+        dt: document.title,
+      });
+      new Image().src = "/g/collect?" + ga4Params.toString();
+    </script>
+  </body>
+</html>

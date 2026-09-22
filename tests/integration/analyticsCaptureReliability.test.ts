@@ -162,12 +162,104 @@ test("click-before-navigation race (analytics-race-start.html): the click handle
       "the click handler's own dataLayer.push (fired immediately before the synchronous navigation) must be recovered here even though dataLayerDelta lost it",
     );
 
-    // This event's own dl= names the SOURCE page (the click fired before navigating), not
-    // the destination -- exact URL matching must not misattribute it as a destination-page
-    // confirmation, so it lands as CORRELATION_UNRESOLVED (evidence exists, cannot be
-    // safely assigned to the destination), never a false CAPTURED/WEBSITE_NO_OBSERVED_TAG.
+    // URL-gate correction: this recovered push carries no page_location/full_url field at
+    // all (its raw payload is just {event, cta, fictionalId}), so it is never excluded as
+    // "a genuinely different destination" -- window ownership (PHYSICAL_CLICK segment,
+    // observed before the click's own actionResult resolved) is itself sufficient
+    // confirming evidence, exactly per the CLICK EVENT rule ("do not require the browser
+    // resulting URL to match the analytics destination URL"). CAPTURED, never left
+    // unresolved and never WEBSITE_NO_OBSERVED_TAG.
     assert.ok(analytics?.analyticsCapture);
-    assert.notEqual(analytics?.analyticsCapture?.status, "WEBSITE_NO_OBSERVED_TAG");
+    assert.equal(analytics?.analyticsCapture?.status, "CAPTURED");
+    assert.equal(analytics?.analyticsCapture?.triggerSegment, "PHYSICAL_CLICK");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("URL-gate correction: a linker/tracking parameter on the browser's own resulting URL never overwrites the destination page's own analyticsPageLocation/analyticsFullUrl, and both original URLs are preserved unchanged", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({ startUrl: `${baseUrl}/analytics-linker-source.html` });
+    const response = await runTask({ page, task, reasoning: new ClickOnceThenStopSuccessProvider(/continue/i) });
+
+    const click = response.captures.cta_clicks?.[0];
+    assert.ok(click, "expected exactly one recorded click");
+    const analytics = click.actionAnalytics;
+    const capture = analytics?.analyticsCapture;
+    assert.ok(capture);
+    assert.equal(capture?.status, "CAPTURED");
+
+    const canonicalDestination = `${baseUrl}/analytics-linker-destination.html`;
+    const browserResultingUrl = `${canonicalDestination}?_gl=1*abc123*_ga*fictionalClientId`;
+
+    // The analytics-emitted values are the primary reporting evidence -- never overwritten
+    // by the browser's own resulting URL, even though that URL still carries the CTA's own
+    // _gl linker parameter.
+    assert.equal(capture?.analyticsPageLocation, canonicalDestination);
+    assert.equal(capture?.analyticsFullUrl, canonicalDestination);
+
+    // Original URL values are always preserved, byte-for-byte, on both the classification
+    // summary and the parent CtaClickCapture record.
+    assert.equal(capture?.browserResultingUrl, browserResultingUrl);
+    assert.equal(capture?.ctaElementDestinationUrl, browserResultingUrl);
+    assert.equal(click.destinationUrl, browserResultingUrl);
+    assert.equal(click.resultingUrl, browserResultingUrl);
+
+    // Diagnostic-only: the two forms of the same destination differ only by a known
+    // tracking parameter -- never treated as a mismatch requiring exclusion.
+    assert.equal(capture?.urlRelationship, "TRACKING_PARAMETERS_ONLY_DIFFERENCE");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("VIRTUAL PAGE OR FORM STATE: an SPA virtual-page/step progression is confirmed even though the browser URL never changes", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({ startUrl: `${baseUrl}/analytics-virtual-page.html` });
+    const response = await runTask({ page, task, reasoning: new ClickOnceThenStopSuccessProvider(/continue to step 2/i) });
+
+    const click = response.captures.cta_clicks?.[0];
+    assert.ok(click, "expected exactly one recorded click");
+    assert.equal(click.resultingUrl, `${baseUrl}/analytics-virtual-page.html`, "the browser URL never changes for this SPA step");
+
+    const capture = click.actionAnalytics?.analyticsCapture;
+    assert.ok(capture);
+    assert.equal(capture?.status, "CAPTURED");
+    assert.equal(capture?.analyticsVirtualPageUrl, "/configurator/step-2");
+    assert.equal(capture?.analyticsVirtualPageMetadata?.pageName, "configurator_step_2");
+    assert.equal(capture?.analyticsVirtualPageMetadata?.stepNumber, 2);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("a genuinely unrelated analytics destination observed in the click's own window (no navigation, no confirming signal) remains CORRELATION_UNRESOLVED", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({ startUrl: `${baseUrl}/analytics-unrelated-destination.html` });
+    const response = await runTask({ page, task, reasoning: new ClickOnceThenStopSuccessProvider(/click me/i) });
+
+    const click = response.captures.cta_clicks?.[0];
+    assert.ok(click, "expected exactly one recorded click");
+    const capture = click.actionAnalytics?.analyticsCapture;
+    assert.ok(capture);
+    assert.equal(capture?.status, "CORRELATION_UNRESOLVED");
+    assert.equal(capture?.confirmedGa4Events.length, 0);
+    assert.equal(capture?.unresolvedGa4Candidates.length, 1);
   } finally {
     await page.close();
     await browser.close();

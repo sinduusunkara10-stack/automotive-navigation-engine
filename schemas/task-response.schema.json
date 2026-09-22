@@ -2262,14 +2262,14 @@
         },
         "confirmedGa4Events": {
           "type": "array",
-          "description": "GA4 requests in this action's window whose own page-location exactly matches the click's resultingUrl/destinationUrl.",
+          "description": "GA4 requests in this action's window confirmed via window/segment ownership -- never gated on an exact page-location match against resultingUrl/destinationUrl.",
           "items": {
             "$ref": "#/$defs/ga4NetworkEventCapture"
           }
         },
         "unresolvedGa4Candidates": {
           "type": "array",
-          "description": "GA4 requests in this action's window that could not be safely assigned (page-location absent, or naming a different page).",
+          "description": "GA4 requests in this action's window ruled definitely unrelated (a genuinely different destination, with none of this action's own confirming signals).",
           "items": {
             "$ref": "#/$defs/ga4NetworkEventCapture"
           }
@@ -2319,6 +2319,71 @@
               "type": "boolean"
             }
           }
+        },
+        "ctaElementDestinationUrl": {
+          "type": "string",
+          "description": "The clicked CTA element's own href/destination, unchanged -- supporting/diagnostic context, never analytics evidence itself."
+        },
+        "analyticsEventDestinationUrl": {
+          "type": "string",
+          "description": "GA4 Enhanced Measurement link_url (or an equivalent dataLayer push field) -- the destination URL the analytics event itself emitted."
+        },
+        "analyticsPageLocation": {
+          "type": "string",
+          "description": "GA4's own dl / a dataLayer push's own page_location field, verbatim -- never overwritten by browserResultingUrl."
+        },
+        "analyticsFullUrl": {
+          "type": "string",
+          "description": "A dataLayer push's own full_url-shaped field, verbatim -- never overwritten by browserResultingUrl."
+        },
+        "analyticsVirtualPageUrl": {
+          "type": "string",
+          "description": "A dataLayer push's own virtualpage_url-shaped field, verbatim -- confirms a virtual/SPA destination even when the browser URL never changes."
+        },
+        "analyticsVirtualPageMetadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "virtualPageUrl": { "type": "string" },
+            "pageName": { "type": "string" },
+            "pageCategory": { "type": "string" },
+            "formName": { "type": "string" },
+            "stepName": { "type": "string" },
+            "stepNumber": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "number" }
+              ]
+            }
+          }
+        },
+        "browserResultingUrl": {
+          "type": "string",
+          "description": "The tracked page's actual resulting URL after this action -- supporting navigation/diagnostic evidence only, never a confirmation gate."
+        },
+        "urlRelationship": {
+          "type": "string",
+          "description": "Diagnostic-only relationship between the analytics-emitted location and the browser/CTA URLs -- never used to gate confirmation.",
+          "enum": [
+            "EXACT_MATCH",
+            "TRACKING_PARAMETERS_ONLY_DIFFERENCE",
+            "SAME_PHYSICAL_PAGE",
+            "DIFFERENT_ANALYTICS_VIRTUAL_STATE",
+            "DIFFERENT_DESTINATION",
+            "UNAVAILABLE"
+          ]
+        },
+        "triggerSegment": {
+          "type": "string",
+          "description": "Which phase of this action produced the primary confirming evidence. Absent when no evidence confirmed this action at all.",
+          "enum": [
+            "PHYSICAL_CLICK",
+            "POPUP_OR_NEW_TAB",
+            "FALLBACK_NAVIGATION",
+            "DESTINATION_SETTLEMENT",
+            "RECOVERY",
+            "BACKTRACK"
+          ]
         }
       }
     },
