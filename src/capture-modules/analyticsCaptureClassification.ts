@@ -44,6 +44,27 @@ export type TriggerSegment =
   | "RECOVERY"
   | "BACKTRACK";
 
+/**
+ * Confirmed-event safety (see this module's own doc comment on classifyEvidenceItem): the
+ * per-event/per-push category one piece of evidence inside an action's capture window
+ * actually earns, never merely "was observed inside the window". Window/segment ownership
+ * alone is necessary but never sufficient -- see classifyEvidenceItem.
+ */
+export type EvidenceClassification =
+  | "CLICK_EVENT"
+  | "PHYSICAL_PAGE_CHANGE"
+  | "VIRTUAL_PAGE_CHANGE"
+  | "FORM_OR_CONFIGURATOR_STATE"
+  | "OTHER_MEANINGFUL_EVENT"
+  | "CORRELATION_UNRESOLVED";
+
+/** One GA4 request or dataLayer push inside this action's window, tagged with the category it actually earned -- see EvidenceClassification. Exactly one of ga4Event/dataLayerPush is set. */
+export interface ClassifiedEvidence {
+  classification: EvidenceClassification;
+  ga4Event?: Ga4NetworkEventCapture;
+  dataLayerPush?: DataLayerCapture;
+}
+
 /** Best-effort, non-brand-specific virtual-page/form-state metadata read verbatim from a dataLayer push -- see extractAnalyticsVirtualPageMetadata. */
 export interface AnalyticsVirtualPageMetadata {
   virtualPageUrl?: string;
@@ -216,6 +237,139 @@ export function extractAnalyticsVirtualPageMetadata(raw: Record<string, unknown>
   };
 }
 
+/** Whether virtual-page metadata is itself a virtual-page identity (vs. a form/configurator step identity) -- picks VIRTUAL_PAGE_CHANGE over FORM_OR_CONFIGURATOR_STATE when both kinds of field happen to be present on the same push. */
+function isVirtualPageIdentity(metadata: AnalyticsVirtualPageMetadata): boolean {
+  return Boolean(metadata.virtualPageUrl || metadata.pageName || metadata.pageCategory);
+}
+
+/** GA4 Enhanced Measurement's own standard outbound-click parameters (link_id/link_classes), and cross-vendor dataLayer equivalents -- a *direct*, mechanical tie to a specific clicked control, independent of whether its value happens to textually match the control's own accessible name/text. */
+const CTA_IDENTIFIER_KEYS = ["cta", "cta_id", "ctaId", "link_id", "linkId", "link_classes", "linkClasses", "element_id", "elementId"];
+/** Cross-vendor text-ish fields naming the clicked control's own label -- compared against the actually-clicked element's ctaText/accessibleName for a genuine label/accessibility-name match. */
+const CTA_TEXT_KEYS = ["ctaText", "cta_text", "link_text", "linkText", "label", "button_text", "buttonText"];
+/** GA4/GTM's own reserved, vendor-neutral interaction event names -- generic, not brand-specific (GA4 Enhanced Measurement's own "click" outbound-click event). */
+const INTERACTION_EVENT_NAMES = new Set(["click", "outbound_click"]);
+
+function normalizeForComparison(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+/** A genuine label/accessibility-name match between an analytics-emitted text field and the actually-clicked element's own ctaText/accessibleName -- never a bare "some text field exists" check. */
+function ctaLabelMatches(candidate: string | undefined, ctaText?: string, ctaAccessibleName?: string): boolean {
+  if (!candidate) {
+    return false;
+  }
+  const normalizedCandidate = normalizeForComparison(candidate);
+  if (!normalizedCandidate) {
+    return false;
+  }
+  for (const target of [ctaText, ctaAccessibleName]) {
+    if (!target) {
+      continue;
+    }
+    const normalizedTarget = normalizeForComparison(target);
+    if (!normalizedTarget) {
+      continue;
+    }
+    if (normalizedCandidate === normalizedTarget || normalizedCandidate.includes(normalizedTarget) || normalizedTarget.includes(normalizedCandidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface Ga4EvidenceFields {
+  location?: string;
+  eventDestinationUrl?: string;
+  ctaIdentifierPresent: boolean;
+  ctaLabelMatch: boolean;
+  isInteractionEvent: boolean;
+  eventName?: string;
+  virtualMetadata?: AnalyticsVirtualPageMetadata;
+}
+
+function readGa4EvidenceFields(event: Ga4NetworkEventCapture, ctaText?: string, ctaAccessibleName?: string): Ga4EvidenceFields {
+  const bodies: Record<string, string>[] = [event.params ?? {}, ...(event.postDataParams ?? [])];
+  let ctaIdentifierPresent = false;
+  let ctaLabelMatch = false;
+  let virtualMetadata: AnalyticsVirtualPageMetadata | undefined;
+  for (const body of bodies) {
+    if (!ctaIdentifierPresent && CTA_IDENTIFIER_KEYS.some((key) => typeof body[key] === "string" && body[key].length > 0)) {
+      ctaIdentifierPresent = true;
+    }
+    if (!ctaLabelMatch) {
+      const labelValue = CTA_TEXT_KEYS.map((key) => body[key]).find((v) => typeof v === "string" && v.length > 0);
+      if (ctaLabelMatches(labelValue, ctaText, ctaAccessibleName)) {
+        ctaLabelMatch = true;
+      }
+    }
+    if (!virtualMetadata) {
+      virtualMetadata = extractAnalyticsVirtualPageMetadata(body);
+    }
+  }
+  const eventName = event.params?.en ?? event.postDataParams?.find((body) => body.en)?.en;
+  return {
+    location: extractGa4PageLocation(event),
+    eventDestinationUrl: extractAnalyticsEventDestinationUrl(event),
+    ctaIdentifierPresent,
+    ctaLabelMatch,
+    isInteractionEvent: eventName ? INTERACTION_EVENT_NAMES.has(eventName.toLowerCase()) : false,
+    eventName,
+    virtualMetadata,
+  };
+}
+
+interface DataLayerEvidenceFields {
+  location?: string;
+  fullUrl?: string;
+  eventDestinationUrl?: string;
+  ctaIdentifierPresent: boolean;
+  ctaLabelMatch: boolean;
+  isInteractionEvent: boolean;
+  eventName?: string;
+  virtualMetadata?: AnalyticsVirtualPageMetadata;
+}
+
+function readDataLayerEvidenceFields(entry: DataLayerCapture, ctaText?: string, ctaAccessibleName?: string): DataLayerEvidenceFields {
+  let location: string | undefined;
+  let fullUrl: string | undefined;
+  let eventDestinationUrl: string | undefined;
+  let ctaIdentifierPresent = false;
+  let ctaLabelMatch = false;
+  let isInteractionEvent = false;
+  let eventName: string | undefined;
+  let virtualMetadata: AnalyticsVirtualPageMetadata | undefined;
+
+  for (const raw of entry.raw) {
+    const fields = extractDataLayerPageLocationFields(raw);
+    location ??= fields.pageLocation;
+    fullUrl ??= fields.fullUrl;
+    eventDestinationUrl ??= fields.eventDestinationUrl;
+    if (!ctaIdentifierPresent && CTA_IDENTIFIER_KEYS.some((key) => typeof raw[key] === "string" && (raw[key] as string).length > 0)) {
+      ctaIdentifierPresent = true;
+    }
+    if (!ctaLabelMatch) {
+      const labelValue = readStringField(raw, CTA_TEXT_KEYS);
+      if (ctaLabelMatches(labelValue, ctaText, ctaAccessibleName)) {
+        ctaLabelMatch = true;
+      }
+    }
+    const rawEventName = readStringField(raw, ["event"]);
+    eventName ??= rawEventName;
+    if (!isInteractionEvent && rawEventName && INTERACTION_EVENT_NAMES.has(rawEventName.toLowerCase())) {
+      isInteractionEvent = true;
+    }
+    if (!virtualMetadata) {
+      virtualMetadata = extractAnalyticsVirtualPageMetadata(raw);
+    }
+  }
+
+  return { location, fullUrl, eventDestinationUrl, ctaIdentifierPresent, ctaLabelMatch, isInteractionEvent, eventName, virtualMetadata };
+}
+
 /** Known cross-vendor tracking/campaign/linker query parameters, stripped only when computing the diagnostic urlRelationship below -- never when preserving an original URL value. */
 const TRACKING_PARAM_NAMES = new Set([
   "utm_source",
@@ -321,36 +475,83 @@ function bestRelationship(candidate: string | undefined, targets: string[]): Url
 }
 
 /**
- * The one case a genuinely different, unrelated analytics destination is excluded from
- * confirming this action -- never merely "didn't match exactly". An event/push is excluded
- * only when it names a real page_location/full_url AND that location's relationship against
- * every available target (ctaElementDestinationUrl, browserResultingUrl) is DIFFERENT_
- * DESTINATION, AND it carries none of the other confirming signals the CLICK EVENT / VIRTUAL
- * PAGE OR FORM STATE rules list (an eventDestinationUrl/link_url, or virtual-page/form-state
- * metadata) -- either of those rescues it regardless of what its own page_location says.
+ * Confirmed-event safety: turns one piece of window-observed evidence into the specific
+ * category it actually earned. Action-window ownership makes an event an *action candidate*
+ * only -- it is never, by itself, enough to confirm a CTA tag or a destination-page tag; see
+ * this function's own decision order below, which mirrors the CLICK EVENT / PHYSICAL PAGE
+ * ANALYTICS / VIRTUAL PAGE OR FORM STATE rules exactly. Deliberately shape-based rather than
+ * gated on the beforeMid/afterMid array position (core/loop.ts's ga4MidIndex/
+ * dataLayerPushMidIndex): a same-tab navigation's destination-page script can run, and its
+ * own analytics beacon land in `captures.*`, before this engine's own dispatchAction promise
+ * resolves in Node -- an artifact of event-loop/network timing, not evidence about what the
+ * tag actually is. beforeMid/afterMid is still used (in classifyActionAnalyticsCapture) to
+ * label the reported triggerSegment, but is never itself a classification gate here.
+ *
+ * - VIRTUAL_PAGE_CHANGE / FORM_OR_CONFIGURATOR_STATE: emitted virtual-page/page/form/step/
+ *   configurator metadata is present -- confirmed independent of URL, since this evidence
+ *   class is defined by never needing one.
+ * - CLICK_EVENT: the evidence carries at least one direct confirming signal of its own: an
+ *   emitted destination URL (eventDestinationUrl/link_url), a direct CTA identifier field
+ *   (link_id/link_classes/cta/...), a genuine CTA label/accessibility-name match, or a GA4/
+ *   GTM reserved interaction event name (click/outbound_click). Being merely present in the
+ *   window is never enough.
+ * - PHYSICAL_PAGE_CHANGE: the evidence carries an emitted page-location/full-url value that
+ *   isn't ruled a genuinely different destination against this action's own
+ *   ctaElementDestinationUrl/browserResultingUrl.
+ * - Otherwise: a real page-location value that didn't qualify above (a genuinely different
+ *   destination) is CORRELATION_UNRESOLVED (ambiguous -- could be this action's evidence, but
+ *   not confirmed); an event with its own clear identity (an event/en name) but none of the
+ *   above is a distinct OTHER_MEANINGFUL_EVENT that must never be silently promoted into this
+ *   action's own tag; anything with neither is CORRELATION_UNRESOLVED.
  */
-function isDefinitelyUnrelated(params: {
+function classifyEvidenceItem(params: {
   location: string | undefined;
-  hasConfirmingSignal: boolean;
+  eventDestinationUrl: string | undefined;
+  ctaIdentifierPresent: boolean;
+  ctaLabelMatch: boolean;
+  isInteractionEvent: boolean;
+  eventName: string | undefined;
+  virtualMetadata: AnalyticsVirtualPageMetadata | undefined;
   targets: string[];
-}): boolean {
-  if (params.hasConfirmingSignal) {
-    return false;
+}): EvidenceClassification {
+  if (params.virtualMetadata) {
+    return isVirtualPageIdentity(params.virtualMetadata) ? "VIRTUAL_PAGE_CHANGE" : "FORM_OR_CONFIGURATOR_STATE";
   }
-  if (!params.location || params.targets.length === 0) {
-    return false;
+
+  if (params.eventDestinationUrl || params.ctaIdentifierPresent || params.ctaLabelMatch || params.isInteractionEvent) {
+    return "CLICK_EVENT";
   }
-  return params.targets.every((target) => computeUrlRelationship(params.location, target) === "DIFFERENT_DESTINATION");
+
+  if (params.location) {
+    const relationship = bestRelationship(params.location, params.targets);
+    if (relationship !== "DIFFERENT_DESTINATION") {
+      return "PHYSICAL_PAGE_CHANGE";
+    }
+  }
+
+  if (params.location) {
+    return "CORRELATION_UNRESOLVED";
+  }
+  return params.eventName ? "OTHER_MEANINGFUL_EVENT" : "CORRELATION_UNRESOLVED";
 }
+
+const CONFIRMING_CLASSIFICATIONS = new Set<EvidenceClassification>([
+  "CLICK_EVENT",
+  "PHYSICAL_PAGE_CHANGE",
+  "VIRTUAL_PAGE_CHANGE",
+  "FORM_OR_CONFIGURATOR_STATE",
+]);
 
 export interface AnalyticsCaptureResult {
   status: AnalyticsCaptureStatus;
   classificationReason: string;
-  /** GA4 requests in this action's window that were not ruled out as a genuinely different, unrelated destination -- see isDefinitelyUnrelated. Window/segment ownership, not URL matching, is the primary confirmation mechanism (CLICK EVENT rule). */
+  /** Every GA4 request and dataLayer push observed in this action's own window, each tagged with the specific category it earned -- see EvidenceClassification. The authoritative, auditable record of this action's own confirmed-event-safety decisions. */
+  classifiedEvidence: ClassifiedEvidence[];
+  /** GA4 requests classified CLICK_EVENT/PHYSICAL_PAGE_CHANGE/VIRTUAL_PAGE_CHANGE/FORM_OR_CONFIGURATOR_STATE -- see classifyEvidenceItem. Window/segment ownership alone is never sufficient. */
   confirmedGa4Events: Ga4NetworkEventCapture[];
-  /** GA4 requests in this action's window whose own page-location was ruled definitely unrelated to this action's own destination. */
+  /** GA4 requests classified OTHER_MEANINGFUL_EVENT or CORRELATION_UNRESOLVED -- not confirmed as this action's own evidence. */
   unresolvedGa4Candidates: Ga4NetworkEventCapture[];
-  /** dataLayer pushes (from the real-time push-observer stream, not the before/after diff) in this action's window not ruled out as unrelated. */
+  /** dataLayer pushes (from the real-time push-observer stream, not the before/after diff) classified as confirming this action. */
   confirmedDataLayerPushes: DataLayerCapture[];
   unresolvedDataLayerPushes: DataLayerCapture[];
   measurementIds: string[];
@@ -380,6 +581,9 @@ export function classifyActionAnalyticsCapture(params: {
   ctaElementDestinationUrl?: string;
   /** The tracked page's actual resulting URL after this action -- see ActionResult.resultingUrl. Never a confirmation gate. */
   browserResultingUrl?: string;
+  /** The clicked element's own text/accessible name -- used only for a genuine CTA label/accessibility-name match (see classifyEvidenceItem), never for a confirmation gate on its own. */
+  ctaText?: string;
+  ctaAccessibleName?: string;
   dataLayerReplaced: boolean;
   dataLayerHasNewEntries: boolean;
   /** Every GA4/dataLayer-push event observed in this action's own capture window, in chronological order. */
@@ -397,34 +601,45 @@ export function classifyActionAnalyticsCapture(params: {
   consentEvidence: ConsentStorageEvidence;
 }): AnalyticsCaptureResult {
   const targets = [params.ctaElementDestinationUrl, params.browserResultingUrl].filter((u): u is string => Boolean(u));
+  const beforeMidGa4 = new Set(params.ga4EventsBeforeMid);
+  const beforeMidDataLayer = new Set(params.dataLayerPushesBeforeMid);
 
-  function ga4HasConfirmingSignal(event: Ga4NetworkEventCapture): boolean {
-    return Boolean(extractAnalyticsEventDestinationUrl(event));
-  }
-  function dataLayerHasConfirmingSignal(entry: DataLayerCapture): boolean {
-    return entry.raw.some((raw) => {
-      const { eventDestinationUrl } = extractDataLayerPageLocationFields(raw);
-      return Boolean(eventDestinationUrl) || Boolean(extractAnalyticsVirtualPageMetadata(raw));
-    });
-  }
-
-  const unresolvedGa4Candidates = params.ga4EventsInWindow.filter((event) =>
-    isDefinitelyUnrelated({
-      location: extractGa4PageLocation(event),
-      hasConfirmingSignal: ga4HasConfirmingSignal(event),
+  const classifiedEvidence: ClassifiedEvidence[] = [];
+  const confirmedGa4Events: Ga4NetworkEventCapture[] = [];
+  const unresolvedGa4Candidates: Ga4NetworkEventCapture[] = [];
+  for (const event of params.ga4EventsInWindow) {
+    const fields = readGa4EvidenceFields(event, params.ctaText, params.ctaAccessibleName);
+    const classification = classifyEvidenceItem({
+      location: fields.location,
+      eventDestinationUrl: fields.eventDestinationUrl,
+      ctaIdentifierPresent: fields.ctaIdentifierPresent,
+      ctaLabelMatch: fields.ctaLabelMatch,
+      isInteractionEvent: fields.isInteractionEvent,
+      eventName: fields.eventName,
+      virtualMetadata: fields.virtualMetadata,
       targets,
-    }),
-  );
-  const confirmedGa4Events = params.ga4EventsInWindow.filter((event) => !unresolvedGa4Candidates.includes(event));
+    });
+    classifiedEvidence.push({ classification, ga4Event: event });
+    (CONFIRMING_CLASSIFICATIONS.has(classification) ? confirmedGa4Events : unresolvedGa4Candidates).push(event);
+  }
 
-  const unresolvedDataLayerPushes = params.dataLayerPushesInWindow.filter((entry) => {
-    const locations = entry.raw.map((raw) => extractDataLayerPageLocationFields(raw));
-    const location = locations.map((l) => l.pageLocation ?? l.fullUrl).find((v) => Boolean(v));
-    return isDefinitelyUnrelated({ location, hasConfirmingSignal: dataLayerHasConfirmingSignal(entry), targets });
-  });
-  const confirmedDataLayerPushes = params.dataLayerPushesInWindow.filter(
-    (entry) => !unresolvedDataLayerPushes.includes(entry),
-  );
+  const confirmedDataLayerPushes: DataLayerCapture[] = [];
+  const unresolvedDataLayerPushes: DataLayerCapture[] = [];
+  for (const entry of params.dataLayerPushesInWindow) {
+    const fields = readDataLayerEvidenceFields(entry, params.ctaText, params.ctaAccessibleName);
+    const classification = classifyEvidenceItem({
+      location: fields.location ?? fields.fullUrl,
+      eventDestinationUrl: fields.eventDestinationUrl,
+      ctaIdentifierPresent: fields.ctaIdentifierPresent,
+      ctaLabelMatch: fields.ctaLabelMatch,
+      isInteractionEvent: fields.isInteractionEvent,
+      eventName: fields.eventName,
+      virtualMetadata: fields.virtualMetadata,
+      targets,
+    });
+    classifiedEvidence.push({ classification, dataLayerPush: entry });
+    (CONFIRMING_CLASSIFICATIONS.has(classification) ? confirmedDataLayerPushes : unresolvedDataLayerPushes).push(entry);
+  }
 
   const measurementIds = Array.from(
     new Set(params.ga4EventsInWindow.map((event) => event.measurementId).filter((id): id is string => Boolean(id))),
@@ -434,8 +649,9 @@ export function classifyActionAnalyticsCapture(params: {
   const consent = { ...params.consentEvidence, required: params.consentRequired, verified: consentVerified };
 
   // Primary analytics-evidence extraction (URL RELATIONSHIP / SCHEMA rules): the first
-  // confirmed event/push carrying each field wins, in chronological window order -- never
-  // an inference, never a value invented beyond what was actually emitted.
+  // *confirmed* event/push carrying each field wins, in chronological window order -- never
+  // an inference, never a value invented beyond what was actually emitted, and never sourced
+  // from an item that failed confirmed-event-safety classification above.
   let analyticsEventDestinationUrl: string | undefined;
   let analyticsPageLocation: string | undefined;
   let analyticsFullUrl: string | undefined;
@@ -443,20 +659,22 @@ export function classifyActionAnalyticsCapture(params: {
   let analyticsVirtualPageMetadata: AnalyticsVirtualPageMetadata | undefined;
 
   for (const event of confirmedGa4Events) {
-    analyticsPageLocation ??= extractGa4PageLocation(event);
-    analyticsEventDestinationUrl ??= extractAnalyticsEventDestinationUrl(event);
+    const fields = readGa4EvidenceFields(event, params.ctaText, params.ctaAccessibleName);
+    analyticsPageLocation ??= fields.location;
+    analyticsEventDestinationUrl ??= fields.eventDestinationUrl;
+    if (fields.virtualMetadata && !analyticsVirtualPageMetadata) {
+      analyticsVirtualPageMetadata = fields.virtualMetadata;
+      analyticsVirtualPageUrl ??= fields.virtualMetadata.virtualPageUrl;
+    }
   }
   for (const entry of confirmedDataLayerPushes) {
-    for (const raw of entry.raw) {
-      const fields = extractDataLayerPageLocationFields(raw);
-      analyticsPageLocation ??= fields.pageLocation;
-      analyticsFullUrl ??= fields.fullUrl;
-      analyticsEventDestinationUrl ??= fields.eventDestinationUrl;
-      const virtualMetadata = extractAnalyticsVirtualPageMetadata(raw);
-      if (virtualMetadata && !analyticsVirtualPageMetadata) {
-        analyticsVirtualPageMetadata = virtualMetadata;
-        analyticsVirtualPageUrl ??= virtualMetadata.virtualPageUrl;
-      }
+    const fields = readDataLayerEvidenceFields(entry, params.ctaText, params.ctaAccessibleName);
+    analyticsPageLocation ??= fields.location;
+    analyticsFullUrl ??= fields.fullUrl;
+    analyticsEventDestinationUrl ??= fields.eventDestinationUrl;
+    if (fields.virtualMetadata && !analyticsVirtualPageMetadata) {
+      analyticsVirtualPageMetadata = fields.virtualMetadata;
+      analyticsVirtualPageUrl ??= fields.virtualMetadata.virtualPageUrl;
     }
   }
 
@@ -472,8 +690,8 @@ export function classifyActionAnalyticsCapture(params: {
       triggerSegment = "POPUP_OR_NEW_TAB";
     } else {
       const hasBeforeMidEvidence =
-        confirmedGa4Events.some((event) => params.ga4EventsBeforeMid.includes(event)) ||
-        confirmedDataLayerPushes.some((entry) => params.dataLayerPushesBeforeMid.includes(entry));
+        confirmedGa4Events.some((event) => beforeMidGa4.has(event)) ||
+        confirmedDataLayerPushes.some((entry) => beforeMidDataLayer.has(entry));
       triggerSegment = hasBeforeMidEvidence
         ? "PHYSICAL_CLICK"
         : params.fallbackVerified !== undefined
@@ -483,6 +701,7 @@ export function classifyActionAnalyticsCapture(params: {
   }
 
   const sharedFields = {
+    classifiedEvidence,
     confirmedGa4Events,
     unresolvedGa4Candidates,
     confirmedDataLayerPushes,
@@ -521,7 +740,7 @@ export function classifyActionAnalyticsCapture(params: {
     return {
       status: "CORRELATION_UNRESOLVED",
       classificationReason:
-        "analytics evidence exists inside this action's capture window, but it names a genuinely different, unrelated destination and carries none of this action's own confirming signals (window/segment ownership, an analytics event destination URL, or virtual-page/form-state metadata) -- it cannot be safely assigned",
+        "analytics evidence exists inside this action's capture window, but none of it earned a CLICK_EVENT/PHYSICAL_PAGE_CHANGE/VIRTUAL_PAGE_CHANGE/FORM_OR_CONFIGURATOR_STATE classification (window/segment ownership alone is never sufficient) -- it cannot be safely assigned",
       ...sharedFields,
     };
   }
@@ -537,7 +756,7 @@ export function classifyActionAnalyticsCapture(params: {
   return {
     status: "CAPTURED",
     classificationReason:
-      "analytics evidence observed in this action's own capture window was confirmed via window/segment ownership (never by requiring an exact browser-URL match)",
+      "analytics evidence observed in this action's own capture window earned a specific confirming classification (CLICK_EVENT/PHYSICAL_PAGE_CHANGE/VIRTUAL_PAGE_CHANGE/FORM_OR_CONFIGURATOR_STATE), never merely by being observed inside the window",
     ...sharedFields,
   };
 }

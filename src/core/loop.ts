@@ -2259,6 +2259,8 @@ export async function runStep(params: {
         ? classifyActionAnalyticsCapture({
             browserResultingUrl: actionResult.resultingUrl,
             ctaElementDestinationUrl: clickedElementDetails?.destinationUrl,
+            ctaText: clickedElementDetails?.ctaText,
+            ctaAccessibleName: clickedElementDetails?.accessibleName,
             dataLayerReplaced: Boolean(dataLayerDelta?.replaced),
             dataLayerHasNewEntries: Boolean(dataLayerDelta?.newEntries.length),
             ga4EventsInWindow,

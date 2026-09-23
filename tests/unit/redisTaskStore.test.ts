@@ -9,7 +9,7 @@ const DEFAULT_TIMING = { ttlSeconds: 86400, staleThresholdMs: 90_000, heartbeatI
 
 function fakeResult(): TaskResponse {
   return {
-    schemaVersion: "1.23.0",
+    schemaVersion: "1.24.0",
     taskId: "redis-task-store-test",
     status: "success",
     statusReason: "stop_success_action",

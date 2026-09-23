@@ -226,6 +226,68 @@ test("SEGMENT ATTRIBUTION: evidence observed before the mid-index is PHYSICAL_CL
   assert.equal(popup.triggerSegment, "POPUP_OR_NEW_TAB");
 });
 
+test("CONFIRMED-EVENT SAFETY: an unrelated meaningful event inside a valid click window is not confirmed as the CTA tag", () => {
+  const unrelatedPush = dataLayerPush({ raw: [{ event: "newsletter_signup", email_capture: true }] });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [unrelatedPush],
+    dataLayerPushesBeforeMid: [unrelatedPush],
+  });
+  assert.equal(result.status, "CORRELATION_UNRESOLVED");
+  assert.equal(result.confirmedDataLayerPushes.length, 0, "window ownership alone must never confirm an unrelated business event as the CTA tag");
+  assert.equal(result.unresolvedDataLayerPushes.length, 1);
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === unrelatedPush);
+  assert.equal(entry?.classification, "OTHER_MEANINGFUL_EVENT", "it has its own clear identity, so it's not merely ambiguous either");
+});
+
+test("CONFIRMED-EVENT SAFETY: a direct CTA event inside PHYSICAL_CLICK is confirmed as CLICK_EVENT", () => {
+  const ctaEvent = ga4Event({ params: { en: "click", link_id: "hero-cta", link_url: "https://example.com/destination" } });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [ctaEvent],
+    ga4EventsBeforeMid: [ctaEvent],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.confirmedGa4Events.length, 1);
+  assert.equal(result.triggerSegment, "PHYSICAL_CLICK");
+  const entry = result.classifiedEvidence.find((e) => e.ga4Event === ctaEvent);
+  assert.equal(entry?.classification, "CLICK_EVENT");
+});
+
+test("CONFIRMED-EVENT SAFETY: a page_view observed in DESTINATION_SETTLEMENT is classified as PHYSICAL_PAGE_CHANGE (physical page evidence)", () => {
+  const pageViewEvent = ga4Event({ params: { en: "page_view", dl: "https://example.com/destination" } });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [pageViewEvent],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.triggerSegment, "DESTINATION_SETTLEMENT");
+  const entry = result.classifiedEvidence.find((e) => e.ga4Event === pageViewEvent);
+  assert.equal(entry?.classification, "PHYSICAL_PAGE_CHANGE");
+});
+
+test("CONFIRMED-EVENT SAFETY: virtual-page metadata inside the action window is classified as VIRTUAL_PAGE_CHANGE (virtual-state evidence)", () => {
+  const virtualPush = dataLayerPush({ raw: [{ event: "virtual_page_view", virtualpage_url: "/configurator/step-2", page_name: "step_2" }] });
+  const result = classify({
+    browserResultingUrl: "https://example.com/configurator",
+    dataLayerPushesInWindow: [virtualPush],
+  });
+  assert.equal(result.status, "CAPTURED");
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === virtualPush);
+  assert.equal(entry?.classification, "VIRTUAL_PAGE_CHANGE");
+});
+
+test("CONFIRMED-EVENT SAFETY: an ambiguous candidate (a page-location value naming neither the CTA destination nor the browser result, with no other signal) remains CORRELATION_UNRESOLVED", () => {
+  const ambiguousEvent = ga4Event({ params: { dl: "https://example.com/entirely-different-page" } });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    ga4EventsInWindow: [ambiguousEvent],
+  });
+  assert.equal(result.status, "CORRELATION_UNRESOLVED");
+  const entry = result.classifiedEvidence.find((e) => e.ga4Event === ambiguousEvent);
+  assert.equal(entry?.classification, "CORRELATION_UNRESOLVED");
+});
+
 test("computeUrlRelationship: the full diagnostic vocabulary", () => {
   assert.equal(computeUrlRelationship("https://a.com/x", "https://a.com/x"), "EXACT_MATCH");
   assert.equal(computeUrlRelationship("https://a.com/x?utm_source=y", "https://a.com/x"), "TRACKING_PARAMETERS_ONLY_DIFFERENCE");

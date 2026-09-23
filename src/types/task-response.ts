@@ -678,6 +678,22 @@ export type TriggerSegment =
   | "RECOVERY"
   | "BACKTRACK";
 
+/** See src/capture-modules/analyticsCaptureClassification.ts's own doc comment on classifyEvidenceItem -- duplicated here for the same reason as AnalyticsCaptureStatus above. */
+export type EvidenceClassification =
+  | "CLICK_EVENT"
+  | "PHYSICAL_PAGE_CHANGE"
+  | "VIRTUAL_PAGE_CHANGE"
+  | "FORM_OR_CONFIGURATOR_STATE"
+  | "OTHER_MEANINGFUL_EVENT"
+  | "CORRELATION_UNRESOLVED";
+
+/** One GA4 request or dataLayer push inside an action's window, tagged with the category it actually earned. Exactly one of ga4Event/dataLayerPush is set. */
+export interface ClassifiedEvidence {
+  classification: EvidenceClassification;
+  ga4Event?: Ga4NetworkEventCapture;
+  dataLayerPush?: DataLayerCapture;
+}
+
 export interface AnalyticsVirtualPageMetadata {
   virtualPageUrl?: string;
   pageName?: string;
@@ -690,6 +706,8 @@ export interface AnalyticsVirtualPageMetadata {
 export interface AnalyticsCaptureSummary {
   status: AnalyticsCaptureStatus;
   classificationReason: string;
+  /** Every GA4 request/dataLayer push observed in this action's window, tagged with the specific category it earned -- see EvidenceClassification. Window/segment ownership alone is never sufficient to confirm a tag. */
+  classifiedEvidence: ClassifiedEvidence[];
   confirmedGa4Events: Ga4NetworkEventCapture[];
   unresolvedGa4Candidates: Ga4NetworkEventCapture[];
   confirmedDataLayerPushes: DataLayerCapture[];
@@ -1182,7 +1200,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.23.0";
+  schemaVersion: "1.24.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
