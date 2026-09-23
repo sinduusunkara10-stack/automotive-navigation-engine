@@ -138,7 +138,7 @@ class ClickOnceProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string }): TaskRequest {
   return {
-    schemaVersion: "1.22.0",
+    schemaVersion: "1.23.0",
     taskId: "milestone-evidence-gate",
     objective: "Confirm receipt of a dealership callback request.",
     startUrl: params.startUrl,
@@ -157,7 +157,7 @@ function buildTask(params: { startUrl: string }): TaskRequest {
     captureModules: ["cta_clicks", "errors"],
     limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 2 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.23.0",
+    outputSchemaVersion: "1.24.0",
   };
 }
 

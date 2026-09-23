@@ -599,9 +599,34 @@ export interface DataLayerDelta {
  * capture".
  */
 export interface ActionAnalytics {
+  /**
+   * Stable id for this one physical engine action, format `${taskId}:action:${stepIndex}`
+   * -- see core/loop.ts. Also present on the parent CtaClickCapture record. stepIndex is
+   * unique per dispatched action within a run (see RunState.stepCount), so this is stable
+   * and joinable across cta_clicks, actionAnalytics, and any downstream (e.g. n8n)
+   * transformation without relying on fuzzy timestamp/label matching.
+   */
+  actionId: string;
+  /** ISO timestamp read immediately before this action's own GA4/dataLayer-push correlation window opened -- before dispatch, not the (much later) `timestamp` field, which is when this record was serialised. */
+  captureWindowStartedAt?: string;
+  /** ISO timestamp read once this action's own correlation window closed (after the adaptive settle -- see capture-modules/actionWindowSettle.ts). */
+  captureWindowEndedAt?: string;
+  /** ISO timestamp read immediately before Playwright dispatched the real click -- see actions/click.ts's ActionTimingOut. Absent when the target was never actionable (click never reached dispatch). */
+  physicalClickDispatchedAt?: string;
   dataLayerDelta?: DataLayerDelta;
-  /** GA4-style requests observed within a short, fixed window after this click -- correlation, not causation. */
+  /** GA4-style requests observed within a short, adaptively-extended window after this click -- correlation, not causation. */
   ga4RequestsObservedDuringActionWindow?: Ga4NetworkEventCapture[];
+  /**
+   * Real-time dataLayer.push captures (capture-modules/dataLayer.ts's persistent
+   * push-observer stream, NOT the before/after dataLayerDelta above) observed in this same
+   * window -- this is what recovers a click-handler push that a full-page navigation
+   * otherwise erases from dataLayerDelta (see DataLayerDelta.replaced's own doc comment).
+   */
+  dataLayerPushesObservedDuringActionWindow?: DataLayerCapture[];
+  /** Structural health of this action's own capture mechanism -- see analyticsCaptureClassification.ts's CaptureHealth. Never an interpretation of the target site. */
+  captureHealth?: CaptureHealth;
+  /** This engine's classification of what the analytics evidence above does/doesn't prove -- see analyticsCaptureClassification.ts. */
+  analyticsCapture?: AnalyticsCaptureSummary;
   /** True iff the URL or title changed, or a success criterion newly became satisfied, as a direct result of this click. */
   advancedJourney: boolean;
   /** Ids of success criteria that were unsatisfied before this click and satisfied immediately after it. */
@@ -610,9 +635,110 @@ export interface ActionAnalytics {
   verifierDecisions?: SemanticVerifierDecisionSummary[];
 }
 
+/** See src/capture-modules/analyticsCaptureClassification.ts -- duplicated here (rather than imported) only because task-response.ts is the schema-adjacent type surface every capture-module type already lives in. */
+export type AnalyticsCaptureStatus =
+  | "CAPTURED"
+  | "WEBSITE_NO_OBSERVED_TAG"
+  | "ENGINE_CAPTURE_INCOMPLETE"
+  | "CORRELATION_UNRESOLVED"
+  | "CAPTURE_UNCERTAIN_CONSENT_STATE";
+
+export interface CaptureHealth {
+  captureWindowStartedBeforeClick: boolean;
+  dataLayerReplaced: boolean;
+  dataLayerPushListenerActive: boolean;
+  networkListenerActive: boolean;
+  unobservedDataLayerGapPossible: boolean;
+  captureComplete: boolean;
+  issues: string[];
+}
+
+export interface AnalyticsCaptureConsentSummary {
+  analyticsStorageGranted?: boolean;
+  adStorageGranted?: boolean;
+  observed: boolean;
+  required: boolean;
+  verified: boolean;
+}
+
+/** See src/capture-modules/analyticsCaptureClassification.ts -- duplicated here for the same reason as AnalyticsCaptureStatus above. */
+export type UrlRelationship =
+  | "EXACT_MATCH"
+  | "TRACKING_PARAMETERS_ONLY_DIFFERENCE"
+  | "SAME_PHYSICAL_PAGE"
+  | "DIFFERENT_ANALYTICS_VIRTUAL_STATE"
+  | "DIFFERENT_DESTINATION"
+  | "UNAVAILABLE";
+
+export type TriggerSegment =
+  | "PHYSICAL_CLICK"
+  | "POPUP_OR_NEW_TAB"
+  | "FALLBACK_NAVIGATION"
+  | "DESTINATION_SETTLEMENT"
+  | "RECOVERY"
+  | "BACKTRACK";
+
+/** See src/capture-modules/analyticsCaptureClassification.ts's own doc comment on classifyEvidenceItem -- duplicated here for the same reason as AnalyticsCaptureStatus above. */
+export type EvidenceClassification =
+  | "CLICK_EVENT"
+  | "PHYSICAL_PAGE_CHANGE"
+  | "VIRTUAL_PAGE_CHANGE"
+  | "FORM_OR_CONFIGURATOR_STATE"
+  | "OTHER_MEANINGFUL_EVENT"
+  | "CORRELATION_UNRESOLVED";
+
+/** One GA4 request or dataLayer push inside an action's window, tagged with the category it actually earned. Exactly one of ga4Event/dataLayerPush is set. */
+export interface ClassifiedEvidence {
+  classification: EvidenceClassification;
+  ga4Event?: Ga4NetworkEventCapture;
+  dataLayerPush?: DataLayerCapture;
+}
+
+export interface AnalyticsVirtualPageMetadata {
+  virtualPageUrl?: string;
+  pageName?: string;
+  pageCategory?: string;
+  formName?: string;
+  stepName?: string;
+  stepNumber?: string | number;
+}
+
+export interface AnalyticsCaptureSummary {
+  status: AnalyticsCaptureStatus;
+  classificationReason: string;
+  /** Every GA4 request/dataLayer push observed in this action's window, tagged with the specific category it earned -- see EvidenceClassification. Window/segment ownership alone is never sufficient to confirm a tag. */
+  classifiedEvidence: ClassifiedEvidence[];
+  confirmedGa4Events: Ga4NetworkEventCapture[];
+  unresolvedGa4Candidates: Ga4NetworkEventCapture[];
+  confirmedDataLayerPushes: DataLayerCapture[];
+  unresolvedDataLayerPushes: DataLayerCapture[];
+  measurementIds: string[];
+  consent: AnalyticsCaptureConsentSummary;
+  /** The clicked CTA element's own href/destination, unchanged -- supporting/diagnostic context, never analytics evidence itself. */
+  ctaElementDestinationUrl?: string;
+  /** GA4 Enhanced Measurement link_url (or an equivalent dataLayer push field) -- the destination URL the analytics event itself emitted. */
+  analyticsEventDestinationUrl?: string;
+  /** GA4's own `dl` / a dataLayer push's own page_location field, verbatim -- never overwritten by browserResultingUrl. */
+  analyticsPageLocation?: string;
+  /** A dataLayer push's own full_url-shaped field, verbatim -- never overwritten by browserResultingUrl. */
+  analyticsFullUrl?: string;
+  /** A dataLayer push's own virtualpage_url-shaped field, verbatim -- confirms a virtual/SPA destination even when the browser URL never changes. */
+  analyticsVirtualPageUrl?: string;
+  analyticsVirtualPageMetadata?: AnalyticsVirtualPageMetadata;
+  /** The tracked page's actual resulting URL after this action -- supporting navigation/diagnostic evidence only, never a confirmation gate. */
+  browserResultingUrl?: string;
+  /** Diagnostic-only relationship between the analytics-emitted location and the browser/CTA URLs -- never used to gate confirmation. */
+  urlRelationship?: UrlRelationship;
+  /** Which phase of this action produced the primary confirming evidence. Absent when no evidence confirmed this action at all. */
+  triggerSegment?: TriggerSegment;
+}
+
 export interface CtaClickCapture {
   stepIndex: number;
+  /** Final action-serialisation timestamp -- read once this record is built, well after dispatch/settling/the capture window close. See ActionAnalytics.physicalClickDispatchedAt/captureWindowStartedAt/captureWindowEndedAt for the actual timeline. */
   timestamp: string;
+  /** See ActionAnalytics.actionId's own doc comment. */
+  actionId?: string;
   sourcePageUrl: string;
   sourcePageTitle?: string;
   ctaText: string;
@@ -1074,7 +1200,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.23.0";
+  schemaVersion: "1.24.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

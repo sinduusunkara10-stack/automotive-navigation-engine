@@ -227,9 +227,13 @@ export async function runTask(params: {
   // lost to a same-tab navigation race (see docs/architecture.md "Generic action-attributed
   // analytics capture"). Additive alongside the existing per-step full-snapshot capture in
   // core/loop.ts, never a replacement for it.
-  const detachDataLayerPushCapture = task.captureModules.includes("data_layer_evidence")
+  const dataLayerPushCapture = task.captureModules.includes("data_layer_evidence")
     ? await attachDataLayerPushCapture(page, captures, () => state.stepCount, { contextId: MAIN_CONTEXT_ID })
     : undefined;
+  const detachDataLayerPushCapture = dataLayerPushCapture?.detach;
+  if (dataLayerPushCapture) {
+    state.mainDataLayerPushListenerActive = dataLayerPushCapture.attached;
+  }
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
     : undefined;
@@ -448,7 +452,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.23.0",
+    schemaVersion: "1.24.0",
     taskId: task.taskId,
     status,
     statusReason,

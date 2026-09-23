@@ -199,14 +199,24 @@ export interface DataLayerPushCaptureContext {
  * Playwright has no API to fully remove an exposed binding/init script once installed;
  * detach only stops this module from writing further captures (a `removed` guard) --
  * harmless once the underlying page/context itself is closed at run end.
+ *
+ * Returns `attached` alongside `detach` (analytics-capture reliability fix): both
+ * exposeBinding and addInitScript were previously best-effort/silently-swallowed on
+ * failure with no signal anywhere in the response that this ever happened. `attached` is
+ * false only when *both* calls failed (binding-name collision, page already closed, or a
+ * page that has made itself un-instrumentable) -- surfaced into CaptureHealth
+ * (analyticsCaptureClassification.ts) as `dataLayerPushListenerActive`, rather than a run
+ * silently reporting "no observed tag" when it was actually never capable of observing one.
  */
 export async function attachDataLayerPushCapture(
   page: Page,
   captures: Captures,
   getStepIndex: () => number,
   context: DataLayerPushCaptureContext = {},
-): Promise<() => void> {
+): Promise<{ detach: () => void; attached: boolean }> {
   let removed = false;
+  let bindingAttached = false;
+  let initScriptAttached = false;
 
   await page
     .exposeBinding(PUSH_BINDING_NAME, (source: ExposedBindingSource, pushedArgs: unknown) => {
@@ -236,15 +246,27 @@ export async function attachDataLayerPushCapture(
         MAX_DATA_LAYER_PUSH_EVENTS_PER_RUN,
       );
     })
+    .then(() => {
+      bindingAttached = true;
+    })
     .catch(() => {
       /* a binding of this name may already exist on this page (attach called twice) or
          the page may already be closed -- either way, degrade silently, matching the
-         addInitScript catch below. */
+         addInitScript catch below. bindingAttached stays false -- see this function's own
+         doc comment on why that's now surfaced rather than swallowed entirely. */
     });
 
-  await page.addInitScript(injectedDataLayerObserverScript).catch(() => {});
+  await page
+    .addInitScript(injectedDataLayerObserverScript)
+    .then(() => {
+      initScriptAttached = true;
+    })
+    .catch(() => {});
 
-  return () => {
-    removed = true;
+  return {
+    detach: () => {
+      removed = true;
+    },
+    attached: bindingAttached || initScriptAttached,
   };
 }

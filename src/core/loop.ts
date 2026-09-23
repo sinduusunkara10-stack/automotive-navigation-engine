@@ -13,6 +13,10 @@ import { MAIN_CONTEXT_ID } from "../capture-modules/captureContext.js";
 import { diffDataLayer, readDataLayerSnapshot, type DataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
 import { buildCtaClickCapture, readClickedElementDetails } from "../capture-modules/ctaClicks.js";
 import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
+import { waitForActionWindowQuietPeriod } from "../capture-modules/actionWindowSettle.js";
+import { readConsentStorageEvidence } from "../capture-modules/consentEvidence.js";
+import { computeCaptureHealth, classifyActionAnalyticsCapture } from "../capture-modules/analyticsCaptureClassification.js";
+import type { ActionTimingOut } from "../actions/click.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
@@ -1565,6 +1569,20 @@ export async function runStep(params: {
   const dataLayerBefore: DataLayerSnapshot | undefined =
     wantsDataLayerDelta && isClick ? await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] })) : undefined;
   const ga4WindowStartIndex = wantsGa4Window && isClick ? (captures.ga4_network_events?.length ?? 0) : undefined;
+  // Real-time dataLayer.push window (analytics-capture reliability fix): mirrors
+  // ga4WindowStartIndex above, but over captures.data_layer_evidence (the persistent
+  // push-observer stream from capture-modules/dataLayer.ts) rather than the before/after
+  // full-snapshot diff -- this is what survives a same-tab navigation that resets
+  // window.dataLayer before dataLayerAfter can be read (see dataLayerDelta.ts's own doc
+  // comment on "replaced"). Captured whenever cta_clicks + data_layer_evidence are
+  // requested, independent of wantsDataLayerDelta's own before/after pairing.
+  const wantsDataLayerPushWindow = wantsCtaClickCapture && task.captureModules.includes("data_layer_evidence");
+  const dataLayerPushWindowStartIndex =
+    wantsDataLayerPushWindow && isClick ? (captures.data_layer_evidence?.length ?? 0) : undefined;
+  const captureWindowStartedAt = isClick && (wantsGa4Window || wantsDataLayerPushWindow) ? new Date().toISOString() : undefined;
+  // See ActionTimingOut's own doc comment (actions/click.ts) for why this is a mutable
+  // out-param rather than a field threaded through every one of executeClick's own returns.
+  const clickTimingOut: ActionTimingOut = {};
 
   // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
   // adoption"): built fresh for every click dispatch (the only action type a popup/new-tab
@@ -1648,7 +1666,18 @@ export async function runStep(params: {
               ? knownDestinationUrls.get(effectiveAction.target)
               : undefined,
           surfaceAdoption: surfaceAdoptionRequest,
+          timingOut: isClick ? clickTimingOut : undefined,
         });
+
+  // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured
+  // the instant actionResult resolves -- the boundary between "during physical dispatch"
+  // and "during post-dispatch settle/fallback" this action's own capture window spans. Ga4/
+  // dataLayer evidence observed before this index is attributed to the PHYSICAL_CLICK
+  // segment; evidence from this index onward is DESTINATION_SETTLEMENT (or
+  // FALLBACK_NAVIGATION when the destinationUrl fallback was used) -- see
+  // capture-modules/analyticsCaptureClassification.ts's TriggerSegment.
+  const ga4MidIndex = wantsGa4Window && isClick ? (captures.ga4_network_events?.length ?? 0) : undefined;
+  const dataLayerPushMidIndex = wantsDataLayerPushWindow && isClick ? (captures.data_layer_evidence?.length ?? 0) : undefined;
 
   // Panel-attribution corrective pass (item 2): recorded unconditionally for every click
   // dispatch, whatever the outcome -- only ever consulted, one step later, if this exact
@@ -1826,13 +1855,32 @@ export async function runStep(params: {
   let resultingTitle: string | undefined;
   let dataLayerAfter: DataLayerSnapshot | undefined;
   let ga4WindowEndIndex: number | undefined;
+  let dataLayerPushWindowEndIndex: number | undefined;
+  let captureWindowEndedAt: string | undefined;
   if (wantsCtaClickCapture && isClick) {
     if (actionResult.success) {
       resultingTitle = await page.title().catch(() => undefined);
     }
-    if (wantsGa4Window) {
+    if (wantsGa4Window || wantsDataLayerPushWindow) {
       await page.waitForTimeout(GA4_ACTION_WINDOW_MS).catch(() => undefined);
-      ga4WindowEndIndex = captures.ga4_network_events?.length ?? 0;
+      // Adaptive extension (analytics-capture reliability fix, see
+      // capture-modules/actionWindowSettle.ts): the fixed grace period above is often too
+      // short for a destination page's own async beacons/campaign scripts, which is the
+      // root cause a real-site CTA-click analytics-correlation investigation traced -- see this action's own
+      // captureWindowEndedAt vs. when matching evidence actually lands under a later
+      // stepIndex when this doesn't catch it (surfaced honestly via analyticsCapture.status
+      // rather than silently missed).
+      await waitForActionWindowQuietPeriod(
+        page,
+        () => (captures.ga4_network_events?.length ?? 0) + (captures.data_layer_evidence?.length ?? 0),
+      );
+      if (wantsGa4Window) {
+        ga4WindowEndIndex = captures.ga4_network_events?.length ?? 0;
+      }
+      if (wantsDataLayerPushWindow) {
+        dataLayerPushWindowEndIndex = captures.data_layer_evidence?.length ?? 0;
+      }
+      captureWindowEndedAt = new Date().toISOString();
     }
     if (wantsDataLayerDelta) {
       dataLayerAfter = await readDataLayerSnapshot(page).catch(() => ({ available: false, raw: [] }));
@@ -2172,18 +2220,70 @@ export async function runStep(params: {
       ? semanticVerifier?.getUsageDiagnostics?.()?.decisions?.slice(verifierDecisionCountBefore)
       : undefined;
 
+    const dataLayerDelta =
+      wantsDataLayerDelta && dataLayerBefore && dataLayerAfter ? diffDataLayer(dataLayerBefore, dataLayerAfter) : undefined;
+    const ga4EventsInWindow = wantsGa4Window
+      ? (captures.ga4_network_events ?? []).slice(ga4WindowStartIndex, ga4WindowEndIndex)
+      : [];
+    const dataLayerPushesInWindow = wantsDataLayerPushWindow
+      ? (captures.data_layer_evidence ?? []).slice(dataLayerPushWindowStartIndex, dataLayerPushWindowEndIndex)
+      : [];
+    const ga4EventsBeforeMid = wantsGa4Window
+      ? (captures.ga4_network_events ?? []).slice(ga4WindowStartIndex, ga4MidIndex)
+      : [];
+    const dataLayerPushesBeforeMid = wantsDataLayerPushWindow
+      ? (captures.data_layer_evidence ?? []).slice(dataLayerPushWindowStartIndex, dataLayerPushMidIndex)
+      : [];
+
+    // Analytics-capture reliability fix: actionId/timestamps/captureHealth/analyticsCapture
+    // are only ever built from evidence this engine already captures elsewhere (see the
+    // capture-modules/{analyticsCaptureClassification,consentEvidence,actionWindowSettle}.ts
+    // this reuses) -- never a new capture mechanism, and never brand/site-specific.
+    const actionId = `${task.taskId}:action:${stepIndex}`;
+    const consentRequired = task.safety.consentInteractionPolicy === "accept_optional";
+    const consentEvidence = readConsentStorageEvidence({
+      dataLayerEntries: (captures.data_layer_evidence ?? []).flatMap((entry) => entry.raw),
+      ga4Events: captures.ga4_network_events ?? [],
+    });
+    const captureHealth = computeCaptureHealth({
+      isClick,
+      dataLayerReplaced: Boolean(dataLayerDelta?.replaced),
+      dataLayerPushListenerActive: state.mainDataLayerPushListenerActive,
+      networkListenerActive: true,
+      dataLayerPushesObservedInWindowCount: dataLayerPushesInWindow.length,
+      dataLayerModuleRequested: wantsDataLayerPushWindow,
+      ga4ModuleRequested: wantsGa4Window,
+    });
+    const analyticsCapture =
+      wantsGa4Window || wantsDataLayerPushWindow
+        ? classifyActionAnalyticsCapture({
+            browserResultingUrl: actionResult.resultingUrl,
+            ctaElementDestinationUrl: clickedElementDetails?.destinationUrl,
+            ctaText: clickedElementDetails?.ctaText,
+            ctaAccessibleName: clickedElementDetails?.accessibleName,
+            dataLayerReplaced: Boolean(dataLayerDelta?.replaced),
+            dataLayerHasNewEntries: Boolean(dataLayerDelta?.newEntries.length),
+            ga4EventsInWindow,
+            dataLayerPushesInWindow,
+            ga4EventsBeforeMid,
+            dataLayerPushesBeforeMid,
+            fallbackVerified: actionResult.fallbackVerified,
+            openedNewContext: actionResult.openedNewContext,
+            captureHealth,
+            consentRequired,
+            consentEvidence,
+          })
+        : undefined;
+
     const actionAnalytics: ActionAnalytics = {
-      ...(wantsDataLayerDelta && dataLayerBefore && dataLayerAfter
-        ? { dataLayerDelta: diffDataLayer(dataLayerBefore, dataLayerAfter) }
-        : {}),
-      ...(wantsGa4Window
-        ? {
-            ga4RequestsObservedDuringActionWindow: (captures.ga4_network_events ?? []).slice(
-              ga4WindowStartIndex,
-              ga4WindowEndIndex,
-            ),
-          }
-        : {}),
+      actionId,
+      ...(captureWindowStartedAt ? { captureWindowStartedAt } : {}),
+      ...(captureWindowEndedAt ? { captureWindowEndedAt } : {}),
+      ...(clickTimingOut.physicalClickDispatchedAt ? { physicalClickDispatchedAt: clickTimingOut.physicalClickDispatchedAt } : {}),
+      ...(dataLayerDelta ? { dataLayerDelta } : {}),
+      ...(wantsGa4Window ? { ga4RequestsObservedDuringActionWindow: ga4EventsInWindow } : {}),
+      ...(wantsDataLayerPushWindow ? { dataLayerPushesObservedDuringActionWindow: dataLayerPushesInWindow } : {}),
+      ...(analyticsCapture ? { captureHealth, analyticsCapture } : {}),
       advancedJourney,
       ...(newlySatisfied.length > 0 ? { newlySatisfiedCriteriaIds: newlySatisfied } : {}),
       ...(verifierDecisions && verifierDecisions.length > 0 ? { verifierDecisions } : {}),
@@ -2197,6 +2297,7 @@ export async function runStep(params: {
       actionResult,
       resultingTitle,
       actionAnalytics,
+      actionId,
     });
     captures.cta_clicks = [...(captures.cta_clicks ?? []), ctaClick];
   }

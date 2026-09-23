@@ -3,6 +3,7 @@ import type { SelectedAction } from "../types/actions.js";
 import type { ActionResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
+import type { ActionTimingOut } from "./click.js";
 import { executeClick } from "./click.js";
 import { executeScroll } from "./scroll.js";
 import { executeWait } from "./wait.js";
@@ -28,6 +29,8 @@ export interface DispatchParams {
   settleCeilingMs?: number;
   /** Only meaningful for a `click` action -- see ExecuteClickParams/SurfaceAdoptionRequest in actions/click.ts and capture-modules/popupCapture.ts. */
   surfaceAdoption?: SurfaceAdoptionRequest;
+  /** Only meaningful for a `click` action -- see ExecuteClickParams.timingOut in actions/click.ts. */
+  timingOut?: ActionTimingOut;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
@@ -43,6 +46,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     knownDestinationUrl,
     settleCeilingMs,
     surfaceAdoption,
+    timingOut,
   } = params;
   switch (action.type) {
     case "click":
@@ -56,6 +60,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         captureModules,
         reObservationAttempted,
         knownDestinationUrl,
+        timingOut,
         settleCeilingMs,
         surfaceAdoption,
       });

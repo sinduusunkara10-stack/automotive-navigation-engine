@@ -92,6 +92,19 @@ export interface ExecuteClickParams {
    * capture-only-and-close path (see adoptOrCapturePopup's own doc comment).
    */
   surfaceAdoption?: SurfaceAdoptionRequest;
+  /**
+   * Analytics-capture reliability fix: a mutable out-param (same convention as `captures`
+   * above) this executor writes `physicalClickDispatchedAt` into immediately before the real
+   * Playwright click below, regardless of which of this function's many return paths is
+   * eventually taken -- an extra field on every `return { ... }` here would be far more
+   * invasive to add and to keep in sync. core/loop.ts reads it back once dispatchAction
+   * resolves; every other action type leaves it untouched.
+   */
+  timingOut?: ActionTimingOut;
+}
+
+export interface ActionTimingOut {
+  physicalClickDispatchedAt?: string;
 }
 
 type ClickErrorCategory =
@@ -499,6 +512,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     knownDestinationUrl,
     settleCeilingMs,
     surfaceAdoption,
+    timingOut,
   } = params;
 
   if (!action.target) {
@@ -616,6 +630,9 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
   const context = page.context();
   const prePagesSnapshot = context.pages();
   const clickDispatchedAt = Date.now();
+  if (timingOut) {
+    timingOut.physicalClickDispatchedAt = new Date(clickDispatchedAt).toISOString();
+  }
   const pagesReconciliationTimer: NodeJS.Timeout | undefined = surfaceAdoption?.enabled
     ? setInterval(() => {
         for (const candidate of findNewPages(prePagesSnapshot, context.pages())) {
