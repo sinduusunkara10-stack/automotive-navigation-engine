@@ -123,8 +123,8 @@ test("TEST1 [fixture label: Vauxhall-style bundled configurator push]: a genuine
   const bundledPush = dataLayerPush({
     raw: [
       [
-        { event: "virtual_page_view", virtualPageURL: "/config/step-a", pageName: "Configurator Step A" },
-        { event: "virtual_page_view", virtualPageURL: "/config/step-b", pageName: "Configurator Step B" },
+        { event: "virtual_page_view", virtualPageUrl: "/config/step-a", pageName: "Configurator Step A" },
+        { event: "virtual_page_view", virtualPageUrl: "/config/step-b", pageName: "Configurator Step B" },
       ],
     ] as unknown as Record<string, unknown>[],
   });
@@ -158,7 +158,7 @@ test("TEST2 [fixture label: Nissan-style duplicate virtual-page capture]: raw:[e
   const wrapped = dataLayerPush({
     stepIndex: 2,
     timestamp: "2026-01-01T00:00:02.000Z",
-    raw: [[{ event: "virtual_page_view", virtualPageURL: "/config/step2", pageName: "Configurator Step 2" }]] as unknown as Record<
+    raw: [[{ event: "virtual_page_view", virtualPageUrl: "/config/step2", pageName: "Configurator Step 2" }]] as unknown as Record<
       string,
       unknown
     >[],
@@ -166,7 +166,7 @@ test("TEST2 [fixture label: Nissan-style duplicate virtual-page capture]: raw:[e
   const direct = dataLayerPush({
     stepIndex: 2,
     timestamp: "2026-01-01T00:00:02.000Z",
-    raw: [{ event: "virtual_page_view", virtualPageURL: "/config/step2", pageName: "Configurator Step 2" }],
+    raw: [{ event: "virtual_page_view", virtualPageUrl: "/config/step2", pageName: "Configurator Step 2" }],
   });
   const action = buildAction({ dataLayerPushes: [wrapped, direct] });
   const rows = buildAnalyticsReportingRows({
@@ -326,12 +326,12 @@ test("TEST7: equivalent objects with different (including nested) key order prod
   const a = dataLayerPush({
     stepIndex: 3,
     timestamp: "2026-01-01T00:00:07.000Z",
-    raw: [{ event: "virtual_page_view", virtualPageURL: "/config/step3", extra: { b: 2, a: 1 } }],
+    raw: [{ event: "virtual_page_view", virtualPageUrl: "/config/step3", extra: { b: 2, a: 1 } }],
   });
   const b = dataLayerPush({
     stepIndex: 3,
     timestamp: "2026-01-01T00:00:07.000Z",
-    raw: [{ extra: { a: 1, b: 2 }, virtualPageURL: "/config/step3", event: "virtual_page_view" }],
+    raw: [{ extra: { a: 1, b: 2 }, virtualPageUrl: "/config/step3", event: "virtual_page_view" }],
   });
   const action = buildAction({ dataLayerPushes: [a, b] });
   const rows = buildAnalyticsReportingRows({
@@ -350,11 +350,11 @@ test("TEST7: equivalent objects with different (including nested) key order prod
 test("TEST8: same timestamp but different payloads produce different eventIds, both rows kept", () => {
   const a = dataLayerPush({
     timestamp: "2026-01-01T00:00:08.000Z",
-    raw: [{ event: "virtual_page_view", virtualPageURL: "/step/1", pageName: "Step 1" }],
+    raw: [{ event: "virtual_page_view", virtualPageUrl: "/step/1", pageName: "Step 1" }],
   });
   const b = dataLayerPush({
     timestamp: "2026-01-01T00:00:08.000Z",
-    raw: [{ event: "virtual_page_view", virtualPageURL: "/step/2", pageName: "Step 2" }],
+    raw: [{ event: "virtual_page_view", virtualPageUrl: "/step/2", pageName: "Step 2" }],
   });
   const action = buildAction({ dataLayerPushes: [a, b] });
   const rows = buildAnalyticsReportingRows({
@@ -368,8 +368,9 @@ test("TEST8: same timestamp but different payloads produce different eventIds, b
   const eventRows = analyticsEventRows(rows);
   assert.equal(eventRows.length, 2);
   assert.notEqual(eventRows[0]!.eventId, eventRows[1]!.eventId);
+  // Same timestamp -> ordering falls back to eventId, so compare as a set, not a sequence.
   assert.deepEqual(
-    eventRows.map((row) => row.analyticsVirtualPageUrl),
+    eventRows.map((row) => row.analyticsVirtualPageUrl).sort(),
     ["/step/1", "/step/2"],
   );
 });
@@ -390,11 +391,11 @@ test("TEST9: raw:[event] and raw:event produce identical eventIds for the same l
     });
   };
 
-  const wrappedRows = buildFor([[{ event: "virtual_page_view", virtualPageURL: "/config/step4" }]] as unknown as Record<
+  const wrappedRows = buildFor([[{ event: "virtual_page_view", virtualPageUrl: "/config/step4" }]] as unknown as Record<
     string,
     unknown
   >[]);
-  const directRows = buildFor([{ event: "virtual_page_view", virtualPageURL: "/config/step4" }]);
+  const directRows = buildFor([{ event: "virtual_page_view", virtualPageUrl: "/config/step4" }]);
 
   const wrappedEvent = analyticsEventRows(wrappedRows)[0];
   const directEvent = analyticsEventRows(directRows)[0];
@@ -408,9 +409,9 @@ test("TEST10: a genuine 3-event dataLayer array expands into three distinct rows
   const bundle = dataLayerPush({
     raw: [
       [
-        { event: "virtual_page_view", virtualPageURL: "/config/a" },
-        { event: "virtual_page_view", virtualPageURL: "/config/b" },
-        { event: "virtual_page_view", virtualPageURL: "/config/c" },
+        { event: "virtual_page_view", virtualPageUrl: "/config/a" },
+        { event: "virtual_page_view", virtualPageUrl: "/config/b" },
+        { event: "virtual_page_view", virtualPageUrl: "/config/c" },
       ],
     ] as unknown as Record<string, unknown>[],
   });
@@ -612,4 +613,114 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
   const emptyResponse: TaskResponse = { ...response, analyticsReportingRows: [] };
   const validatedEmpty = await validateAgainstTaskResponseSchema(emptyResponse);
   assert.ok(validatedEmpty.valid, validatedEmpty.errorsText);
+});
+
+// TEST15 [fixture label: live Vauxhall-shaped regression]: a real production run reported
+// primaryClickTagStatus=CORRELATION_UNRESOLVED for an action while emitting zero CLICK_CANDIDATE
+// rows -- root cause was analyticsReportingRows.ts's own alias list missing destination_url/
+// click_url (the old classifier's readDataLayerEvidenceFields already recognised both; see this
+// module's "Field extraction" section doc comment), so a genuinely click-tagged dataLayer push
+// was misclassified CORRELATION_UNRESOLVED instead of CLICK_EVENT and silently dropped from
+// resolveClickTag's candidate set. Every distinct click-classified candidate for an unresolved
+// action must be preserved as its own CLICK_CANDIDATE row, and a confirmed page-change event in
+// the same window must still surface as ASSOCIATED_RESULT -- with a stable eventId and the
+// correct correlationStatus everywhere, and no duplicate eventId across the whole action.
+test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLayer click evidence using destination_url/click_url aliases is preserved as CLICK_CANDIDATE rows alongside a confirmed ASSOCIATED_RESULT, with eventId/correlationStatus present and schema-valid", async () => {
+  const candidateA = dataLayerPush({
+    stepIndex: 4,
+    timestamp: "2026-01-01T00:03:00.000Z",
+    raw: [{ event: "gtm.linkClick", destination_url: "https://example.com/model-a", eventLabel: "Model A" }],
+  });
+  const candidateB = dataLayerPush({
+    stepIndex: 4,
+    timestamp: "2026-01-01T00:03:00.500Z",
+    raw: [{ event: "gtm.linkClick", click_url: "https://example.com/model-b", eventLabel: "Model B" }],
+  });
+  const confirmedVirtualPage = dataLayerPush({
+    stepIndex: 4,
+    timestamp: "2026-01-01T00:03:01.000Z",
+    raw: [{ event: "virtual_page_view", virtualPageUrl: "/results", pageName: "Search Results" }],
+  });
+  const action = buildAction({
+    actionId: "task-1:action:4",
+    dataLayerPushes: [candidateA, candidateB, confirmedVirtualPage],
+  });
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/start",
+    schemaVersion: "1.26.0",
+    pageVisits: [],
+    ctaClicks: [
+      ctaClick({
+        stepIndex: 4,
+        timestamp: "2026-01-01T00:03:00.000Z",
+        actionId: "task-1:action:4",
+        actionAnalytics: action,
+        ctaText: "See results",
+        destinationUrl: undefined,
+        resultingUrl: "https://example.com/results",
+      }),
+    ],
+  });
+
+  const ctaRow = rows.find((row) => row.recordType === "CTA_CLICK")!;
+  assert.equal(ctaRow.primaryClickTagStatus, "CORRELATION_UNRESOLVED");
+  assert.equal(ctaRow.correlationStatus, "UNRESOLVED");
+  assert.equal(ctaRow.eventId, undefined);
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 3);
+
+  const clickCandidates = eventRows.filter((row) => row.eventRole === "CLICK_CANDIDATE");
+  assert.equal(clickCandidates.length, 2);
+  assert.ok(
+    clickCandidates.every(
+      (row) => row.eventClassification === "CLICK_EVENT" && row.correlationStatus === "UNRESOLVED" && Boolean(row.eventId),
+    ),
+  );
+  assert.deepEqual(
+    clickCandidates.map((row) => row.eventLabel).sort(),
+    ["Model A", "Model B"],
+  );
+
+  const associated = eventRows.filter((row) => row.eventRole === "ASSOCIATED_RESULT");
+  assert.equal(associated.length, 1);
+  assert.equal(associated[0]!.eventClassification, "VIRTUAL_PAGE_CHANGE");
+  assert.equal(associated[0]!.correlationStatus, "CONFIRMED");
+  assert.ok(associated[0]!.eventId);
+  assert.equal(associated[0]!.analyticsVirtualPageUrl, "/results");
+
+  // No suppression of an unresolved candidate merely for appearing in classifiedEvidence, and
+  // no duplicate eventId anywhere in the action's rows.
+  const allEventIds = eventRows.map((row) => row.eventId);
+  assert.equal(new Set(allEventIds).size, allEventIds.length);
+
+  const response: TaskResponse = {
+    schemaVersion: "1.26.0",
+    taskId: "task-1",
+    status: "success",
+    statusReason: "stop_success_action",
+    startUrl: "https://example.com/start",
+    finalUrl: "https://example.com/results",
+    steps: [],
+    captures: {},
+    engineAssessment: { objectiveAchieved: true, confidence: 1, summary: "done" },
+    diagnostics: { stepCount: 4, backtrackCount: 0, totalDurationMs: 1000, finishReason: "stop_success_action" },
+    analyticsReportingRows: rows,
+  };
+
+  const validated = await validateAgainstTaskResponseSchema(response);
+  assert.ok(validated.valid, validated.errorsText);
+
+  // event_id/correlation_status (eventId/correlationStatus on the wire, per this contract's
+  // established camelCase naming -- see docs/n8n-analytics-reporting-migration.md) are present
+  // in the serialised JSON, not merely on the in-memory TS object.
+  const serialisedRows = JSON.parse(JSON.stringify(response)).analyticsReportingRows as Array<Record<string, unknown>>;
+  for (const row of serialisedRows) {
+    assert.ok("correlationStatus" in row, `row ${row.recordType}/${row.eventRole} missing correlationStatus`);
+  }
+  const serialisedClickCandidates = serialisedRows.filter((row) => row.eventRole === "CLICK_CANDIDATE");
+  assert.equal(serialisedClickCandidates.length, 2);
+  assert.ok(serialisedClickCandidates.every((row) => typeof row.eventId === "string" && row.eventId.length > 0));
 });

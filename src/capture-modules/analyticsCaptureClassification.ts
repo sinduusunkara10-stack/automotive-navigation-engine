@@ -330,7 +330,7 @@ export function ctaLabelMatches(candidate: string | undefined, ctaText?: string,
   return false;
 }
 
-interface Ga4EvidenceFields {
+export interface Ga4EvidenceFields {
   location?: string;
   eventDestinationUrl?: string;
   ctaIdentifierPresent: boolean;
@@ -342,7 +342,8 @@ interface Ga4EvidenceFields {
   virtualMetadata?: AnalyticsVirtualPageMetadata;
 }
 
-function readGa4EvidenceFields(event: Ga4NetworkEventCapture, ctaText?: string, ctaAccessibleName?: string): Ga4EvidenceFields {
+/** Exported so other callers (e.g. capture-modules/analyticsReportingRows.ts) reuse this exact field-reading logic instead of re-deriving their own -- see that module's own doc comment on why drift here is a correctness bug, not a style issue. */
+export function readGa4EvidenceFields(event: Ga4NetworkEventCapture, ctaText?: string, ctaAccessibleName?: string): Ga4EvidenceFields {
   const bodies: Record<string, string>[] = [event.params ?? {}, ...(event.postDataParams ?? [])];
   let ctaIdentifierPresent = false;
   let ctaLabelMatch = false;
@@ -379,7 +380,7 @@ function readGa4EvidenceFields(event: Ga4NetworkEventCapture, ctaText?: string, 
   };
 }
 
-interface DataLayerEvidenceFields {
+export interface DataLayerEvidenceFields {
   location?: string;
   fullUrl?: string;
   eventDestinationUrl?: string;
@@ -392,7 +393,14 @@ interface DataLayerEvidenceFields {
   virtualMetadata?: AnalyticsVirtualPageMetadata;
 }
 
-function readDataLayerEvidenceFields(entry: DataLayerCapture, ctaText?: string, ctaAccessibleName?: string): DataLayerEvidenceFields {
+/**
+ * Exported so other callers reuse this exact field-reading logic instead of re-deriving their
+ * own. Operates over entry.raw as a whole (first match across every element wins, per field) --
+ * a caller needing per-element granularity (e.g. a bundled dataLayer.push() of several
+ * independent events) calls this once per element with a synthetic single-element
+ * DataLayerCapture (`{ ...entry, raw: [element] }`), not once over the whole array.
+ */
+export function readDataLayerEvidenceFields(entry: DataLayerCapture, ctaText?: string, ctaAccessibleName?: string): DataLayerEvidenceFields {
   let location: string | undefined;
   let fullUrl: string | undefined;
   let eventDestinationUrl: string | undefined;
