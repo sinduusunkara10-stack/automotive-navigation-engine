@@ -432,6 +432,26 @@ test("GENERIC CLICK EVENT: no brand-specific logic -- the same generic rules cla
   assert.equal(result.primaryClickEvent?.dataLayerPush, genericCta);
 });
 
+test("CLICK EVENT SAFETY: a bare interaction verb in an unrelated event's name is never sufficient on its own -- CLICK_EVENT requires positive CTA evidence (label match, destination, or a direct identifier), not just wording", () => {
+  const verbOnlyEventNames = ["request_brochure", "open_finance_calculator", "continue_as_guest"];
+  for (const eventName of verbOnlyEventNames) {
+    const push = dataLayerPush({ raw: [{ event: eventName, some_unrelated_field: "value" }] });
+    const result = classify({ dataLayerPushesInWindow: [push], dataLayerPushesBeforeMid: [push] });
+    const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === push);
+    assert.notEqual(entry?.classification, "CLICK_EVENT", `event named "${eventName}" must not become CLICK_EVENT from wording alone`);
+  }
+
+  // The same verb, combined with a genuine CTA label match, is still correctly recognised.
+  const corroborated = dataLayerPush({ raw: [{ event: "request_brochure", eventLabel: "Request a brochure" }] });
+  const corroboratedResult = classify({
+    ctaText: "Request a brochure",
+    dataLayerPushesInWindow: [corroborated],
+    dataLayerPushesBeforeMid: [corroborated],
+  });
+  const corroboratedEntry = corroboratedResult.classifiedEvidence.find((e) => e.dataLayerPush === corroborated);
+  assert.equal(corroboratedEntry?.classification, "CLICK_EVENT");
+});
+
 test("computeUrlRelationship: the full diagnostic vocabulary", () => {
   assert.equal(computeUrlRelationship("https://a.com/x", "https://a.com/x"), "EXACT_MATCH");
   assert.equal(computeUrlRelationship("https://a.com/x?utm_source=y", "https://a.com/x"), "TRACKING_PARAMETERS_ONLY_DIFFERENCE");

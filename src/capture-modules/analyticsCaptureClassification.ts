@@ -284,7 +284,7 @@ const CTA_TEXT_KEYS = [
   "event_label",
   "gtm.elementText",
 ];
-/** Cross-vendor "what kind of interaction was this" fields, read alongside the event name itself for the CLICK EVENT interaction-verb rule -- see describesClickInteraction. */
+/** Cross-vendor "what kind of interaction was this" fields -- used only for click-richness scoring (see clickRichnessScore), never as an independent CLICK_EVENT classification signal on their own: a bare interaction-sounding word in an event's name/category/action is never sufficient by itself (see classifyEvidenceItem's own doc comment). */
 const EVENT_CATEGORY_KEYS = ["eventCategory", "event_category"];
 const EVENT_ACTION_KEYS = ["eventAction", "event_action"];
 /**
@@ -294,44 +294,6 @@ const EVENT_ACTION_KEYS = ["eventAction", "event_action"];
  * "gtm." key namespace).
  */
 const INTERACTION_EVENT_NAMES = new Set(["click", "outbound_click", "gtm.linkclick", "gtm.formsubmit", "gtm.click"]);
-/**
- * Google Tag Manager's own built-in container-lifecycle/page-instrumentation auto-events --
- * never a genuine user interaction, however their name/category/action text is worded. Kept
- * as an explicit, vendor-reserved exclusion list (GTM's own "gtm." namespace) so the generic
- * interaction-verb rule below can never mistake page instrumentation for a click.
- */
-const GTM_LIFECYCLE_EVENT_NAMES = new Set([
-  "gtm.js",
-  "gtm.dom",
-  "gtm.load",
-  "gtm.init",
-  "gtm.init_consent",
-  "gtm.historychange",
-  "gtm.historychange-v2",
-  "gtm.scrolldepth",
-  "gtm.timer",
-  "gtm.elementvisibility",
-  "gtm.video",
-]);
-/**
- * Generic, non-brand-specific interaction verbs (CLICK EVENT rule 5): an event whose own
- * name/category/action describes one of these actions is direct interaction evidence, even
- * when it carries none of the more mechanical signals above (a CTA identifier, a label match,
- * an emitted destination URL). Matched with a word boundary so it never fires on an unrelated
- * word that merely contains one of these as a substring (e.g. "reclick" would not match, but
- * "click" and "redirect"/"redirection" do).
- */
-const CLICK_INTERACTION_VERB_PATTERN = /\b(click|select|submit|request|open|continue|configure|redirect)/i;
-
-/** True when an event/category/action names one of the generic interaction verbs above, and the event is not a GTM container-lifecycle auto-event. */
-function describesClickInteraction(eventName: string | undefined, eventCategory: string | undefined, eventAction: string | undefined): boolean {
-  if (eventName && GTM_LIFECYCLE_EVENT_NAMES.has(eventName.toLowerCase())) {
-    return false;
-  }
-  return [eventName, eventCategory, eventAction].some(
-    (value) => typeof value === "string" && value.length > 0 && CLICK_INTERACTION_VERB_PATTERN.test(value),
-  );
-}
 
 /** GA4/gtag-standard page-load event names -- generic, not brand-specific. An event carrying page_location/full_url is only page-change evidence when it either has no event-name identity of its own (an implicit/default hit) or is explicitly one of these. */
 const PAGE_VIEW_EVENT_NAMES = new Set(["page_view", "pageview"]);
@@ -409,9 +371,7 @@ function readGa4EvidenceFields(event: Ga4NetworkEventCapture, ctaText?: string, 
     eventDestinationUrl: extractAnalyticsEventDestinationUrl(event),
     ctaIdentifierPresent,
     ctaLabelMatch,
-    isInteractionEvent:
-      (eventName ? INTERACTION_EVENT_NAMES.has(eventName.toLowerCase()) : false) ||
-      describesClickInteraction(eventName, eventCategory, eventAction),
+    isInteractionEvent: eventName ? INTERACTION_EVENT_NAMES.has(eventName.toLowerCase()) : false,
     eventName,
     eventCategory,
     eventAction,
@@ -466,9 +426,7 @@ function readDataLayerEvidenceFields(entry: DataLayerCapture, ctaText?: string, 
     }
   }
 
-  const isInteractionEvent =
-    (eventName ? INTERACTION_EVENT_NAMES.has(eventName.toLowerCase()) : false) ||
-    describesClickInteraction(eventName, eventCategory, eventAction);
+  const isInteractionEvent = eventName ? INTERACTION_EVENT_NAMES.has(eventName.toLowerCase()) : false;
 
   return {
     location,
