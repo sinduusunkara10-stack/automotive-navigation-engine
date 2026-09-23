@@ -1219,8 +1219,99 @@ export interface Diagnostics {
   surfaceAdoption?: SurfaceAdoptionDiagnostics;
 }
 
+/**
+ * Engine-owned analytics reporting contract (see src/capture-modules/analyticsReportingRows.ts,
+ * the source of truth for these types and for building the row array itself -- duplicated here
+ * for the same reason as AnalyticsCaptureStatus above: analyticsReportingRows.ts imports
+ * CtaClickCapture/ActionAnalytics/etc. from this file, so this file cannot import back from it
+ * without a cycle). n8n (or any downstream consumer) reads TaskResponse.analyticsReportingRows
+ * directly -- see docs/n8n-analytics-reporting-migration.md -- and must never reconstruct,
+ * re-classify, correlate, canonicalise, or deduplicate analytics evidence itself again.
+ */
+export type ReportingRecordType = "START_PAGE" | "CTA_CLICK" | "ANALYTICS_EVENT";
+
+export type ReportingEventRole =
+  | "START_PAGE"
+  | "PRIMARY_CLICK"
+  | "CLICK_CANDIDATE"
+  | "ASSOCIATED_RESULT"
+  | "RAW_CAPTURE_IN_ACTION_WINDOW";
+
+export type ReportingCorrelationStatus = "NOT_APPLICABLE" | "CONFIRMED" | "UNRESOLVED" | "WEBSITE_NO_OBSERVED_TAG";
+
+/** EvidenceClassification widened with two reporting-only values -- see analyticsReportingRows.ts's own doc comment on ReportingEventClassification. */
+export type ReportingEventClassification = EvidenceClassification | "JOURNEY_MARKER" | "UNCLASSIFIED_RAW_CAPTURE";
+
+export type ReportingCorrelationSource =
+  | "engine_journey_marker"
+  | "engine_confirmed_primary_click"
+  | "engine_click_candidate"
+  | "engine_capture_gate"
+  | "engine_no_observed_click_tag"
+  | "engine_confirmed_associated_event"
+  | "engine_action_window_raw_capture";
+
+/** One flattened, deduplicated, deterministically-ordered reporting record -- see analyticsReportingRows.ts's own doc comment on every field. */
+export interface AnalyticsReportingRow {
+  runId: string;
+  taskId: string;
+  schemaVersion: string;
+  journeyType?: string;
+  journeySequence: number;
+  recordType: ReportingRecordType;
+  actionId?: string;
+  eventId?: string;
+  stepIndex: number;
+  timestamp: string;
+  ctaText?: string;
+  sourcePageUrl?: string;
+  ctaElementDestinationUrl?: string;
+  browserResultingUrl?: string;
+  destinationPageTitle?: string;
+  actionSuccessful?: boolean;
+  navigationSuccessful?: boolean;
+  milestoneIdsCompleted?: string[];
+  journeyRelevant?: boolean;
+  analyticsCaptureStatus?: AnalyticsCaptureStatus;
+  primaryClickTagStatus?: PrimaryClickEventStatus;
+  captureComplete?: boolean;
+  captureIssues?: string[];
+  eventRole: ReportingEventRole;
+  eventClassification: ReportingEventClassification;
+  correlationStatus: ReportingCorrelationStatus;
+  triggerSegment?: TriggerSegment;
+  evidenceSource?: EvidenceCaptureSource;
+  eventName?: string;
+  eventCategory?: string;
+  eventAction?: string;
+  eventLabel?: string;
+  analyticsEventDestinationUrl?: string;
+  analyticsPageLocation?: string;
+  analyticsReferrer?: string;
+  analyticsFullUrl?: string;
+  analyticsVirtualPageUrl?: string;
+  pageTitle?: string;
+  pageName?: string;
+  pageCategory?: string;
+  pageType?: string;
+  componentId?: string;
+  formName?: string;
+  formCategory?: string;
+  formType?: string;
+  stepName?: string;
+  stepNumber?: string | number;
+  vehicleYear?: string;
+  measurementId?: string;
+  collectionEndpoint?: string;
+  contextId?: string;
+  urlRelationship?: UrlRelationship;
+  correlationSource?: ReportingCorrelationSource;
+  classificationReason?: string;
+  rawEvidenceJson?: string;
+}
+
 export interface TaskResponse {
-  schemaVersion: "1.25.0";
+  schemaVersion: "1.26.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
@@ -1230,4 +1321,14 @@ export interface TaskResponse {
   captures: Captures;
   engineAssessment: EngineAssessment;
   diagnostics: Diagnostics;
+  /**
+   * Engine-owned analytics reporting contract (2026-09-23, see
+   * src/capture-modules/analyticsReportingRows.ts and docs/n8n-analytics-reporting-migration.md):
+   * final, flattened, deterministically-ordered reporting rows built from captures.cta_clicks'
+   * own actionAnalytics -- always present, empty when the run captured no reporting evidence
+   * (no cta_clicks module requested, or an empty run). The single source of truth for
+   * downstream (e.g. n8n) reporting; existing captures/diagnostics evidence is unchanged and
+   * still present for troubleshooting/backwards compatibility.
+   */
+  analyticsReportingRows: AnalyticsReportingRow[];
 }
