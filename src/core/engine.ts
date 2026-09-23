@@ -21,6 +21,7 @@ import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js"
 import { attachDataLayerPushCapture } from "../capture-modules/dataLayer.js";
 import { MAIN_CONTEXT_ID } from "../capture-modules/captureContext.js";
 import { attachErrorCapture, recordDiagnosticError } from "../capture-modules/errors.js";
+import { buildAnalyticsReportingRows } from "../capture-modules/analyticsReportingRows.js";
 import { readInitialNavigationTimeoutMs } from "../config/initialNavigationConfig.js";
 import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.js";
 import { assessUrlSafety } from "../discovery/hostSafety.js";
@@ -452,7 +453,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -461,6 +462,14 @@ function buildTerminalResponse(params: {
     steps,
     captures,
     engineAssessment,
+    analyticsReportingRows: buildAnalyticsReportingRows({
+      taskId: task.taskId,
+      ...(task.journeyType ? { journeyType: task.journeyType } : {}),
+      startUrl: task.startUrl,
+      schemaVersion: "1.26.0",
+      pageVisits: captures.page_visits ?? [],
+      ctaClicks: captures.cta_clicks ?? [],
+    }),
     diagnostics: {
       stepCount: state.stepCount,
       backtrackCount: state.backtrackCount,

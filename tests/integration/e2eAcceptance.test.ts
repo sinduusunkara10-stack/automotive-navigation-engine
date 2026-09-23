@@ -26,7 +26,7 @@ import { ScriptedReasoningProvider, byAccessibleName, byAccessibleNameAndHeading
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.24.0",
+    schemaVersion: "1.25.0",
     taskId: "e2e-acceptance-test",
     // Deliberately short and vocabulary-matched to e2e-newtab-cards.html's own title text
     // ("Choose a Vehicle -- Confirmation") -- see surfaceAdoption.test.ts's own baseTask
@@ -51,7 +51,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
       allowedActions: ["click", "capture", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       allowSurfaceAdoption: true,
     },
-    outputSchemaVersion: "1.25.0",
+    outputSchemaVersion: "1.26.0",
     ...rest,
   };
 }

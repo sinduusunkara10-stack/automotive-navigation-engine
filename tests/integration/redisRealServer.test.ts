@@ -43,7 +43,7 @@ async function isReachable(): Promise<boolean> {
 
 function fakeResult(taskId: string): TaskResponse {
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId,
     status: "success",
     statusReason: "stop_success_action",
@@ -53,6 +53,7 @@ function fakeResult(taskId: string): TaskResponse {
     captures: {},
     engineAssessment: { objectiveAchieved: true, confidence: 1, summary: "done" },
     diagnostics: { stepCount: 0, backtrackCount: 0, totalDurationMs: 0, finishReason: "stop_success_action" },
+    analyticsReportingRows: [],
   };
 }
 

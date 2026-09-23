@@ -185,7 +185,7 @@ export function extractAnalyticsEventDestinationUrl(event: Ga4NetworkEventCaptur
   return undefined;
 }
 
-function readStringField(raw: Record<string, unknown>, keys: string[]): string | undefined {
+export function readStringField(raw: Record<string, unknown>, keys: string[]): string | undefined {
   for (const key of keys) {
     const value = raw[key];
     if (typeof value === "string" && value.length > 0) {
@@ -264,7 +264,7 @@ function isVirtualPageIdentity(metadata: AnalyticsVirtualPageMetadata): boolean 
 }
 
 /** GA4 Enhanced Measurement's own standard outbound-click parameters (link_id/link_classes), and cross-vendor dataLayer equivalents -- a *direct*, mechanical tie to a specific clicked control, independent of whether its value happens to textually match the control's own accessible name/text. */
-const CTA_IDENTIFIER_KEYS = ["cta", "cta_id", "ctaId", "link_id", "linkId", "link_classes", "linkClasses", "element_id", "elementId"];
+export const CTA_IDENTIFIER_KEYS = ["cta", "cta_id", "ctaId", "link_id", "linkId", "link_classes", "linkClasses", "element_id", "elementId"];
 /**
  * Cross-vendor text-ish fields naming the clicked control's own label -- compared against the
  * actually-clicked element's ctaText/accessibleName for a genuine label/accessibility-name
@@ -272,7 +272,7 @@ const CTA_IDENTIFIER_KEYS = ["cta", "cta_id", "ctaId", "link_id", "linkId", "lin
  * standard label field for many GTM custom-event tags) and Google Tag Manager's own built-in
  * Link Click auto-event variable "gtm.elementText" -- vendor-neutral, not brand-specific.
  */
-const CTA_TEXT_KEYS = [
+export const CTA_TEXT_KEYS = [
   "ctaText",
   "cta_text",
   "link_text",
@@ -285,18 +285,18 @@ const CTA_TEXT_KEYS = [
   "gtm.elementText",
 ];
 /** Cross-vendor "what kind of interaction was this" fields -- used only for click-richness scoring (see clickRichnessScore), never as an independent CLICK_EVENT classification signal on their own: a bare interaction-sounding word in an event's name/category/action is never sufficient by itself (see classifyEvidenceItem's own doc comment). */
-const EVENT_CATEGORY_KEYS = ["eventCategory", "event_category"];
-const EVENT_ACTION_KEYS = ["eventAction", "event_action"];
+export const EVENT_CATEGORY_KEYS = ["eventCategory", "event_category"];
+export const EVENT_ACTION_KEYS = ["eventAction", "event_action"];
 /**
  * GA4/GTM's own reserved, vendor-neutral interaction event names -- generic, not brand-specific
  * (GA4 Enhanced Measurement's own "click" outbound-click event, and Google Tag Manager's own
  * built-in Link Click/Form Submission/Click auto-event trigger names, all in GTM's reserved
  * "gtm." key namespace).
  */
-const INTERACTION_EVENT_NAMES = new Set(["click", "outbound_click", "gtm.linkclick", "gtm.formsubmit", "gtm.click"]);
+export const INTERACTION_EVENT_NAMES = new Set(["click", "outbound_click", "gtm.linkclick", "gtm.formsubmit", "gtm.click"]);
 
 /** GA4/gtag-standard page-load event names -- generic, not brand-specific. An event carrying page_location/full_url is only page-change evidence when it either has no event-name identity of its own (an implicit/default hit) or is explicitly one of these. */
-const PAGE_VIEW_EVENT_NAMES = new Set(["page_view", "pageview"]);
+export const PAGE_VIEW_EVENT_NAMES = new Set(["page_view", "pageview"]);
 
 function normalizeForComparison(value: string): string {
   return value
@@ -307,7 +307,7 @@ function normalizeForComparison(value: string): string {
 }
 
 /** A genuine label/accessibility-name match between an analytics-emitted text field and the actually-clicked element's own ctaText/accessibleName -- never a bare "some text field exists" check. */
-function ctaLabelMatches(candidate: string | undefined, ctaText?: string, ctaAccessibleName?: string): boolean {
+export function ctaLabelMatches(candidate: string | undefined, ctaText?: string, ctaAccessibleName?: string): boolean {
   if (!candidate) {
     return false;
   }
@@ -538,7 +538,7 @@ const RELATIONSHIP_SPECIFICITY: UrlRelationship[] = [
   "UNAVAILABLE",
 ];
 
-function bestRelationship(candidate: string | undefined, targets: string[]): UrlRelationship {
+export function bestRelationship(candidate: string | undefined, targets: string[]): UrlRelationship {
   if (targets.length === 0) {
     return "UNAVAILABLE";
   }
@@ -580,7 +580,7 @@ function bestRelationship(candidate: string | undefined, targets: string[]): Url
  *   above is a distinct OTHER_MEANINGFUL_EVENT that must never be silently promoted into this
  *   action's own tag; anything with neither is CORRELATION_UNRESOLVED.
  */
-function classifyEvidenceItem(params: {
+export function classifyEvidenceItem(params: {
   location: string | undefined;
   eventDestinationUrl: string | undefined;
   ctaIdentifierPresent: boolean;
@@ -632,7 +632,7 @@ const CONFIRMING_CLASSIFICATIONS = new Set<EvidenceClassification>([
   "FORM_OR_CONFIGURATOR_STATE",
 ]);
 
-interface ClickRichnessFields {
+export interface ClickRichnessFields {
   eventName?: string;
   eventCategory?: string;
   eventAction?: string;
@@ -681,7 +681,7 @@ function clickRichnessFieldsOf(item: ClassifiedEvidence, ctaText?: string, ctaAc
  * a bare "gtm."-namespaced auto-event name is never preferred over a named business event with
  * the same fields.
  */
-function clickRichnessScore(fields: ClickRichnessFields): number {
+export function clickRichnessScore(fields: ClickRichnessFields): number {
   let score = isGenericGtmAutoEventName(fields.eventName) ? 0 : 10;
   if (fields.eventCategory) score += 1;
   if (fields.eventAction) score += 1;

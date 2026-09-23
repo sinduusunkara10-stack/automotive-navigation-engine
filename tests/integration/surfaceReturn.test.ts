@@ -21,7 +21,7 @@ import { ScriptedReasoningProvider, byAccessibleName } from "../helpers/scripted
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.24.0",
+    schemaVersion: "1.25.0",
     taskId: "surface-return-test",
     // Deliberately short and vocabulary-matched to surface-adopt-return-popup.html's own
     // title text ("Confirmed Partner Deal") -- see surfaceAdoption.test.ts's own baseTask
@@ -43,7 +43,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
       allowedActions: ["click", "capture", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       allowSurfaceAdoption: true,
     },
-    outputSchemaVersion: "1.25.0",
+    outputSchemaVersion: "1.26.0",
     ...rest,
   };
 }

@@ -50,7 +50,7 @@ const OBJECTIVE = "Complete the vehicle finance application for the configured v
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string }): TaskRequest {
   const { startUrl, ...rest } = overrides;
   return {
-    schemaVersion: "1.24.0",
+    schemaVersion: "1.25.0",
     taskId: "surface-relevance-diagnostics-test",
     objective: OBJECTIVE,
     startUrl,
@@ -70,7 +70,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string }): TaskR
       allowSurfaceAdoption: true,
       consentInteractionPolicy: "accept_optional",
     },
-    outputSchemaVersion: "1.25.0",
+    outputSchemaVersion: "1.26.0",
     ...rest,
   };
 }
@@ -85,7 +85,7 @@ test("adopted candidate: relevanceScore/relevanceTier/consentActionTaken reach t
 
     const response = await runTask({ page, task, reasoning });
 
-    assert.equal(response.schemaVersion, "1.25.0");
+    assert.equal(response.schemaVersion, "1.26.0");
     assert.equal(response.status, "success");
 
     const adoptionStep = response.steps.find((s) => s.actionResult.surfaceAdopted === true);
@@ -121,7 +121,7 @@ test("relevance-rejected candidate: adoptionRejectedReason 'relevance_rejected' 
 
     const response = await runTask({ page, task, reasoning });
 
-    assert.equal(response.schemaVersion, "1.25.0");
+    assert.equal(response.schemaVersion, "1.26.0");
 
     const rejectionStep = response.steps.find((s) => s.actionResult.adoptionRejectedReason === "relevance_rejected");
     assert.ok(rejectionStep, "expected one step rejected for relevance_rejected");

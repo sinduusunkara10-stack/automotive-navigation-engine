@@ -86,13 +86,14 @@ function successSteps(): StepLog[] {
 
 function successResult(overrides: Partial<TaskResponse> = {}): TaskResponse {
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId: "claude-full-local-journey",
     status: "success",
     startUrl: `${BASE_URL}/start.html`,
     finalUrl: `${BASE_URL}/success.html`,
     steps: successSteps(),
     captures: {},
+    analyticsReportingRows: [],
     engineAssessment: { objectiveAchieved: true, confidence: 1, summary: "Reached success." },
     diagnostics: {
       stepCount: 3,
