@@ -288,6 +288,170 @@ test("CONFIRMED-EVENT SAFETY: an ambiguous candidate (a page-location value nami
   assert.equal(entry?.classification, "CORRELATION_UNRESOLVED");
 });
 
+test("GENERIC CLICK EVENT: a uaevent carrying eventLabel + eventDestinationUrl is classified CLICK_EVENT [Peugeot defect 1]", () => {
+  const uaevent = dataLayerPush({
+    raw: [{ event: "uaevent", eventLabel: "DÉCOUVREZ-LA", eventDestinationUrl: "https://example.com/peugeot-208" }],
+  });
+  const result = classify({
+    ctaText: "Découvrez-la",
+    dataLayerPushesInWindow: [uaevent],
+    dataLayerPushesBeforeMid: [uaevent],
+  });
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === uaevent);
+  assert.equal(entry?.classification, "CLICK_EVENT");
+  assert.equal(result.status, "CAPTURED");
+});
+
+test("GENERIC CLICK EVENT: gtm.linkClick carrying gtm.elementText + gtm.elementUrl supports the click relationship, and does not replace the richer business event as primary [Peugeot defect 1]", () => {
+  const uaevent = dataLayerPush({
+    raw: [{ event: "uaevent", eventCategory: "cta", eventAction: "click", eventLabel: "DÉCOUVREZ-LA", eventDestinationUrl: "https://example.com/peugeot-208" }],
+  });
+  const gtmLinkClick = dataLayerPush({
+    raw: [{ event: "gtm.linkClick", "gtm.elementText": "Découvrez-la", "gtm.elementUrl": "https://example.com/peugeot-208" }],
+  });
+  const result = classify({
+    ctaText: "Découvrez-la",
+    dataLayerPushesInWindow: [uaevent, gtmLinkClick],
+    dataLayerPushesBeforeMid: [uaevent, gtmLinkClick],
+  });
+
+  const uaEntry = result.classifiedEvidence.find((e) => e.dataLayerPush === uaevent);
+  const gtmEntry = result.classifiedEvidence.find((e) => e.dataLayerPush === gtmLinkClick);
+  assert.equal(uaEntry?.classification, "CLICK_EVENT");
+  assert.equal(gtmEntry?.classification, "CLICK_EVENT");
+
+  // The rich business event (uaevent) is selected as primary; the generic GTM auto-event trigger
+  // is supporting evidence, never a second primary -- both raw records are preserved.
+  assert.equal(result.primaryClickEventStatus, "CAPTURED");
+  assert.equal(result.primaryClickEvent?.dataLayerPush, uaevent);
+  assert.equal(result.supportingEvidence.length, 1);
+  assert.equal(result.supportingEvidence[0]?.dataLayerPush, gtmLinkClick);
+});
+
+test("GENERIC CLICK EVENT: no dedicated click tag observed, but associated destination/virtual-state events were captured -- status stays CAPTURED, primaryClickEventStatus is WEBSITE_NO_OBSERVED_CLICK_TAG, never CORRELATION_UNRESOLVED [Peugeot defect 2]", () => {
+  const virtualPathPush = dataLayerPush({
+    raw: [{ event: "updatevirtualpath", virtualpage_url: "/quoting/online" }],
+  });
+  const pageViewPush = dataLayerPush({
+    raw: [{ event: "page_view", page_location: "https://example.com/quoting/online" }],
+  });
+  const result = classify({
+    browserResultingUrl: "https://example.com/quoting/online",
+    dataLayerPushesInWindow: [virtualPathPush, pageViewPush],
+  });
+  assert.equal(result.status, "CAPTURED");
+  assert.equal(result.primaryClickEventStatus, "WEBSITE_NO_OBSERVED_CLICK_TAG");
+  assert.equal(result.primaryClickEvent, undefined);
+  assert.equal(result.associatedEvents.length, 2);
+});
+
+test("GENERIC CLICK EVENT: two click candidates with genuinely different, incompatible destinations produce CORRELATION_UNRESOLVED for the primary click, never an arbitrary pick", () => {
+  const candidateA = dataLayerPush({ raw: [{ event: "uaevent", eventLabel: "Offer A", eventDestinationUrl: "https://example.com/offer-a" }] });
+  const candidateB = dataLayerPush({ raw: [{ event: "uaevent", eventLabel: "Offer B", eventDestinationUrl: "https://example.com/offer-b" }] });
+  const result = classify({
+    dataLayerPushesInWindow: [candidateA, candidateB],
+  });
+  assert.equal(result.primaryClickEventStatus, "CORRELATION_UNRESOLVED");
+  assert.equal(result.primaryClickEvent, undefined);
+});
+
+test("PAGE-CHANGE EVIDENCE: a named business event (search_session) carrying ambient page_location is OTHER_MEANINGFUL_EVENT, not PHYSICAL_PAGE_CHANGE [Peugeot defect 3]", () => {
+  const searchSession = dataLayerPush({
+    raw: [{ event: "search_session", page_location: "https://example.com/search", full_url: "https://example.com/search" }],
+  });
+  const result = classify({
+    browserResultingUrl: "https://example.com/search",
+    dataLayerPushesInWindow: [searchSession],
+  });
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === searchSession);
+  assert.equal(entry?.classification, "OTHER_MEANINGFUL_EVENT");
+});
+
+test("PAGE-CHANGE EVIDENCE: an explicit page_view event remains PHYSICAL_PAGE_CHANGE alongside the search_session fix", () => {
+  const pageView = dataLayerPush({ raw: [{ event: "page_view", page_location: "https://example.com/destination" }] });
+  const result = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [pageView],
+  });
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === pageView);
+  assert.equal(entry?.classification, "PHYSICAL_PAGE_CHANGE");
+});
+
+test("PAGE-CHANGE EVIDENCE: updatevirtualpath remains VIRTUAL_PAGE_CHANGE", () => {
+  const virtualPath = dataLayerPush({ raw: [{ event: "updatevirtualpath", virtualpage_url: "/quoting/online" }] });
+  const result = classify({ dataLayerPushesInWindow: [virtualPath] });
+  const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === virtualPath);
+  assert.equal(entry?.classification, "VIRTUAL_PAGE_CHANGE");
+});
+
+test("TRIGGER SEGMENT: every classified item carries its own triggerSegment -- physical click, destination settlement, popup, and fallback [Peugeot defect 4]", () => {
+  const clickPush = dataLayerPush({ raw: [{ event: "uaevent", eventLabel: "cta", eventDestinationUrl: "https://example.com/destination" }] });
+  const settlementPush = dataLayerPush({ raw: [{ event: "page_view", page_location: "https://example.com/destination" }] });
+
+  const physicalClick = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [clickPush],
+    dataLayerPushesBeforeMid: [clickPush],
+  });
+  assert.equal(physicalClick.classifiedEvidence.find((e) => e.dataLayerPush === clickPush)?.triggerSegment, "PHYSICAL_CLICK");
+
+  const destinationSettlement = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [settlementPush],
+  });
+  assert.equal(
+    destinationSettlement.classifiedEvidence.find((e) => e.dataLayerPush === settlementPush)?.triggerSegment,
+    "DESTINATION_SETTLEMENT",
+  );
+
+  const fallback = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [settlementPush],
+    fallbackVerified: true,
+  });
+  assert.equal(fallback.classifiedEvidence.find((e) => e.dataLayerPush === settlementPush)?.triggerSegment, "FALLBACK_NAVIGATION");
+
+  const popup = classify({
+    browserResultingUrl: "https://example.com/destination",
+    dataLayerPushesInWindow: [settlementPush],
+    openedNewContext: true,
+  });
+  assert.equal(popup.classifiedEvidence.find((e) => e.dataLayerPush === settlementPush)?.triggerSegment, "POPUP_OR_NEW_TAB");
+});
+
+test("GENERIC CLICK EVENT: no brand-specific logic -- the same generic rules classify an unrelated fictional CTA identically", () => {
+  const genericCta = dataLayerPush({
+    raw: [{ event: "uaevent", eventLabel: "Discover the Fictional Model", eventDestinationUrl: "https://example-oem.test/fictional-model" }],
+  });
+  const result = classify({
+    ctaText: "Discover the Fictional Model",
+    dataLayerPushesInWindow: [genericCta],
+    dataLayerPushesBeforeMid: [genericCta],
+  });
+  assert.equal(result.primaryClickEventStatus, "CAPTURED");
+  assert.equal(result.primaryClickEvent?.dataLayerPush, genericCta);
+});
+
+test("CLICK EVENT SAFETY: a bare interaction verb in an unrelated event's name is never sufficient on its own -- CLICK_EVENT requires positive CTA evidence (label match, destination, or a direct identifier), not just wording", () => {
+  const verbOnlyEventNames = ["request_brochure", "open_finance_calculator", "continue_as_guest"];
+  for (const eventName of verbOnlyEventNames) {
+    const push = dataLayerPush({ raw: [{ event: eventName, some_unrelated_field: "value" }] });
+    const result = classify({ dataLayerPushesInWindow: [push], dataLayerPushesBeforeMid: [push] });
+    const entry = result.classifiedEvidence.find((e) => e.dataLayerPush === push);
+    assert.notEqual(entry?.classification, "CLICK_EVENT", `event named "${eventName}" must not become CLICK_EVENT from wording alone`);
+  }
+
+  // The same verb, combined with a genuine CTA label match, is still correctly recognised.
+  const corroborated = dataLayerPush({ raw: [{ event: "request_brochure", eventLabel: "Request a brochure" }] });
+  const corroboratedResult = classify({
+    ctaText: "Request a brochure",
+    dataLayerPushesInWindow: [corroborated],
+    dataLayerPushesBeforeMid: [corroborated],
+  });
+  const corroboratedEntry = corroboratedResult.classifiedEvidence.find((e) => e.dataLayerPush === corroborated);
+  assert.equal(corroboratedEntry?.classification, "CLICK_EVENT");
+});
+
 test("computeUrlRelationship: the full diagnostic vocabulary", () => {
   assert.equal(computeUrlRelationship("https://a.com/x", "https://a.com/x"), "EXACT_MATCH");
   assert.equal(computeUrlRelationship("https://a.com/x?utm_source=y", "https://a.com/x"), "TRACKING_PARAMETERS_ONLY_DIFFERENCE");

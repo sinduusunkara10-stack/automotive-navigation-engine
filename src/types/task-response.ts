@@ -687,11 +687,21 @@ export type EvidenceClassification =
   | "OTHER_MEANINGFUL_EVENT"
   | "CORRELATION_UNRESOLVED";
 
+/** See src/capture-modules/analyticsCaptureClassification.ts -- duplicated here for the same reason as AnalyticsCaptureStatus above. */
+export type PrimaryClickEventStatus =
+  | "CAPTURED"
+  | "WEBSITE_NO_OBSERVED_CLICK_TAG"
+  | "CORRELATION_UNRESOLVED"
+  | "ENGINE_CAPTURE_INCOMPLETE"
+  | "CAPTURE_UNCERTAIN_CONSENT_STATE";
+
 /** One GA4 request or dataLayer push inside an action's window, tagged with the category it actually earned. Exactly one of ga4Event/dataLayerPush is set. */
 export interface ClassifiedEvidence {
   classification: EvidenceClassification;
   ga4Event?: Ga4NetworkEventCapture;
   dataLayerPush?: DataLayerCapture;
+  /** Which phase of the action produced this specific item -- see TriggerSegment. Always populated for an item observed in-window. */
+  triggerSegment?: TriggerSegment;
 }
 
 export interface AnalyticsVirtualPageMetadata {
@@ -731,6 +741,16 @@ export interface AnalyticsCaptureSummary {
   urlRelationship?: UrlRelationship;
   /** Which phase of this action produced the primary confirming evidence. Absent when no evidence confirmed this action at all. */
   triggerSegment?: TriggerSegment;
+  /** The dedicated-click-tag outcome for this action, distinct from `status` above -- see PrimaryClickEventStatus. Always populated. */
+  primaryClickEventStatus: PrimaryClickEventStatus;
+  /** The single richest CLICK_EVENT-classified record for this action -- present only when primaryClickEventStatus is CAPTURED. */
+  primaryClickEvent?: ClassifiedEvidence;
+  /** Every other CLICK_EVENT-classified record describing the same physical click as primaryClickEvent -- never a second primary. */
+  supportingEvidence: ClassifiedEvidence[];
+  /** Confirmed non-click evidence for this action (PHYSICAL_PAGE_CHANGE/VIRTUAL_PAGE_CHANGE/FORM_OR_CONFIGURATOR_STATE). */
+  associatedEvents: ClassifiedEvidence[];
+  /** CORRELATION_UNRESOLVED-classified records for this action -- genuinely ambiguous candidates. */
+  unresolvedCandidates: ClassifiedEvidence[];
 }
 
 export interface CtaClickCapture {
@@ -1200,7 +1220,7 @@ export interface Diagnostics {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.24.0";
+  schemaVersion: "1.25.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
