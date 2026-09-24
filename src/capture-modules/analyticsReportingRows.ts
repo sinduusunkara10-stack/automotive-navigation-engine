@@ -17,12 +17,10 @@ import type {
 import {
   bestRelationship,
   classifyEvidenceItem,
-  CTA_IDENTIFIER_KEYS,
-  CTA_TEXT_KEYS,
-  ctaLabelMatches,
   clickRichnessScore,
   computeUrlRelationship,
-  INTERACTION_EVENT_NAMES,
+  readDataLayerEvidenceFields,
+  readGa4EvidenceFields,
   readStringField,
 } from "./analyticsCaptureClassification.js";
 
@@ -216,29 +214,28 @@ function flattenDataLayerCapture(capture: DataLayerCapture): FlattenedDataLayerE
 }
 
 // ---------------------------------------------------------------------------------------------
-// Generic, cross-vendor alias-based field extraction (never brand/vendor-specific)
+// Field extraction: classification-critical fields (location, destination URL, CTA
+// identity, virtual-page metadata, event name/category/action) are read exclusively via
+// analyticsCaptureClassification.ts's own readGa4EvidenceFields/readDataLayerEvidenceFields --
+// never a second, hand-maintained alias list -- so this module's classification can never
+// drift from the engine's existing classification. A parallel alias list here previously
+// missed several of that module's own aliases (e.g. destination_url/click_url/outbound_url
+// for a dataLayer event's own link-destination field), silently misclassifying real click
+// evidence as CORRELATION_UNRESOLVED. Only genuinely new, reporting-only fields the old
+// module has no concept of (referrer, page title/type, component id, form category/type,
+// vehicle year, measurement id, a display copy of the CTA-label text) get their own narrow
+// alias list below.
 // ---------------------------------------------------------------------------------------------
 
-const EVENT_NAME_ALIASES = ["event", "eventName", "event_name", "en"];
-const EVENT_CATEGORY_ALIASES = ["eventCategory", "event_category", "ec"];
-const EVENT_ACTION_ALIASES = ["eventAction", "event_action", "ea"];
-const EVENT_LABEL_ALIASES = ["eventLabel", "event_label", "el"];
-const EVENT_DESTINATION_URL_ALIASES = ["eventDestinationUrl", "dataGtmEventDestinationUrl", "linkUrl", "link_url", "gtm.elementUrl"];
-const PAGE_LOCATION_ALIASES = ["pageLocation", "page_location", "dl"];
 const REFERRER_ALIASES = ["pageReferrer", "page_referrer", "pageLatestReferrer", "analyticsReferrer", "dr"];
-const FULL_URL_ALIASES = ["fullUrl", "full_url", "analyticsFullUrl"];
-const VIRTUAL_PAGE_URL_ALIASES = ["virtualPageURL", "virtualPageUrl", "virtual_page_url"];
 const PAGE_TITLE_ALIASES = ["pageTitle", "page_title"];
-const PAGE_NAME_ALIASES = ["pageName", "page_name"];
-const PAGE_CATEGORY_ALIASES = ["pageCategory", "page_category"];
 const PAGE_TYPE_ALIASES = ["pageType", "page_type"];
 const COMPONENT_ID_ALIASES = ["componentId", "component_id", "eventComponent", "dataGtmEventComponent"];
-const FORM_NAME_ALIASES = ["formName", "form_name", "formsName"];
 const FORM_CATEGORY_ALIASES = ["formCategory", "form_category"];
 const FORM_TYPE_ALIASES = ["formType", "form_type"];
-const STEP_NAME_ALIASES = ["mainStepName", "stepName", "step_name", "mainStepIndicator"];
 const VEHICLE_YEAR_ALIASES = ["vehicleYear", "vehicle_year", "displayedVehicleYear"];
 const MEASUREMENT_ID_ALIASES = ["measurementId", "measurement_id", "tid"];
+const EVENT_LABEL_ALIASES = ["eventLabel", "event_label", "el", "gtm.elementText"];
 
 interface GenericAnalyticsFields {
   pageLocation?: string;
@@ -264,51 +261,73 @@ interface GenericAnalyticsFields {
   eventLabel?: string;
 }
 
-function readStepNumber(raw: Record<string, unknown>): string | number | undefined {
-  const value = raw["stepNumber"] ?? raw["step_number"];
-  return typeof value === "string" || typeof value === "number" ? value : undefined;
+interface SupplementaryFields {
+  referrer?: string;
+  pageTitle?: string;
+  pageType?: string;
+  componentId?: string;
+  formCategory?: string;
+  formType?: string;
+  vehicleYear?: string;
+  measurementId?: string;
+  eventLabel?: string;
 }
 
-/** Never invents a value beyond an exact alias-key match -- see the coordinator's own "GENERIC ALIAS-BASED FIELD EXTRACTION" list. Applied uniformly to a raw dataLayer entry and to a GA4 request's merged params/postDataParams body. */
-function readGenericAnalyticsFields(raw: Record<string, unknown>): GenericAnalyticsFields {
+/** The reporting-only fields old module has no concept of -- see this section's own doc comment. Never invents a value beyond an exact alias-key match. */
+function readSupplementaryFields(raw: Record<string, unknown>): SupplementaryFields {
   return {
-    pageLocation: readStringField(raw, PAGE_LOCATION_ALIASES),
     referrer: readStringField(raw, REFERRER_ALIASES),
-    fullUrl: readStringField(raw, FULL_URL_ALIASES),
-    virtualPageUrl: readStringField(raw, VIRTUAL_PAGE_URL_ALIASES),
     pageTitle: readStringField(raw, PAGE_TITLE_ALIASES),
-    pageName: readStringField(raw, PAGE_NAME_ALIASES),
-    pageCategory: readStringField(raw, PAGE_CATEGORY_ALIASES),
     pageType: readStringField(raw, PAGE_TYPE_ALIASES),
     componentId: readStringField(raw, COMPONENT_ID_ALIASES),
-    formName: readStringField(raw, FORM_NAME_ALIASES),
     formCategory: readStringField(raw, FORM_CATEGORY_ALIASES),
     formType: readStringField(raw, FORM_TYPE_ALIASES),
-    stepName: readStringField(raw, STEP_NAME_ALIASES),
-    stepNumber: readStepNumber(raw),
     vehicleYear: readStringField(raw, VEHICLE_YEAR_ALIASES),
     measurementId: readStringField(raw, MEASUREMENT_ID_ALIASES),
-    eventDestinationUrl: readStringField(raw, EVENT_DESTINATION_URL_ALIASES),
-    eventName: readStringField(raw, EVENT_NAME_ALIASES),
-    eventCategory: readStringField(raw, EVENT_CATEGORY_ALIASES),
-    eventAction: readStringField(raw, EVENT_ACTION_ALIASES),
     eventLabel: readStringField(raw, EVENT_LABEL_ALIASES),
   };
 }
 
-/** The subset of GenericAnalyticsFields that identifies virtual-page/form-state evidence -- mirrors AnalyticsVirtualPageMetadata's own shape so classifyEvidenceItem's decision (imported, never reimplemented) applies unchanged. */
-function toVirtualMetadataForClassification(fields: GenericAnalyticsFields): AnalyticsVirtualPageMetadata | undefined {
-  const { virtualPageUrl, pageName, pageCategory, formName, stepName, stepNumber } = fields;
-  if (!virtualPageUrl && !pageName && !pageCategory && !formName && !stepName && stepNumber === undefined) {
-    return undefined;
-  }
+/**
+ * Merges the old module's authoritative classification-critical fields (location, fullUrl,
+ * eventDestinationUrl, virtualMetadata, eventName/Category/Action) with this module's own
+ * reporting-only supplementary fields into one row-shaped field set.
+ */
+function combineFields(
+  classFields: {
+    location?: string;
+    eventDestinationUrl?: string;
+    eventName?: string;
+    eventCategory?: string;
+    eventAction?: string;
+    virtualMetadata?: AnalyticsVirtualPageMetadata;
+  },
+  fullUrl: string | undefined,
+  supplementary: SupplementaryFields,
+): GenericAnalyticsFields {
+  const vm = classFields.virtualMetadata;
   return {
-    ...(virtualPageUrl ? { virtualPageUrl } : {}),
-    ...(pageName ? { pageName } : {}),
-    ...(pageCategory ? { pageCategory } : {}),
-    ...(formName ? { formName } : {}),
-    ...(stepName ? { stepName } : {}),
-    ...(stepNumber !== undefined ? { stepNumber } : {}),
+    pageLocation: classFields.location,
+    referrer: supplementary.referrer,
+    fullUrl,
+    virtualPageUrl: vm?.virtualPageUrl,
+    pageTitle: supplementary.pageTitle,
+    pageName: vm?.pageName,
+    pageCategory: vm?.pageCategory,
+    pageType: supplementary.pageType,
+    componentId: supplementary.componentId,
+    formName: vm?.formName,
+    formCategory: supplementary.formCategory,
+    formType: supplementary.formType,
+    stepName: vm?.stepName,
+    stepNumber: vm?.stepNumber,
+    vehicleYear: supplementary.vehicleYear,
+    measurementId: supplementary.measurementId,
+    eventDestinationUrl: classFields.eventDestinationUrl,
+    eventName: classFields.eventName,
+    eventCategory: classFields.eventCategory,
+    eventAction: classFields.eventAction,
+    eventLabel: supplementary.eventLabel,
   };
 }
 
@@ -382,34 +401,6 @@ function buildTriggerSegmentLookup(classifiedEvidence: ClassifiedEvidence[]): Tr
   return { ga4, dataLayer };
 }
 
-function classifyFields(
-  raw: Record<string, unknown>,
-  fields: GenericAnalyticsFields,
-  ctaText: string | undefined,
-  ctaAccessibleName: string | undefined,
-  targets: string[],
-): { classification: EvidenceClassification; ctaLabelMatch: boolean; ctaIdentifierPresent: boolean } {
-  const ctaIdentifierPresent = ctaIdentifierPresentIn(raw);
-  const ctaLabelMatch = ctaLabelMatches(fields.eventLabel ?? readStringField(raw, CTA_TEXT_KEYS), ctaText, ctaAccessibleName);
-  const isInteractionEvent = fields.eventName ? INTERACTION_EVENT_NAMES.has(fields.eventName.toLowerCase()) : false;
-  const virtualMetadata = toVirtualMetadataForClassification(fields);
-  const classification = classifyEvidenceItem({
-    location: fields.pageLocation,
-    eventDestinationUrl: fields.eventDestinationUrl,
-    ctaIdentifierPresent,
-    ctaLabelMatch,
-    isInteractionEvent,
-    eventName: fields.eventName,
-    virtualMetadata,
-    targets,
-  });
-  return { classification, ctaLabelMatch, ctaIdentifierPresent };
-}
-
-function ctaIdentifierPresentIn(raw: Record<string, unknown>): boolean {
-  return CTA_IDENTIFIER_KEYS.some((key) => typeof raw[key] === "string" && (raw[key] as string).length > 0);
-}
-
 function buildEvidenceEntries(
   action: ActionAnalytics,
   targets: string[],
@@ -420,10 +411,21 @@ function buildEvidenceEntries(
   const entries: EvidenceEntry[] = [];
 
   for (const event of action.ga4RequestsObservedDuringActionWindow ?? []) {
+    const classFields = readGa4EvidenceFields(event, ctaText, ctaAccessibleName);
     const merged = mergedGa4Params(event);
-    const fields = readGenericAnalyticsFields(merged);
-    fields.measurementId ??= event.measurementId;
-    const { classification, ctaLabelMatch, ctaIdentifierPresent } = classifyFields(merged, fields, ctaText, ctaAccessibleName, targets);
+    const supplementary = readSupplementaryFields(merged);
+    supplementary.measurementId ??= event.measurementId;
+    const fields = combineFields(classFields, undefined, supplementary);
+    const classification = classifyEvidenceItem({
+      location: classFields.location,
+      eventDestinationUrl: classFields.eventDestinationUrl,
+      ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+      ctaLabelMatch: classFields.ctaLabelMatch,
+      isInteractionEvent: classFields.isInteractionEvent,
+      eventName: classFields.eventName,
+      virtualMetadata: classFields.virtualMetadata,
+      targets,
+    });
     entries.push({
       eventId: computeEventId({
         kind: "ga4",
@@ -445,8 +447,8 @@ function buildEvidenceEntries(
       stepIndex: event.stepIndex,
       timestamp: event.timestamp,
       triggerSegment: triggerLookup.ga4.get(event),
-      ctaIdentifierPresent,
-      ctaLabelMatch,
+      ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+      ctaLabelMatch: classFields.ctaLabelMatch,
       fields,
       urlRelationship: bestRelationship(fields.pageLocation ?? fields.fullUrl ?? fields.eventDestinationUrl, targets),
       collectionEndpoint: collectionEndpointOf(event.requestUrl),
@@ -463,8 +465,25 @@ function buildEvidenceEntries(
   for (const capture of action.dataLayerPushesObservedDuringActionWindow ?? []) {
     const triggerSegment = triggerLookup.dataLayer.get(capture);
     for (const { raw, rawEntryIndex } of flattenDataLayerCapture(capture)) {
-      const fields = readGenericAnalyticsFields(raw);
-      const { classification, ctaLabelMatch, ctaIdentifierPresent } = classifyFields(raw, fields, ctaText, ctaAccessibleName, targets);
+      // A synthetic single-element capture so readDataLayerEvidenceFields (which scans
+      // entry.raw as a whole) sees exactly this one flattened bundle sub-entry -- see that
+      // function's own doc comment on this exact reuse pattern.
+      const classFields = readDataLayerEvidenceFields({ ...capture, raw: [raw] }, ctaText, ctaAccessibleName);
+      const supplementary = readSupplementaryFields(raw);
+      const fields = combineFields(classFields, classFields.fullUrl, supplementary);
+      const classification = classifyEvidenceItem({
+        // PHYSICAL PAGE ANALYTICS rule (see classifyEvidenceItem): a dataLayer push's own
+        // full_url-shaped field counts as page-location evidence too, exactly like the
+        // engine's existing classifyActionAnalyticsCapture -- never page_location alone.
+        location: classFields.location ?? classFields.fullUrl,
+        eventDestinationUrl: classFields.eventDestinationUrl,
+        ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+        ctaLabelMatch: classFields.ctaLabelMatch,
+        isInteractionEvent: classFields.isInteractionEvent,
+        eventName: classFields.eventName,
+        virtualMetadata: classFields.virtualMetadata,
+        targets,
+      });
       entries.push({
         eventId: computeEventId({
           kind: "data_layer",
@@ -483,8 +502,8 @@ function buildEvidenceEntries(
         timestamp: capture.timestamp,
         triggerSegment,
         rawEntryIndex,
-        ctaIdentifierPresent,
-        ctaLabelMatch,
+        ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+        ctaLabelMatch: classFields.ctaLabelMatch,
         fields,
         urlRelationship: bestRelationship(fields.pageLocation ?? fields.fullUrl ?? fields.eventDestinationUrl, targets),
         rawEvidenceJson: stableStringify(raw),
