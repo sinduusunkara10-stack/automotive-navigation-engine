@@ -478,6 +478,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     branch,
     alternativeExploration,
     expectedSurface,
+    journeyMemory,
   } = context;
 
   const system =
@@ -526,7 +527,16 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     "that uncovered control over a covered one. Only choose a covered control when clearing " +
     "whatever is covering the page is itself a necessary step before the objective can be " +
     "reached, and remember that dismissing or clearing a covering element is never itself " +
-    "the objective -- it only clears the way for a later action that is. When \"currentPage\" " +
+    "the objective -- it only clears the way for a later action that is. " +
+    "When \"journeyMemory\" is present, it lists a small number of relevant records from " +
+    "earlier, separate runs (never this run's own history): each has an \"outcome\" " +
+    "(\"success\"/\"failure\"/\"partial\"), a \"tier\" naming how strongly it applies here " +
+    "(\"tier1\" strongest, \"tier4\" weakest/most abstract), and a \"confidence\". Treat it " +
+    "only as one further piece of evidence that may influence your ranking of an otherwise-" +
+    "plausible action -- never let it, by itself, complete a milestone or justify an action " +
+    "with no supporting evidence on the current live page; if none of the live " +
+    "\"interactiveElements\" plausibly matches a \"journeyMemory\" record, fall back to your " +
+    "own ordinary judgement of the current page instead. When \"currentPage\" " +
     "includes \"activeDialog\", a dialog/modal surface is currently open on top of the page " +
     "-- prefer its own controls (they appear in \"interactiveElements\" like any other " +
     "control) over background page controls, which are frequently covered and unreachable " +
@@ -721,6 +731,7 @@ export function buildReasoningPrompt(context: ReasoningContext): ReasoningPrompt
     ...(branch ? { branch } : {}),
     ...(alternativeExploration ? { alternativeExploration } : {}),
     ...(expectedSurface ? { expectedSurface } : {}),
+    ...(journeyMemory && journeyMemory.records.length > 0 ? { journeyMemory } : {}),
   };
 
   return { system, user: JSON.stringify(payload), elementSelection };

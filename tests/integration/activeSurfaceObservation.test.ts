@@ -39,7 +39,7 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
 
 function buildTask(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId: "active-surface-observation",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${baseUrl}/start.html`,
@@ -55,7 +55,7 @@ function buildTask(baseUrl: string): TaskRequest {
     captureModules: ["page_visits"],
     limits: { maxSteps: 6, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.26.0",
+    outputSchemaVersion: "1.27.0",
   };
 }
 

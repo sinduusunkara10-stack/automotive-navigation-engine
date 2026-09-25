@@ -823,12 +823,24 @@ as not-yet-built rather than removed from the plan — see §11.
     boundedArray.ts         # generic keep-most-recent-N append-with-cap helper (see §13)
     memoryDiagnostics.ts    # bounded process.memoryUsage() sampling (see §13)
 
+    /journeyMemory          # Persistent Cross-Run Journey Memory (see §29 and docs/journey-memory.md)
+      sanitizer.ts            # URL/page-identity sanitization, allowlist field extraction
+      tiering.ts               # domain/market tiered hierarchy (tier1-4)
+      scoring.ts                # multi-signal candidate scoring (never word-overlap alone)
+      store.ts                   # Redis keyspace (nav-engine:journey-memory:*), atomicity
+      storeFactory.ts             # fail-safe (never fail-fast) store construction from env
+      retention.ts                 # dedup/outcome-precedence/confidence-decay/eviction
+      promptSummary.ts              # bounded prompt-injection summary builder
+      segmentBuilder.ts              # sanitized forward/recovery segments from a run's steps
+      service.ts                     # retrieval + write-back orchestration, time budgets
+
   /config                 # env-based configuration, read once and fail-fast at startup
     initialNavigationConfig.ts # INITIAL_NAVIGATION_TIMEOUT_MS
     actionNavigationConfig.ts  # ACTION_NAVIGATION_TIMEOUT_MS (navigate action / clicks that navigate)
     taskStoreConfig.ts         # TASK_RECORD_TTL_SECONDS / RUN_STALE_THRESHOLD_MS / HEARTBEAT_INTERVAL_MS
     concurrencyConfig.ts       # MAX_CONCURRENT_TASKS (see §13)
     captureLimits.ts           # bounded-growth ceilings for capture collections (see §13)
+    journeyMemoryConfig.ts     # JOURNEY_MEMORY_* flags/timing (see §29)
 
   /api                    # HTTP API boundary (n8n integration, see §9) and run lifecycle
     server.ts               # createApiServer(): routing, auth, concurrency check
@@ -3486,3 +3498,45 @@ Route Memory's own §16 precedent).
   once `activeSurface` correctly reports `"main"` again -- not because the drawer visually
   disappeared. `tests/integration/e2eAcceptance.test.ts`'s dead-end variant tests exactly this
   claim, not a stronger one.
+
+## 29. Persistent Cross-Run Journey Memory
+
+A separate, complementary layer to §16's Route Memory and Goal-Directed Bounded Branch
+Exploration (§17): those are strictly single-run, in-process (`RunState.routeMemory` /
+`branchHistory`), discarded the moment a run ends. Journey Memory instead persists sanitized,
+fine-grained evidence to Redis (`nav-engine:journey-memory:*`, a separate keyspace from
+`nav-engine:run:*`, §13) so a later, unrelated run can benefit from an earlier run's verified
+route segments and recovery outcomes. Full design, env flags, deployment/rollback steps, and
+measured overhead numbers live in `docs/journey-memory.md`; this section only places the
+feature in the engine's own architecture.
+
+Entirely opt-in and inert by default (`JOURNEY_MEMORY_ENABLED` unset): every existing run is
+byte-for-byte unaffected. When enabled, `src/core/engine.ts#runTask` performs one deterministic,
+zero-Claude-call lookup (`src/core/journeyMemory/service.ts#retrieveJourneyMemoryContext`)
+before the run's first navigation decision, storing the result on `RunState.journeyMemory` (a
+field distinct from `RouteMemory`, never nested inside `SurfaceState`, since it is a cross-run,
+not per-surface, concept). `src/core/loop.ts#obtainDecision` injects a compact, bounded summary
+(`src/core/journeyMemory/promptSummary.ts`) into the *next* `buildReasoningPrompt` call only
+when an existing detection signal already computed there fires (a historically-known-bad branch
+about to be retried, recovery beginning, a decision-point restoration, or no milestone progress
+after a bounded number of actions) -- never on every step. If that augmented call still cannot
+resolve recovery, exactly one further bounded "recovery-focused" reasoning call may fire, capped
+per run by `JOURNEY_MEMORY_MAX_RECOVERY_CALLS`; it uses the identical `reasoning.decide()` call
+shape as every other decision, so it can never bypass the fixed action vocabulary or see raw page
+HTML. At run end, `src/core/journeyMemory/segmentBuilder.ts` builds sanitized forward/recovery
+segments from the run's own `steps[]`/`RunState.recoveryAttemptDiagnostics` (never a whole-run
+summary), and `recordJourneySegments` writes them, applying dedup/outcome-precedence/confidence-
+decay (`retention.ts`) and the per-domain retention cap.
+
+`schemas/task-response.schema.json`'s additive `diagnostics.journeyMemory` block
+(`$defs/journeyMemoryDiagnostics`) reports the lookup's durations, candidates considered/
+accepted/rejected, which record influenced which decision, whether the extra reasoning call
+fired and its token/latency numbers, and the confidence-change audit trail -- present only when
+the feature was enabled for that run.
+
+### Schema impact
+
+Additive only. `schemaVersion`/`outputSchemaVersion` moved `1.26.0` -> `1.27.0`
+(`task-response.schema.json`/`task-request.schema.json`). No existing field removed, renamed, or
+had its meaning changed; no new task-request field at all (the feature is entirely env-flag-
+gated, never a task JSON field).
