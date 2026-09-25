@@ -33,6 +33,8 @@ import {
 import type { RecoveryAnchor, RouteStatus } from "../types/recovery.js";
 import { assessConsentSurface, resolveAmbiguousConsentSurface, type ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
 import type { SurfaceRelevanceAmbiguityResolver } from "./surfaceRelevance.js";
+import { buildJourneyMemoryPromptSummary } from "./journeyMemory/promptSummary.js";
+import { readJourneyMemoryFlags, readJourneyMemoryTimingConfig } from "../config/journeyMemoryConfig.js";
 import {
   computeEstimatedCompletion,
   computeMilestoneRollup,
@@ -2714,7 +2716,52 @@ async function obtainDecision(params: {
         }
       : undefined;
 
-  const decision = await reasoning.decide({
+  // Persistent Cross-Run Journey Memory (see src/core/journeyMemory): injected into this
+  // decision's prompt only, never on every step (binding contract §2/§10) -- fired by
+  // reusing signals this same function already computes for other reasons: a historically-
+  // known-bad branch about to be retried or a genuine candidate-ranking ambiguity
+  // (exhaustedLabelsAtFingerprint), recovery beginning (pendingAlternativeExploration), a
+  // decision-point restoration (this fingerprint already has a recovery anchor), or no
+  // milestone progress after a bounded number of actions (noProgressActionBound, env-
+  // configurable). Never a second, independent detection mechanism.
+  const journeyMemoryFlags = readJourneyMemoryFlags();
+  const journeyMemoryTiming = readJourneyMemoryTimingConfig();
+  let journeyMemoryEscalationSignal = false;
+  if (journeyMemoryFlags.enabled && state.journeyMemory && (state.journeyMemory.accepted.length > 0 || state.journeyMemory.ambiguous.length > 0)) {
+    const noMilestoneProgressYet =
+      milestoneRollup.completedMilestones === 0 && state.stepCount >= journeyMemoryTiming.noProgressActionBound;
+    const decisionPointRestoration = state.recoveryAnchors.some((a) => a.decisionPointFingerprint === decisionPointFingerprint);
+    journeyMemoryEscalationSignal =
+      exhaustedLabelsAtFingerprint.length > 0 ||
+      state.pendingAlternativeExploration !== undefined ||
+      decisionPointRestoration ||
+      noMilestoneProgressYet;
+  }
+  const journeyMemoryContextSnapshot = state.journeyMemory;
+  const journeyMemorySummary = journeyMemoryEscalationSignal && journeyMemoryContextSnapshot
+    ? buildJourneyMemoryPromptSummary(
+        [...journeyMemoryContextSnapshot.accepted, ...journeyMemoryContextSnapshot.ambiguous],
+        journeyMemoryTiming,
+      )
+    : undefined;
+  if (journeyMemorySummary && journeyMemoryContextSnapshot) {
+    state.journeyMemoryGuidanceUsed = true;
+    state.journeyMemoryPromptRecordCount = journeyMemorySummary.records.length;
+    state.journeyMemoryPromptTokenEstimate = Math.ceil(JSON.stringify(journeyMemorySummary).length / 4);
+    for (const candidate of [...journeyMemoryContextSnapshot.accepted, ...journeyMemoryContextSnapshot.ambiguous].slice(
+      0,
+      journeyMemorySummary.records.length,
+    )) {
+      state.journeyMemoryInfluencedDecisions.push({
+        recordId: candidate.segment.id,
+        tier: candidate.tier,
+        confidence: candidate.segment.confidence,
+        usedAt: "pre_run",
+      });
+    }
+  }
+
+  const baseReasoningRequest = {
     objective: task.objective,
     successCriteria: task.successCriteria,
     allowedActions: task.safety.allowedActions,
@@ -2738,7 +2785,46 @@ async function obtainDecision(params: {
         ? { alternativeExploration: { justFailedLabels: state.pendingAlternativeExploration.exhaustedCandidateLabels } }
         : {}),
     ...(expectedSurface ? { expectedSurface } : {}),
-  });
+    ...(journeyMemorySummary ? { journeyMemory: journeyMemorySummary } : {}),
+  };
+
+  let decision = await reasoning.decide(baseReasoningRequest);
+
+  // Recovery-focused escalation (binding contract §2): exactly one additional bounded
+  // Claude call per recovery episode, only when the *augmented* call above still could not
+  // resolve recovery (a fallback stop_blocked with no valid action/low confidence), memory
+  // guidance was actually offered, and this run's own per-run cap
+  // (JOURNEY_MEMORY_MAX_RECOVERY_CALLS) has not been spent. Never bypasses the fixed action
+  // vocabulary or sends raw page HTML -- it is the exact same reasoning.decide() call shape
+  // as every other decision, never a distinct, unconstrained code path.
+  const decisionNeedsRecovery = decision.action.type === "stop_blocked" && Boolean(decision.fallbackReason);
+  if (
+    journeyMemoryFlags.enabled &&
+    journeyMemorySummary &&
+    decisionNeedsRecovery &&
+    state.journeyMemoryRecoveryCallsUsed < journeyMemoryTiming.maxRecoveryCalls
+  ) {
+    state.journeyMemoryRecoveryCallsUsed += 1;
+    const recoveryStartedAt = Date.now();
+    let recoveryDecision: Decision | undefined;
+    try {
+      recoveryDecision = await reasoning.decide(baseReasoningRequest);
+    } catch {
+      recoveryDecision = undefined;
+    }
+    const succeeded = recoveryDecision !== undefined && recoveryDecision.action.type !== "stop_blocked";
+    state.journeyMemoryRecoveryCallDiagnostic = {
+      fired: true,
+      reason: decision.fallbackReason ?? "recovery_escalation",
+      latencyMs: Date.now() - recoveryStartedAt,
+      matchedExecutedVerified: succeeded,
+    };
+    if (succeeded && recoveryDecision) {
+      decision = recoveryDecision;
+    } else {
+      state.journeyMemoryFallbackExplorationUsed = true;
+    }
+  }
 
   const safetyResult = validateDecision({
     action: decision.action,

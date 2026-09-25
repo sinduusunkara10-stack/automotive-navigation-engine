@@ -4,6 +4,7 @@ import type { ConsentControlIntent } from "../types/consentControl.js";
 import type { Observation, ReasoningProviderDiagnostics } from "../types/task-response.js";
 import type { RouteMemoryCandidateSummary } from "../types/routeMemory.js";
 import type { BranchPromptContext, MilestoneRollup } from "../types/branch.js";
+import type { JourneyMemoryPromptSummary } from "../types/journeyMemory.js";
 
 // Version of the diagnostics.reasoningProvider structure a ReasoningProvider.getUsageDiagnostics()
 // implementation must return (see ReasoningProviderDiagnostics in ../types/task-response.js),
@@ -124,6 +125,16 @@ export interface ReasoningContext {
     /** True once a scoped verifier/deterministic check has already confirmed this surface satisfies the active milestone. */
     alreadyVerifiedAgainstMilestone: boolean;
   };
+  /**
+   * Persistent Cross-Run Journey Memory (see src/core/journeyMemory): a compact, bounded
+   * summary of relevant cross-run historical records, injected only into the specific
+   * decision an escalation signal (low confidence, no valid action, repeated action, a
+   * known-bad branch, no milestone progress, candidate-ranking ambiguity, decision-point
+   * restoration, or recovery beginning -- see core/loop.ts) fires for, never on every
+   * step. Omitted entirely otherwise, matching this repo's existing optional-context-field
+   * convention for routeMemory/alternativeExploration above.
+   */
+  journeyMemory?: JourneyMemoryPromptSummary;
 }
 
 export interface ReasoningProvider {

@@ -12,6 +12,11 @@ import type {
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
+import type {
+  JourneyMemoryContext,
+  JourneyMemoryRecoveryCallDiagnostic,
+  JourneyMemoryTier,
+} from "../types/journeyMemory.js";
 
 /** RunState.activeSurface always starts (and, until Phase 3 PR 3 wires real adoption, stays) here. */
 export const MAIN_SURFACE_ID = "main";
@@ -120,6 +125,27 @@ export class RunState {
    * only catches the *same* action repeated identically.
    */
   consecutiveStaleTargetFailures = 0;
+
+  /**
+   * Persistent Cross-Run Journey Memory (see src/core/journeyMemory): the compact,
+   * pre-run-retrieved cross-run context, kept as its own distinct field -- deliberately
+   * never inside SurfaceState/the existing single-run RouteMemory above, since this is a
+   * separate, complementary, cross-run concept (Redis-backed, survives past this run)
+   * rather than the existing in-process, single-run, per-decision-point memory. Undefined
+   * when the feature is disabled or lookup never ran.
+   */
+  journeyMemory: JourneyMemoryContext | undefined;
+  /** True once any journey-memory-derived guidance was actually injected into a reasoning prompt this run (binding contract §2/§10) -- never true merely because lookup found candidates. */
+  journeyMemoryGuidanceUsed = false;
+  /** Bounded per-run count of the historical records actually included in the last prompt injection -- used for diagnostics.journeyMemory.historicalContextRecordCount. */
+  journeyMemoryPromptRecordCount = 0;
+  journeyMemoryPromptTokenEstimate = 0;
+  journeyMemoryInfluencedDecisions: { recordId: string; tier: JourneyMemoryTier; confidence: number; usedAt: "pre_run" | "recovery" }[] = [];
+  /** True once memory guidance was offered but no live candidate matched, and the run fell back to ordinary bounded exploration instead (binding contract's "missing remembered candidate falls back to bounded generic exploration" requirement). */
+  journeyMemoryFallbackExplorationUsed = false;
+  /** Per-run bounded counter for the one extra "recovery-focused" Claude call the escalation path may spend (binding contract §2), capped by JOURNEY_MEMORY_MAX_RECOVERY_CALLS. */
+  journeyMemoryRecoveryCallsUsed = 0;
+  journeyMemoryRecoveryCallDiagnostic: JourneyMemoryRecoveryCallDiagnostic | undefined;
 
   /**
    * Active surface tracking scaffolding (Phase 3 PR 2): the surface (see MAIN_SURFACE_ID)

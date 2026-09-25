@@ -428,6 +428,14 @@ npm run test:api    # runs the API integration tests in isolation
 | `MEMORY_CIRCUIT_BREAKER_THRESHOLD_FRACTION` | No | Fraction of the container's memory limit at which the breaker above stops a run. Default `0.75`. |
 | `MEMORY_CIRCUIT_BREAKER_SAMPLE_INTERVAL_MS` | No | How often (ms) the breaker above samples container memory. Default `3000`. |
 | `MEMORY_CIRCUIT_BREAKER_LIMIT_BYTES` | No | Overrides the container memory limit the breaker above compares usage against. Default: the container's own cgroup-reported limit. |
+| `JOURNEY_MEMORY_ENABLED` | No | Opt-in; only the literal string `"true"` (case-insensitive) enables Persistent Cross-Run Journey Memory. Unset (default) is a complete rollback -- no code path is touched. Reuses `REDIS_URL` (no new datastore); with `JOURNEY_MEMORY_ENABLED=true` and no `REDIS_URL`, the run still proceeds normally with memory simply absent. See `docs/journey-memory.md`. |
+| `JOURNEY_MEMORY_READ_ENABLED` | No | Default `true` when `JOURNEY_MEMORY_ENABLED=true`. Set `false` to collect without using (write-only). |
+| `JOURNEY_MEMORY_WRITE_ENABLED` | No | Default `true` when `JOURNEY_MEMORY_ENABLED=true`. Set `false` to validate stored memory without adding new writes (read-only). |
+| `JOURNEY_MEMORY_LOOKUP_TIMEOUT_MS` | No | Hard ceiling for the pre-run lookup. Default `1000`. |
+| `JOURNEY_MEMORY_RECOVERY_TIMEOUT_MS` | No | Hard ceiling for a recovery-triggered lookup. Default `1500`. |
+| `JOURNEY_MEMORY_MAX_RECOVERY_CALLS` | No | Per-run cap on the extra bounded "recovery-focused" reasoning call. Default `2`. |
+| `JOURNEY_MEMORY_MAX_RECORDS_PER_DOMAIN` | No | Retention cap. Default `500`. |
+| `JOURNEY_MEMORY_RETENTION_DAYS` | No | Redis TTL for journey-memory records. Default `90`. |
 
 Copy `.env.example` to `.env` for local use — **never commit a real `.env`** (it is gitignored).
 **In any deployed environment, all of the above come from the hosting platform's own secret

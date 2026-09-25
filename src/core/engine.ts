@@ -34,6 +34,16 @@ import {
   readMaxStoredInteractiveElementsPerObservation,
   readMaxStoredSteps,
 } from "../config/captureLimits.js";
+import { readJourneyMemoryFlags, readJourneyMemoryTimingConfig } from "../config/journeyMemoryConfig.js";
+import { createJourneyMemoryStore } from "./journeyMemory/storeFactory.js";
+import { retrieveJourneyMemoryContext, recordJourneySegments } from "./journeyMemory/service.js";
+import { buildForwardSegments, buildRecoverySegments, combineSegments } from "./journeyMemory/segmentBuilder.js";
+import { sanitizePageIdentity, buildSemanticSignature } from "./journeyMemory/sanitizer.js";
+import type { JourneyMemoryStore } from "./journeyMemory/store.js";
+import { analyzeHost } from "../discovery/registrableDomain.js";
+import type { JourneyMemoryDiagnostics } from "../types/journeyMemory.js";
+
+const JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION = "1.0.0";
 
 const ENGINE_VERSION = "0.1.0-poc";
 
@@ -130,6 +140,19 @@ export async function runTask(params: {
    * narrow a surface as maxSteps/maxBacktracks already are.
    */
   isMemoryThresholdBreached?: () => boolean;
+  /**
+   * Test-only injection point for a Persistent Cross-Run Journey Memory store (see
+   * src/core/journeyMemory/store.ts), mirroring semanticVerifier/consentAmbiguityResolver's
+   * own opt-in-override convention above. Production callers never pass this: engine.ts
+   * still calls createJourneyMemoryStore(...) (REDIS_URL/ioredis) exactly as before. It
+   * exists only so an integration test can exercise the real runTask()->loop.ts->
+   * reasoningProvider.ts->actions/* wiring end-to-end against an in-process store (e.g.
+   * ioredis-mock-backed, see store.ts's createRedisJourneyMemoryStore) without a live
+   * network Redis -- see tests/integration/journeyMemoryFullEngineRecovery.test.ts. Only
+   * consulted when JOURNEY_MEMORY_ENABLED is set; ignored otherwise, identically to the
+   * store createJourneyMemoryStore itself would have produced.
+   */
+  journeyMemoryStore?: JourneyMemoryStore;
 }): Promise<TaskResponse> {
   const { page, task, semanticVerifier, consentAmbiguityResolver, relevanceAmbiguityResolver, isMemoryThresholdBreached } = params;
   const state = new RunState();
@@ -323,6 +346,31 @@ export async function runTask(params: {
     const allowedDomainsUsed = discovery.trustedDomains.map((entry) => entry.hostname);
     const effectiveTask: ResolvedTaskRequest = { ...task, allowedDomains: allowedDomainsUsed };
 
+    // Persistent Cross-Run Journey Memory (see src/core/journeyMemory): deterministic,
+    // zero-Claude-call pre-run retrieval, before the first navigation decision. Entirely
+    // inert (unavailableReason: "disabled") unless JOURNEY_MEMORY_ENABLED is set -- see
+    // docs/journey-memory.md. Never throws: createJourneyMemoryStore/retrieval both fail
+    // safe on any Redis error, absence, or timeout.
+    const journeyMemoryFlags = readJourneyMemoryFlags();
+    const journeyMemoryTiming = readJourneyMemoryTimingConfig();
+    const journeyMemoryStore = journeyMemoryFlags.enabled
+      ? (params.journeyMemoryStore ?? (await createJourneyMemoryStore(journeyMemoryFlags, journeyMemoryTiming)))
+      : undefined;
+    const startHost = analyzeHost(new URL(navigation.url).hostname);
+    const currentRegistrableDomain = startHost.registrableDomain ?? startHost.hostname;
+    const currentMarket = typeof task.metadata?.market === "string" ? task.metadata.market : undefined;
+    if (journeyMemoryFlags.enabled) {
+      state.journeyMemory = await retrieveJourneyMemoryContext(journeyMemoryStore, journeyMemoryFlags, {
+        timeoutMs: journeyMemoryTiming.lookupTimeoutMs,
+        objectiveText: task.objective,
+        milestoneIntent: task.objective,
+        journeyType: task.journeyType,
+        currentSemanticSignature: buildSemanticSignature([task.objective, ...task.successCriteria.map((c) => c.description ?? "")]),
+        currentDomain: currentRegistrableDomain,
+        currentMarket,
+      });
+    }
+
     let steps: StepLog[] = [];
     let terminal: TerminalStatus | undefined;
     let finishReason = "loop_exhausted";
@@ -357,6 +405,65 @@ export async function runTask(params: {
     }
 
     const lastStep = steps[steps.length - 1];
+
+    // Write-back at run end (binding contract §5): a partially successful run still
+    // contributes every independently-verified segment it produced, never only a
+    // whole-run summary. Fails safe -- recordJourneySegments never throws.
+    let journeyMemoryDiagnostics: JourneyMemoryDiagnostics | undefined;
+    if (journeyMemoryFlags.enabled) {
+      const forwardSegments = buildForwardSegments({
+        steps,
+        runId: effectiveTask.taskId,
+        registrableDomain: currentRegistrableDomain,
+        market: currentMarket,
+        objective: task.objective,
+        evidenceTier: "tier1",
+        schemaVersion: JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION,
+      });
+      const recoverySegments = buildRecoverySegments({
+        attempts: state.recoveryAttemptDiagnostics,
+        steps,
+        runId: effectiveTask.taskId,
+        registrableDomain: currentRegistrableDomain,
+        market: currentMarket,
+        evidenceTier: "tier1",
+        schemaVersion: JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION,
+      });
+      const segments = combineSegments(forwardSegments, recoverySegments);
+      const writeResult = await recordJourneySegments(
+        journeyMemoryStore,
+        journeyMemoryFlags,
+        segments,
+        journeyMemoryTiming.maxRecordsPerDomain,
+      );
+      const context = state.journeyMemory;
+      journeyMemoryDiagnostics = {
+        version: "1.0.0",
+        enabled: true,
+        readEnabled: journeyMemoryFlags.readEnabled,
+        writeEnabled: journeyMemoryFlags.writeEnabled,
+        storageAvailable: context?.storageAvailable ?? journeyMemoryStore !== undefined,
+        lookupCompleted: context?.lookupCompleted ?? false,
+        ...(context ? { lookupDurations: context.durations } : {}),
+        candidatesConsidered: context?.candidatesConsidered ?? 0,
+        candidatesAccepted: context?.accepted.length ?? 0,
+        candidatesRejected: context?.rejected.reduce((sum, r) => sum + r.count, 0) ?? 0,
+        rejectionReasons: context?.rejected ?? [],
+        guidanceUsed: state.journeyMemoryGuidanceUsed,
+        ...(state.journeyMemoryGuidanceUsed ? { guidanceSucceeded: terminal === "success" } : {}),
+        influencedDecisions: state.journeyMemoryInfluencedDecisions,
+        fallbackExplorationUsed: state.journeyMemoryFallbackExplorationUsed,
+        ...(state.journeyMemoryRecoveryCallDiagnostic
+          ? { extraClaudeCall: state.journeyMemoryRecoveryCallDiagnostic }
+          : {}),
+        historicalContextRecordCount: state.journeyMemoryPromptRecordCount,
+        historicalContextTokenEstimate: state.journeyMemoryPromptTokenEstimate,
+        segmentsWritten: writeResult.segmentsWritten,
+        confidenceChanges: writeResult.confidenceChanges,
+        ...(context?.unavailableReason ? { unavailableReason: context.unavailableReason } : {}),
+      };
+    }
+
     return buildTerminalResponse({
       task: effectiveTask,
       state,
@@ -368,6 +475,7 @@ export async function runTask(params: {
       finalUrl: lastStep ? lastStep.currentUrl : task.startUrl,
       reasoning,
       semanticVerifier,
+      journeyMemoryDiagnostics,
       domainDiscovery: discovery,
       memorySamples,
     });
@@ -391,6 +499,7 @@ function buildTerminalResponse(params: {
   domainDiscovery?: DomainDiscoveryResult;
   semanticVerifier?: SemanticCriterionVerifier;
   memorySamples: MemorySample[];
+  journeyMemoryDiagnostics?: JourneyMemoryDiagnostics;
 }): TaskResponse {
   const {
     task,
@@ -405,6 +514,7 @@ function buildTerminalResponse(params: {
     domainDiscovery,
     semanticVerifier,
     memorySamples,
+    journeyMemoryDiagnostics,
   } = params;
   const lastStep = steps[steps.length - 1];
   // Independently verified, never derived from status alone: objectiveAchieved must
@@ -453,7 +563,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.26.0",
+    schemaVersion: "1.27.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -466,7 +576,7 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.26.0",
+      schemaVersion: "1.27.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
     }),
@@ -513,6 +623,7 @@ function buildTerminalResponse(params: {
             },
           }
         : {}),
+      ...(journeyMemoryDiagnostics ? { journeyMemory: journeyMemoryDiagnostics } : {}),
     },
   };
 }

@@ -165,7 +165,7 @@ class ClickByNameProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; successCriteria: TaskRequest["successCriteria"] }): TaskRequest {
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId: "verified-success-type-gate",
     objective: "Reach the vehicle detail page via the configured listing flow.",
     startUrl: params.startUrl,
@@ -174,7 +174,7 @@ function buildTask(params: { startUrl: string; successCriteria: TaskRequest["suc
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.26.0",
+    outputSchemaVersion: "1.27.0",
   };
 }
 

@@ -59,7 +59,7 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.25.0",
+    schemaVersion: "1.26.0",
     taskId: "panel-attribution-bmw-shaped",
     // Deliberately tuned (see tests/integration/panelAttribution.test.ts's own
     // token-coverage walkthrough) so milestone 1's deterministic score clears
@@ -88,7 +88,7 @@ function buildTask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "wait", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.26.0",
+    outputSchemaVersion: "1.27.0",
   };
 }
 

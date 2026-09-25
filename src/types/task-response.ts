@@ -1,6 +1,7 @@
 import type { ActionType, SelectedAction } from "./actions.js";
 import type { ConsentControlIntent } from "./consentControl.js";
 import type { ConsentInteractionPolicy } from "./task-request.js";
+import type { JourneyMemoryDiagnostics } from "./journeyMemory.js";
 import type {
   AlternativeExplorationDiagnostics,
   ConsentDiagnostics,
@@ -1217,6 +1218,12 @@ export interface Diagnostics {
    * src/types/recovery.ts. Present only when at least one such event occurred.
    */
   surfaceAdoption?: SurfaceAdoptionDiagnostics;
+  /**
+   * Persistent Cross-Run Journey Memory (see docs/journey-memory.md and
+   * src/core/journeyMemory/): present only when JOURNEY_MEMORY_ENABLED was set for this
+   * run -- absent entirely otherwise, the default.
+   */
+  journeyMemory?: JourneyMemoryDiagnostics;
 }
 
 /**
@@ -1311,7 +1318,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.26.0";
+  schemaVersion: "1.27.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
