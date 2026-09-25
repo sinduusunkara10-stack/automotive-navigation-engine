@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import RedisMock from "ioredis-mock";
 
 import { createRedisJourneyMemoryStore, withTimeout } from "../../src/core/journeyMemory/store.js";
+import { createJourneyMemoryStore } from "../../src/core/journeyMemory/storeFactory.js";
 import type { ForwardMemorySegment } from "../../src/types/journeyMemory.js";
 
 const TIMING = { retentionDays: 90 };
@@ -120,4 +121,109 @@ test("withTimeout resolves the value when the promise finishes within the ceilin
   if (!result.timedOut) {
     assert.equal(result.value, 42);
   }
+});
+
+/**
+ * Issue 5 (Redis persistence verification, binding acceptance-issue contract): the
+ * remaining store-level tests this issue calls for beyond what the tests above already
+ * cover (round-trip, listDomain, delete, tier3/tier4 lookup paths, concurrent writers,
+ * process-restart survival). All against ioredis-mock (an in-process Redis test-double),
+ * never a live network Redis -- see docs/journey-memory.md's own "what's verified where"
+ * section for what remains owner-only.
+ */
+
+test("a written record is visible to a second, independent store instance (not process-local caching)", async () => {
+  const domain = uniqueDomain();
+  const writer = createRedisJourneyMemoryStore(new RedisMock() as never, TIMING);
+  await writer.writeRecord(segment("rec-visibility-1", domain));
+
+  const reader = createRedisJourneyMemoryStore(new RedisMock() as never, TIMING);
+  const found = await reader.readRecord(domain, "rec-visibility-1");
+  assert.ok(found, "expected the record written by one store instance to be readable from another");
+});
+
+test("a written record survives a simulated client disconnect/reconnect", async () => {
+  const domain = uniqueDomain();
+  const client = new RedisMock();
+  const store = createRedisJourneyMemoryStore(client as never, TIMING);
+  await store.writeRecord(segment("rec-reconnect-1", domain));
+
+  await client.disconnect();
+  await client.connect();
+
+  const found = await store.readRecord(domain, "rec-reconnect-1");
+  assert.ok(found, "expected the record to survive a disconnect/reconnect");
+});
+
+test("TTL is actually set on write (record key + domain index key both carry a positive TTL bounded by retentionDays)", async () => {
+  const domain = uniqueDomain();
+  const client = new RedisMock();
+  const store = createRedisJourneyMemoryStore(client as never, { retentionDays: 1 });
+  await store.writeRecord(segment("rec-ttl-1", domain));
+
+  const recordTtl = await client.ttl(`nav-engine:journey-memory:record:${domain}:rec-ttl-1`);
+  const indexTtl = await client.ttl(`nav-engine:journey-memory:index:${domain}`);
+  assert.ok(recordTtl > 0 && recordTtl <= 86400, `expected a positive TTL <= 1 day in seconds, got ${recordTtl}`);
+  assert.ok(indexTtl > 0 && indexTtl <= 86400, `expected the domain index key to also carry a TTL, got ${indexTtl}`);
+});
+
+/**
+ * storeFactory.ts (createJourneyMemoryStore): the fail-safe construction path
+ * src/core/engine.ts actually calls -- distinct from the store.ts tests above, which
+ * exercise an already-constructed store directly.
+ */
+
+test("createJourneyMemoryStore fails safe (returns undefined, never throws) when REDIS_URL is unset", async () => {
+  const store = await createJourneyMemoryStore({ enabled: true, readEnabled: true, writeEnabled: true }, TIMING, {});
+  assert.equal(store, undefined);
+});
+
+test("createJourneyMemoryStore fails safe when the injected client factory throws on connect", async () => {
+  const store = await createJourneyMemoryStore(
+    { enabled: true, readEnabled: true, writeEnabled: true },
+    TIMING,
+    { REDIS_URL: "redis://example-redis-host:6379" },
+    {
+      redisClientFactory: () => ({
+        connect: async () => {
+          throw new Error("simulated connection failure");
+        },
+        quit: async () => undefined,
+        get: async () => null,
+        set: async () => "OK",
+        del: async () => 1,
+        sadd: async () => 1,
+        srem: async () => 1,
+        smembers: async () => [],
+        expire: async () => 1,
+      }),
+    },
+  );
+  assert.equal(store, undefined, "an unreachable Redis must never throw up through createJourneyMemoryStore/the run");
+});
+
+test("createJourneyMemoryStore returns undefined (fully inert) when flags.enabled is false, regardless of REDIS_URL", async () => {
+  const store = await createJourneyMemoryStore(
+    { enabled: false, readEnabled: false, writeEnabled: false },
+    TIMING,
+    { REDIS_URL: "redis://example-redis-host:6379" },
+  );
+  assert.equal(store, undefined);
+});
+
+test("createJourneyMemoryStore, given a working injected mock client factory, produces a functioning store using the same REDIS_URL pattern as the task store", async () => {
+  const domain = uniqueDomain();
+  const backing = new RedisMock();
+  const store = await createJourneyMemoryStore(
+    { enabled: true, readEnabled: true, writeEnabled: true },
+    TIMING,
+    { REDIS_URL: "redis://example-redis-host:6379" },
+    {
+      redisClientFactory: () => ({ ...(backing as unknown as object), connect: async () => undefined, quit: async () => undefined }) as never,
+    },
+  );
+  assert.ok(store, "expected a working store to be produced");
+  await store?.writeRecord(segment("rec-factory-1", domain));
+  const found = await store?.readRecord(domain, "rec-factory-1");
+  assert.ok(found);
 });

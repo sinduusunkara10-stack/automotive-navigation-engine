@@ -1,7 +1,9 @@
 import { objectiveRelevanceScore, tokenize } from "../../discovery/relevance.js";
 import { classifyTier, TIER_CONFIDENCE_MULTIPLIER } from "./tiering.js";
+import { abstractSegmentForCrossDomain, isCrossDomainTier } from "./abstraction.js";
 import type {
   JourneyMemorySegment,
+  JourneyMemoryTier,
   ScoredJourneyMemoryCandidate,
 } from "../../types/journeyMemory.js";
 
@@ -10,9 +12,32 @@ import type {
  * src/core/surfaceRelevance.ts's own labelling convention for its own (different) initial
  * calibration constants -- these are a deliberately separate, independent set of numbers,
  * never reused literally from that module.
+ *
+ * Issue 2 (Tier3/4 cross-domain behaviour): these thresholds are applied to the *raw*,
+ * pre-tier-multiplier weighted score (semantic/structural compatibility), never to the
+ * already-tier-discounted final score -- so a Tier3/4 candidate is judged by how strongly
+ * it structurally resembles the current situation, not automatically rejected/stuck at
+ * "ambiguous" purely because its own tier multiplier is small. Tier3/4 use a strictly
+ * higher accept bar and a strictly higher reject bar than Tier1/2 (JOURNEY_MEMORY_
+ * CROSS_DOMAIN_ACCEPT_THRESHOLD > JOURNEY_MEMORY_ACCEPT_THRESHOLD), so only genuinely
+ * strong structural alignment can ever cross a domain boundary at all -- and even then, its
+ * *confidence* (the final, tier-multiplied score) is still bounded well below what an
+ * equivalent Tier1/2 candidate would carry (TIER_CONFIDENCE_MULTIPLIER), preserving the
+ * required Tier1 > Tier2 > Tier3 > Tier4 monotonic confidence ordering independently of the
+ * accept/reject decision itself.
  */
 export const JOURNEY_MEMORY_ACCEPT_THRESHOLD = 0.55;
 export const JOURNEY_MEMORY_REJECT_THRESHOLD = 0.2;
+export const JOURNEY_MEMORY_CROSS_DOMAIN_ACCEPT_THRESHOLD = 0.75;
+export const JOURNEY_MEMORY_CROSS_DOMAIN_REJECT_THRESHOLD = 0.4;
+
+function acceptThresholdFor(tier: JourneyMemoryTier): number {
+  return isCrossDomainTier(tier) ? JOURNEY_MEMORY_CROSS_DOMAIN_ACCEPT_THRESHOLD : JOURNEY_MEMORY_ACCEPT_THRESHOLD;
+}
+
+function rejectThresholdFor(tier: JourneyMemoryTier): number {
+  return isCrossDomainTier(tier) ? JOURNEY_MEMORY_CROSS_DOMAIN_REJECT_THRESHOLD : JOURNEY_MEMORY_REJECT_THRESHOLD;
+}
 
 export interface JourneyMemoryScoringInput {
   objectiveText: string;
@@ -54,9 +79,18 @@ export function scoreJourneyMemoryCandidate(
     currentMarket: input.currentMarket,
   });
 
-  const milestoneIntentText = segment.kind === "forward" ? segment.verifiedMilestoneIntent : segment.lastVerifiedMilestoneIntent ?? "";
-  const actionLabel = segment.kind === "forward" ? segment.action.semanticLabel : segment.failedCandidate.semanticLabel;
-  const sourceSemanticSignature = segment.sourcePage.semanticSignature;
+  // Issue 2: the domain hard boundary is enforced right here, at the content-field level,
+  // before any literal field of an out-of-domain segment is ever read for scoring or output
+  // -- never as a blanket retrieval-time reject of the tier itself (see abstraction.ts).
+  // `segment` from this point on is what both scoring AND the returned candidate use, so a
+  // Tier2+ candidate's raw URL/CTA text/element id/product name can never reach
+  // promptSummary.ts/the reasoning prompt, while its abstracted structural signal still can.
+  const usableSegment = isCrossDomainTier(tier) ? abstractSegmentForCrossDomain(segment) : segment;
+
+  const milestoneIntentText =
+    usableSegment.kind === "forward" ? usableSegment.verifiedMilestoneIntent : usableSegment.lastVerifiedMilestoneIntent ?? "";
+  const actionLabel = usableSegment.kind === "forward" ? usableSegment.action.semanticLabel : usableSegment.failedCandidate.semanticLabel;
+  const sourceSemanticSignature = usableSegment.sourcePage.semanticSignature;
 
   const objectiveScore = objectiveRelevanceScore(input.objectiveText, milestoneIntentText || actionLabel);
   const milestoneScore = overlapRatio(input.milestoneIntent, milestoneIntentText);
@@ -112,17 +146,25 @@ export function scoreJourneyMemoryCandidate(
   const tierMultiplier = TIER_CONFIDENCE_MULTIPLIER[tier];
   const score = rawScore * tierMultiplier;
 
+  // Issue 2: accept/reject is decided on rawScore (semantic/structural compatibility)
+  // against a tier-appropriate bar -- Tier3/4 require a strictly higher rawScore than
+  // Tier1/2 before being accepted at all (JOURNEY_MEMORY_CROSS_DOMAIN_ACCEPT_THRESHOLD >
+  // JOURNEY_MEMORY_ACCEPT_THRESHOLD) -- while `score` (rawScore * tierMultiplier) remains
+  // what callers use as the candidate's confidence, so Tier1 > Tier2 > Tier3 > Tier4 holds
+  // for any two candidates sharing the same underlying rawScore.
+  const acceptThreshold = acceptThresholdFor(tier);
+  const rejectThreshold = rejectThresholdFor(tier);
   const decision: ScoredJourneyMemoryCandidate["decision"] =
-    score >= JOURNEY_MEMORY_ACCEPT_THRESHOLD ? "accept" : score <= JOURNEY_MEMORY_REJECT_THRESHOLD ? "reject" : "ambiguous";
+    rawScore >= acceptThreshold ? "accept" : rawScore <= rejectThreshold ? "reject" : "ambiguous";
 
   const reason =
     decision === "accept"
-      ? `Structural/semantic alignment (${tier}) cleared the accept threshold (${score.toFixed(2)} >= ${JOURNEY_MEMORY_ACCEPT_THRESHOLD}).`
+      ? `Structural/semantic alignment (${tier}) cleared the accept threshold (${rawScore.toFixed(2)} >= ${acceptThreshold}, confidence ${score.toFixed(2)}).`
       : decision === "reject"
-        ? `Alignment (${tier}) fell at or below the reject threshold (${score.toFixed(2)} <= ${JOURNEY_MEMORY_REJECT_THRESHOLD}).`
-        : `Ambiguous alignment (${tier}, ${score.toFixed(2)}) -- deferred to reasoning as a lower-confidence candidate, never auto-accepted or auto-rejected.`;
+        ? `Alignment (${tier}) fell at or below the reject threshold (${rawScore.toFixed(2)} <= ${rejectThreshold}).`
+        : `Ambiguous alignment (${tier}, raw ${rawScore.toFixed(2)}) -- deferred to reasoning as a lower-confidence candidate, never auto-accepted or auto-rejected.`;
 
-  return { segment, score, tier, decision, componentScores, reason };
+  return { segment: usableSegment, score, tier, decision, componentScores, reason };
 }
 
 export function rankJourneyMemoryCandidates(

@@ -10,12 +10,25 @@ export interface JourneyMemoryFlags {
   writeEnabled: boolean;
 }
 
+/**
+ * Distinguishes "unset" (fall back to defaultValue) from "set but unparseable" (fail safe to
+ * `false`, never silently enable, and emit a clear diagnostic log line -- see the truth table
+ * in docs/journey-memory.md and the binding acceptance-issue contract's Issue 4). Accepted
+ * truthy/falsy spellings are deliberately narrow (case-insensitive "true"/"1" and
+ * "false"/"0") so a typo like "yes" or "tru" can never be mistaken for an explicit choice.
+ */
 function readBoolEnv(env: NodeJS.ProcessEnv, varName: string, defaultValue: boolean): boolean {
   const raw = env[varName]?.trim().toLowerCase();
   if (raw === undefined || raw === "") return defaultValue;
   if (raw === "true" || raw === "1") return true;
   if (raw === "false" || raw === "0") return false;
-  return defaultValue;
+  // eslint-disable-next-line no-console -- deliberate: no shared logger exists in this repo
+  // yet (see CLAUDE.md/journeyMemoryConfig.ts's own conventions), and a fail-safe config
+  // error must never be silent.
+  console.warn(
+    `[journeyMemory] ${varName} has an invalid value ("${env[varName]}"); expected "true"/"1" or "false"/"0". Failing safe to disabled for this flag.`,
+  );
+  return false;
 }
 
 /**
@@ -23,7 +36,10 @@ function readBoolEnv(env: NodeJS.ProcessEnv, varName: string, defaultValue: bool
  * complete rollback (no journey-memory code path is ever touched, byte-for-byte identical
  * to before this feature existed); JOURNEY_MEMORY_ENABLED gates both read and write at the
  * top level -- an operator sets it plus REDIS_URL to opt in at all, then independently
- * tunes READ/WRITE.
+ * tunes READ/WRITE. An invalid JOURNEY_MEMORY_ENABLED value fails safe to fully disabled
+ * (readBoolEnv's own fail-safe-to-false already achieves this, since disabled is this flag's
+ * fail-safe value); an invalid READ/WRITE value fails safe to that one sub-flag being off,
+ * never to "enabled but inert" and never silently promoted back up to its true default.
  */
 export function readJourneyMemoryFlags(env: NodeJS.ProcessEnv = process.env): JourneyMemoryFlags {
   const enabled = readBoolEnv(env, "JOURNEY_MEMORY_ENABLED", false);

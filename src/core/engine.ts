@@ -39,6 +39,7 @@ import { createJourneyMemoryStore } from "./journeyMemory/storeFactory.js";
 import { retrieveJourneyMemoryContext, recordJourneySegments } from "./journeyMemory/service.js";
 import { buildForwardSegments, buildRecoverySegments, combineSegments } from "./journeyMemory/segmentBuilder.js";
 import { sanitizePageIdentity, buildSemanticSignature } from "./journeyMemory/sanitizer.js";
+import type { JourneyMemoryStore } from "./journeyMemory/store.js";
 import { analyzeHost } from "../discovery/registrableDomain.js";
 import type { JourneyMemoryDiagnostics } from "../types/journeyMemory.js";
 
@@ -139,6 +140,19 @@ export async function runTask(params: {
    * narrow a surface as maxSteps/maxBacktracks already are.
    */
   isMemoryThresholdBreached?: () => boolean;
+  /**
+   * Test-only injection point for a Persistent Cross-Run Journey Memory store (see
+   * src/core/journeyMemory/store.ts), mirroring semanticVerifier/consentAmbiguityResolver's
+   * own opt-in-override convention above. Production callers never pass this: engine.ts
+   * still calls createJourneyMemoryStore(...) (REDIS_URL/ioredis) exactly as before. It
+   * exists only so an integration test can exercise the real runTask()->loop.ts->
+   * reasoningProvider.ts->actions/* wiring end-to-end against an in-process store (e.g.
+   * ioredis-mock-backed, see store.ts's createRedisJourneyMemoryStore) without a live
+   * network Redis -- see tests/integration/journeyMemoryFullEngineRecovery.test.ts. Only
+   * consulted when JOURNEY_MEMORY_ENABLED is set; ignored otherwise, identically to the
+   * store createJourneyMemoryStore itself would have produced.
+   */
+  journeyMemoryStore?: JourneyMemoryStore;
 }): Promise<TaskResponse> {
   const { page, task, semanticVerifier, consentAmbiguityResolver, relevanceAmbiguityResolver, isMemoryThresholdBreached } = params;
   const state = new RunState();
@@ -340,7 +354,7 @@ export async function runTask(params: {
     const journeyMemoryFlags = readJourneyMemoryFlags();
     const journeyMemoryTiming = readJourneyMemoryTimingConfig();
     const journeyMemoryStore = journeyMemoryFlags.enabled
-      ? await createJourneyMemoryStore(journeyMemoryFlags, journeyMemoryTiming)
+      ? (params.journeyMemoryStore ?? (await createJourneyMemoryStore(journeyMemoryFlags, journeyMemoryTiming)))
       : undefined;
     const startHost = analyzeHost(new URL(navigation.url).hostname);
     const currentRegistrableDomain = startHost.registrableDomain ?? startHost.hostname;
