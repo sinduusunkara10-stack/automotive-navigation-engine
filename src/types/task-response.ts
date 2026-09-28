@@ -378,6 +378,38 @@ export interface ActionResult {
     | "dialog"
     | "settled_panel"
     | "destination_fallback_verified";
+  /**
+   * go_back timeout/classification fix (see actions/goBack.ts, production incident
+   * run_b3743f06-1667-443e-b9fa-e804aa5caecf): present only on a `go_back` action's
+   * ActionResult, naming the explicit outcome state -- see GoBackOutcome in
+   * actions/goBack.ts for the full definition of each value. "restoration_verified" is
+   * never set by actions/goBack.ts itself; it is only ever assigned by core/loop.ts after
+   * live re-observation evidence confirms the destination (Fix 2's readiness pipeline) --
+   * a changed URL alone never means "restoration_verified".
+   */
+  goBackOutcome?:
+    | "no_navigation"
+    | "navigation_committed_restoration_unverified"
+    | "restoration_verified"
+    | "blank_or_unusable_page"
+    | "restoration_failed";
+  /** Sanitized (URL only, no query/fragment stripped further here -- see actions/goBack.ts) diagnostics backing goBackOutcome. Never includes cookies/tokens/PII. */
+  goBackDiagnostics?: {
+    urlBeforeGoBack: string;
+    urlAfterGoBack?: string;
+    urlChanged: boolean;
+    navigationCommitted: boolean;
+    timeoutUsedMs: number;
+    playwrightThrew: boolean;
+    errorCategory?: "timeout" | "other";
+    pageTitleAfter?: string;
+    outcome:
+      | "no_navigation"
+      | "navigation_committed_restoration_unverified"
+      | "restoration_verified"
+      | "blank_or_unusable_page"
+      | "restoration_failed";
+  };
 }
 
 export interface Progress {
@@ -1318,7 +1350,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.27.0";
+  schemaVersion: "1.28.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

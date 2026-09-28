@@ -57,6 +57,14 @@ export interface RecoveryMemorySegment {
   kind: "recovery";
   id: string;
   schemaVersion: string;
+  /**
+   * Journey Memory recovery-segment-gap fix (production incident
+   * run_b3743f06-1667-443e-b9fa-e804aa5caecf): which diagnostic source (see
+   * journeyMemory/segmentBuilder.ts) this segment was built from. Internal to the
+   * journey-memory record itself (not part of the task-response wire schema) -- purely for
+   * audit/debugging of which restoration path actually produced a given piece of memory.
+   */
+  segmentSource?: "recovery_attempt" | "route_attempt" | "alternative_candidate";
   failedCandidate: SanitizedActionIdentity;
   sourcePage: SanitizedPageIdentity;
   resultingBranchOutcome: "dead_end" | "blocked" | "unsafe" | "recovered" | "unknown";
@@ -129,12 +137,14 @@ export interface JourneyMemoryRecoveryCallDiagnostic {
 
 /** Mirrors schemas/task-response.schema.json's additive diagnostics.journeyMemory $def. Built once at run end from the accumulated JourneyMemoryContext + writeback outcome. */
 export interface JourneyMemoryDiagnostics {
-  version: "1.0.0";
+  version: "1.1.0";
   enabled: boolean;
   readEnabled: boolean;
   writeEnabled: boolean;
   storageAvailable: boolean;
   lookupCompleted: boolean;
+  /** Observability fix (production incident run_b3743f06-1667-443e-b9fa-e804aa5caecf): true whenever a pre-run lookup was actually initiated, regardless of whether it completed. */
+  lookupAttempted?: boolean;
   lookupDurations?: JourneyMemoryLookupDurations;
   recoveryLookupDurations?: JourneyMemoryLookupDurations;
   candidatesConsidered: number;
@@ -150,9 +160,21 @@ export interface JourneyMemoryDiagnostics {
   extraClaudeCall?: JourneyMemoryRecoveryCallDiagnostic;
   historicalContextRecordCount: number;
   historicalContextTokenEstimate: number;
+  /** Observability fix: forward segments built this run, before write-back (whether or not they were actually persisted). */
+  forwardSegmentsBuilt?: number;
+  /** Journey Memory recovery-segment-gap fix: recovery segments built from all three diagnostic sources, after cross-source dedup, before write-back. */
+  recoverySegmentsBuilt?: number;
+  /** Observability fix: count of segments a write was actually attempted for (writeEnabled + storage available + >=1 eligible segment). */
+  segmentsWriteAttempted?: number;
   segmentsWritten: number;
+  /** Observability fix: a short, non-sensitive category naming why a write did not fully succeed -- never a raw Redis error/credential. */
+  writeFailureReason?: string;
   confidenceChanges: JourneyMemoryConfidenceChange[];
   unavailableReason?: "disabled" | "storage_unavailable" | "timeout" | "no_match";
+  /** Observability fix: always true when this object itself is present on the response. */
+  diagnosticsAttached: boolean;
+  /** Observability fix: present only when the engine could safely confirm (not merely attempt) that written records are retrievable. */
+  persistenceConfirmed?: boolean;
 }
 
 /** Compact summary injected into an existing buildReasoningPrompt call -- see promptSummary.ts. Bounded: at most JOURNEY_MEMORY_MAX_PROMPT_RECORDS records, deduplicated. */

@@ -86,7 +86,7 @@ function successSteps(): StepLog[] {
 
 function successResult(overrides: Partial<TaskResponse> = {}): TaskResponse {
   return {
-    schemaVersion: "1.27.0",
+    schemaVersion: "1.28.0",
     taskId: "claude-full-local-journey",
     status: "success",
     startUrl: `${BASE_URL}/start.html`,

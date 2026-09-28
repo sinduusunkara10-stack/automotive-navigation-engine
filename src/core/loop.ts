@@ -22,6 +22,7 @@ import { classifyActionFailure, recordDiagnosticError } from "../capture-modules
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
+import { captureDecisionPointCheckpoint } from "./decisionPointCheckpoint.js";
 import type { RouteMemoryOutcome } from "../types/routeMemory.js";
 import { waitForAdaptiveSettle } from "./robustNavigation.js";
 import {
@@ -848,7 +849,23 @@ export async function runStep(params: {
                 settleCeilingMs,
               });
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
-        if (!returnActionResult.success) {
+        // goBack timeout/classification fix (production incident
+        // run_b3743f06-1667-443e-b9fa-e804aa5caecf, see actions/goBack.ts): a go_back whose
+        // Playwright load-completion wait timed out but genuinely committed to a non-blank
+        // URL (goBackOutcome "navigation_committed_restoration_unverified") is never treated
+        // as a hard restore failure here -- it falls through exactly like a successful
+        // return, and this same fingerprint check (currentFingerprint === branch.
+        // decisionPointId, above) verifies it from live evidence on the *next* runStep call,
+        // reusing the engine's existing per-step re-observation rather than a second,
+        // parallel readiness mechanism. Only a genuine failure outcome (restoration_failed,
+        // blank_or_unusable_page, no_navigation) -- or the legacy false-without-a-
+        // goBackOutcome case, e.g. the adopted-surface returnToParentSurface path -- still
+        // ends the run on the spot.
+        const goBackCommittedUnverified = returnActionResult.goBackOutcome === "navigation_committed_restoration_unverified";
+        if (goBackCommittedUnverified) {
+          await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
+        }
+        if (!returnActionResult.success && !goBackCommittedUnverified) {
           branch.returnStatus = "restore_failed";
           pushRouteAttemptDiagnostic({
             state,
@@ -2044,6 +2061,24 @@ export async function runStep(params: {
         candidateRank: state.nextCandidateRank(preDispatchDecisionPointFingerprint),
       };
       state.startBranch(branchRecord);
+      // Lightweight in-run decision-point checkpoint (Fix 3, production incident
+      // run_b3743f06-1667-443e-b9fa-e804aa5caecf): captured once, right before entering
+      // this bounded branch -- guidance/recognition only for the existing recovery order
+      // (see decisionPointCheckpoint.ts's own doc comment); never itself a verification
+      // mechanism.
+      state.captureCheckpoint(
+        captureDecisionPointCheckpoint({
+          branchId: branchRecord.branchId,
+          stepIndex,
+          observation,
+          activeSurfaceIdentity: state.activeSurface,
+          activeMilestoneIds: branchRecord.targetMilestoneCriterionIds ?? [],
+          remainingMilestoneConcepts: missingRequiredCriteriaIdsForEntry,
+          candidatesAlreadyAttempted: [],
+          routeDepth: branchRecord.depth,
+          ...(typeof task.metadata?.market === "string" ? { market: task.metadata.market } : {}),
+        }),
+      );
       if (entryReason === "milestone_recovery") {
         state.incrementAlternativeExplorationAttempts(preDispatchDecisionPointFingerprint);
         pushRouteAttemptDiagnostic({ state, branch: branchRecord, stepIndex, status: "candidate_selected" });

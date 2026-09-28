@@ -3540,3 +3540,64 @@ Additive only. `schemaVersion`/`outputSchemaVersion` moved `1.26.0` -> `1.27.0`
 (`task-response.schema.json`/`task-request.schema.json`). No existing field removed, renamed, or
 had its meaning changed; no new task-request field at all (the feature is entirely env-flag-
 gated, never a task JSON field).
+
+## 30. goBack timeout/classification fix, readiness reuse, decision-point checkpoint, and recovery-segment-source widening (2026-09-28)
+
+Production incident `run_b3743f06-1667-443e-b9fa-e804aa5caecf` (`decision_point_restore_failed`)
+traced to `src/actions/goBack.ts`'s own hardcoded 5000ms timeout/`waitUntil: "load"` wait,
+compounded by `src/core/journeyMemory/segmentBuilder.ts#buildRecoverySegments` only reading one
+of the three diagnostic sources a branch-return-hop restoration can actually write to. Full
+root-cause detail lives in `docs/journey-memory.md`'s "Journey Memory remediation pass" section;
+this entry only places the fix in the engine's own architecture, alongside §17/§20/§22/§27.
+
+- **`src/actions/goBack.ts`** now takes the same configurable `actionNavigationTimeoutMs` every
+  other action uses (wired through `src/actions/index.ts`'s `case "go_back"`, exactly like
+  click/navigate), and uses `page.goBack({ waitUntil: "commit" })` instead of the previous
+  default (`"load"`). It reports one of five explicit outcome states (`GoBackOutcome`:
+  `no_navigation`, `navigation_committed_restoration_unverified`, `restoration_verified`,
+  `blank_or_unusable_page`, `restoration_failed`) plus sanitized diagnostics (URL before/after,
+  whether the URL/document changed, whether navigation committed, the timeout used, whether
+  Playwright threw, and its error category). `restoration_verified` is never assigned by this
+  executor itself -- a changed URL alone is never sufficient; only `src/core/loop.ts`'s own
+  live-evidence re-observation (below) can confirm it.
+- **Readiness reuse (`src/core/loop.ts`)**: the branch-return-hop restoration path (the one that
+  actually throws `decision_point_restore_failed`, distinct from §22's anchor-hop path) no
+  longer treats `navigation_committed_restoration_unverified` as a hard failure. It falls
+  through to an existing, unchanged mechanism -- `waitForAdaptiveSettle`
+  (`src/core/robustNavigation.ts`, the same bounded DOM-mutation/interactive-element-count
+  settle probe every click/navigate settle point already shares) followed by the same
+  fingerprint check (`currentFingerprint === branch.decisionPointId`) the engine's own per-step
+  re-observation already performs on the *next* `runStep` call. No second, parallel readiness
+  framework was introduced.
+- **Decision-point checkpoint (`src/core/decisionPointCheckpoint.ts`)**: a small, bounded,
+  in-process-RAM-only object captured once, right before a bounded branch is entered
+  (`RunState.captureCheckpoint`, alongside `RouteMemory`/`branchHistory` inside the same
+  single-run `RunState` -- never a second memory system). It reuses
+  `computeDecisionPointFingerprint` (`src/core/routeMemory.ts`) and
+  `sanitizePageIdentity`/`buildSemanticSignature` (`src/core/journeyMemory/sanitizer.ts`)
+  rather than inventing new sanitization. Guidance/recognition only -- it never independently
+  verifies a milestone or forces an action -- and is discarded the moment its branch completes
+  (`RunState.archiveActiveBranch`) or at run end; never persisted, never surfaced on the
+  task-response wire schema.
+- **Recovery-segment-source widening (`buildRecoverySegments`)**: now normalizes and consumes
+  all three diagnostic sources a restoration can actually write to --
+  `RunState.recoveryAttemptDiagnostics` (unchanged, the anchor-hop path), and, newly,
+  `RunState.routeAttemptDiagnostics`/`alternativeCandidateDiagnostics` (the branch-return-hop
+  path). Each normalized segment is tagged `segmentSource` and deduped across sources; a
+  failed/unverified restoration is never reported with success-shaped confidence and never
+  overwrites a verified success. Still passes through the unchanged Tier1-4 abstraction
+  (`abstraction.ts`) and retention/precedence (`retention.ts`) pipeline before being written.
+- **Diagnostics**: `diagnostics.journeyMemory` was re-verified end to end and confirmed already
+  correctly attached whenever the feature is enabled; new, additive observability fields were
+  added regardless (`lookupAttempted`, `forwardSegmentsBuilt`, `recoverySegmentsBuilt`,
+  `segmentsWriteAttempted`, `writeFailureReason`, `diagnosticsAttached`,
+  `persistenceConfirmed`), plus a safe startup log and a safe run-completion log
+  (`src/core/journeyMemory/observability.ts`) independent of the HTTP response.
+
+### Schema impact
+
+Additive only. `actionResult` gains optional `goBackOutcome`/`goBackDiagnostics`.
+`$defs/journeyMemoryDiagnostics.version` moved `1.0.0` -> `1.1.0` for the new optional fields
+above plus required `diagnosticsAttached`. `schemaVersion`/`outputSchemaVersion` moved
+`1.27.0` -> `1.28.0`. No existing field removed, renamed, or had its unconditional meaning
+changed.

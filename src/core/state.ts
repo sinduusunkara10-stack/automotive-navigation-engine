@@ -12,6 +12,11 @@ import type {
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
+import {
+  isEquivalentCheckpoint,
+  MAX_DECISION_POINT_CHECKPOINTS,
+  type DecisionPointCheckpoint,
+} from "./decisionPointCheckpoint.js";
 import type {
   JourneyMemoryContext,
   JourneyMemoryRecoveryCallDiagnostic,
@@ -750,5 +755,41 @@ export class RunState {
     if (this.branchHistory.length > MAX_BRANCH_HISTORY) {
       this.branchHistory.splice(0, this.branchHistory.length - MAX_BRANCH_HISTORY);
     }
+    // Lightweight in-run decision-point checkpoint (Fix 3, production incident
+    // run_b3743f06-1667-443e-b9fa-e804aa5caecf): discarded the moment its own branch
+    // completes -- see decisionPointCheckpoint.ts's own doc comment. In-process RAM only;
+    // never persisted, never carried into a later branch.
+    this.discardCheckpointsForBranch(branch.branchId);
+  }
+
+  /**
+   * Lightweight in-run decision-point checkpoint (Fix 3): bounded, in-process-RAM-only,
+   * alongside routeMemory/branchHistory above -- see decisionPointCheckpoint.ts. Never
+   * persisted across runs, never surfaced on the task-response wire schema, and never
+   * itself independently verifies a milestone or forces an action -- guidance/recognition
+   * only, consumed by the existing recovery order (browser-history restoration first, then
+   * live-evidence comparison, then reconstruction as a last resort).
+   */
+  readonly checkpoints: DecisionPointCheckpoint[] = [];
+
+  /** Captures a checkpoint, deduping an equivalent one already tracked for the same branch, bounded to MAX_DECISION_POINT_CHECKPOINTS. */
+  captureCheckpoint(checkpoint: DecisionPointCheckpoint): void {
+    if (this.checkpoints.some((existing) => isEquivalentCheckpoint(existing, checkpoint))) {
+      return;
+    }
+    this.checkpoints.push(checkpoint);
+    if (this.checkpoints.length > MAX_DECISION_POINT_CHECKPOINTS) {
+      this.checkpoints.splice(0, this.checkpoints.length - MAX_DECISION_POINT_CHECKPOINTS);
+    }
+  }
+
+  getCheckpointForBranch(branchId: string): DecisionPointCheckpoint | undefined {
+    return this.checkpoints.find((c) => c.branchId === branchId);
+  }
+
+  discardCheckpointsForBranch(branchId: string): void {
+    const remaining = this.checkpoints.filter((c) => c.branchId !== branchId);
+    this.checkpoints.length = 0;
+    this.checkpoints.push(...remaining);
   }
 }
