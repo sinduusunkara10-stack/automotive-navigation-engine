@@ -126,7 +126,7 @@ function buildTask(params: {
     safety: {
       allowedActions: params.allowedActions ?? ["click", "wait", "go_back", "stop_success", "stop_blocked", "stop_failure"],
     },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
   };
 }
 

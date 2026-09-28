@@ -157,7 +157,7 @@ function buildTask(params: { startUrl: string }): TaskRequest {
     captureModules: ["cta_clicks", "errors"],
     limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 2 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
   };
 }
 

@@ -280,6 +280,12 @@ export interface SurfaceAdoptionAttemptDiagnostic {
   consentActionTaken?: boolean;
   /** Mirrors ActionResult.extendedAllowedDomain -- see its own doc comment. Set only on "adopted". */
   extendedAllowedDomain?: string;
+  /** Mirrors ActionResult.candidateSurfaceFingerprint -- see its own doc comment. Set on "adopted"/"rejected" whenever the relevance gate ran for this attempt. */
+  candidateSurfaceFingerprint?: string;
+  /** Mirrors ActionResult.fingerprintPreviouslySeen -- see its own doc comment. */
+  fingerprintPreviouslySeen?: boolean;
+  /** Mirrors ActionResult.popupReconsiderationReason -- see its own doc comment. */
+  popupReconsiderationReason?: "cached_no_new_evidence" | "bounded_reconsideration";
 }
 
 /**

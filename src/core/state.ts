@@ -207,6 +207,31 @@ export class RunState {
   readonly surfaceCloseGuardRedirected = new Set<string>();
 
   /**
+   * Popup fingerprinting and retry protection (surface-adoption corrective work, see
+   * core/surfaceFingerprint.ts): the last relevance outcome recorded for a given candidate
+   * surface fingerprint, so a repeated encounter of the *same* candidate (the same triggering
+   * click reopening the same host+path popup) can skip re-scoring and re-calling Claude
+   * entirely instead of repeating the exact same rejected assessment -- see
+   * capture-modules/popupCapture.ts's own use of this. Bounded in practice by how many
+   * genuinely distinct popups a single run's pages can open (small); never persisted beyond
+   * this run, never surfaced on TaskResponse beyond the diagnostics fields that already exist
+   * (SurfaceAdoptionAttemptDiagnostic).
+   */
+  private readonly popupFingerprintOutcomes = new Map<
+    string,
+    { tier: "adopt" | "reject" | "ambiguous"; score: number; attempts: number }
+  >();
+
+  getPopupFingerprintOutcome(fingerprint: string) {
+    return this.popupFingerprintOutcomes.get(fingerprint);
+  }
+
+  recordPopupFingerprintOutcome(fingerprint: string, tier: "adopt" | "reject" | "ambiguous", score: number): void {
+    const existing = this.popupFingerprintOutcomes.get(fingerprint);
+    this.popupFingerprintOutcomes.set(fingerprint, { tier, score, attempts: (existing?.attempts ?? 0) + 1 });
+  }
+
+  /**
    * Panel-attribution corrective pass (item 1/5): set when this step's own post-click check
    * satisfied a milestone using the just-opened (not yet formally tracked -- see
    * core/loop.ts's buildPanelMatchContext) panel's own evidence, so the very next step's

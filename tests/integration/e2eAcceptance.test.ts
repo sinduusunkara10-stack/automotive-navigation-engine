@@ -51,7 +51,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
       allowedActions: ["click", "capture", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       allowSurfaceAdoption: true,
     },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
     ...rest,
   };
 }

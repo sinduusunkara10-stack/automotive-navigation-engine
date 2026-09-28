@@ -335,6 +335,12 @@ export interface ActionResult {
    * attempted but failed, or no consent surface was ever detected on the candidate.
    */
   consentActionTaken?: boolean;
+  /** Popup fingerprinting and retry protection (surface-adoption corrective work, schemaVersion 1.30.0): see core/surfaceFingerprint.ts. Present whenever the relevance gate ran and the triggering click's stable identity was resolvable. */
+  candidateSurfaceFingerprint?: string;
+  /** True when candidateSurfaceFingerprint already had a recorded outcome from an earlier encounter this run. */
+  fingerprintPreviouslySeen?: boolean;
+  /** Present only when fingerprintPreviouslySeen is true -- see capture-modules/popupCapture.ts's FINGERPRINT_RECONSIDERATION_INTERVAL. */
+  popupReconsiderationReason?: "cached_no_new_evidence" | "bounded_reconsideration";
   /**
    * Surface adoption (Phase 3 PR 3, wired onto the wire in PR 6): present only when this
    * candidate was actually adopted (surfaceAdopted true) under
@@ -1350,7 +1356,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.29.0";
+  schemaVersion: "1.30.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

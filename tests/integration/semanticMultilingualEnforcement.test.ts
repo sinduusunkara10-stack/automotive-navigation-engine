@@ -95,7 +95,7 @@ function buildTask(overrides: Partial<TaskRequest> = {}): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
     ...overrides,
   };
 }

@@ -191,7 +191,7 @@ function scanPanelContainer(args: {
 export async function gatherPanelEvidence(
   page: Page,
   activeSurface: ActiveSurfaceInfo | undefined,
-  objectiveText: string,
+  objectiveTexts: string[],
 ): Promise<PanelEvidence | undefined> {
   if (!activeSurface || activeSurface.kind !== "in_document") {
     return undefined;
@@ -210,9 +210,17 @@ export async function gatherPanelEvidence(
     headings: raw.headings,
     interactiveText: raw.interactiveText,
   };
-  const score = raw.containerFound
-    ? scoreSemanticPageMatch(objectiveText, signals, ALL_SEMANTIC_SIGNALS).overall
-    : 0;
+  // Surface-adoption corrective work round 2 (mirrors core/surfaceRelevance.ts's own fix,
+  // "not the blended one" -- see that module's doc comment): each anchor (objective, every
+  // success-criterion description) is scored independently and the best match is taken,
+  // instead of folding them into one shared-denominator string. A panel that genuinely
+  // answers one later milestone must not be diluted below the adopt threshold by vocabulary
+  // from earlier, unrelated milestones it doesn't also restate.
+  const anchors = objectiveTexts.filter((text) => text.trim().length > 0);
+  const score =
+    raw.containerFound && anchors.length > 0
+      ? Math.max(...anchors.map((anchor) => scoreSemanticPageMatch(anchor, signals, ALL_SEMANTIC_SIGNALS).overall))
+      : 0;
   const tier: RelevanceTier =
     score >= RELEVANCE_ADOPT_THRESHOLD ? "adopt" : score <= RELEVANCE_REJECT_THRESHOLD ? "reject" : "ambiguous";
 

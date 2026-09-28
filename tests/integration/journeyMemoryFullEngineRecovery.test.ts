@@ -101,7 +101,7 @@ function runATask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 10, maxBacktracks: 4, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
   };
 }
 
@@ -120,7 +120,7 @@ function runBTask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 10, maxBacktracks: 4, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
   };
 }
 

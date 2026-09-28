@@ -88,7 +88,7 @@ function buildTask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: 1, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "wait", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
   };
 }
 

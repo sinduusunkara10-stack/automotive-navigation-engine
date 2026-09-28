@@ -47,7 +47,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
     captureModules: ["page_visits"],
     limits: { maxSteps: 10, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.30.0",
     ...rest,
   };
 }

@@ -10,11 +10,17 @@ import { waitForAdaptiveSettle, DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS
 import { decideSurfaceAdoption, DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN, type AdoptionRejectionReason } from "../core/surfaceAdoption.js";
 import {
   assessSurfaceRelevance,
+  type RelevanceTier,
   type SurfaceRelevanceAmbiguityResolver,
   type SurfaceRelevanceAssessment,
+  type SurfaceRelevanceMilestoneRef,
 } from "../core/surfaceRelevance.js";
+import { computeCandidateSurfaceFingerprint } from "../core/surfaceFingerprint.js";
 import { assessConsentSurface } from "../safety/consentClassifier.js";
 import { buildObservation, elementLocatorSelector } from "../observation/observationBuilder.js";
+
+/** Popup fingerprinting and retry protection: a repeat encounter of the same candidate is fully rescored once every this-many encounters (a bounded "materially new evidence" check without needing to re-read the page first, which would defeat the point of skipping work) -- every other repeat reuses the cached tier/score, skipping both the resettle pass and any Claude ambiguity call. See core/surfaceFingerprint.ts. */
+const FINGERPRINT_RECONSIDERATION_INTERVAL = 3;
 
 // Consent-only-candidate handling (surface-relevance corrective work, PR 4, see CLAUDE.md and
 // docs/architecture.md "Surface adoption"): same fixed, bounded click timeout
@@ -57,6 +63,24 @@ export interface SurfaceAdoptionRequest {
   relevanceObjectiveTexts?: string[];
   /** See core/surfaceRelevance.ts's own doc comment -- absent by default, same convention as safety/consentClassifier.ts's ConsentAmbiguityResolver. */
   relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  /** See core/surfaceRelevance.ts's SurfaceRelevanceAmbiguityContext -- optional, additive compact evidence forwarded to the Tier-3 resolver only if the ambiguous band is actually reached. */
+  ambiguityEvidence?: {
+    unfinishedMilestones?: SurfaceRelevanceMilestoneRef[];
+    completedMilestones?: SurfaceRelevanceMilestoneRef[];
+    journeyType?: string;
+    triggeringCtaAccessibleName?: string;
+  };
+  /**
+   * Popup fingerprinting and retry protection (see core/surfaceFingerprint.ts): the
+   * triggering click's own stable Route-Memory identity, when known -- used only to compute
+   * a cheap, sanitized candidate fingerprint before any relevance scoring runs. Never itself
+   * a personal-data or session field.
+   */
+  triggeringActionFingerprint?: string;
+  /** Read-only lookup into RunState's per-run fingerprint cache -- see RunState.getPopupFingerprintOutcome. Absent means "no fingerprinting", reproducing prior behaviour exactly (every candidate always fully scored). */
+  popupFingerprintLookup?: (fingerprint: string) => { tier: RelevanceTier; score: number; attempts: number } | undefined;
+  /** Write-only: records this assessment's outcome into RunState's fingerprint cache -- see RunState.recordPopupFingerprintOutcome. */
+  recordPopupFingerprintOutcome?: (fingerprint: string, tier: RelevanceTier, score: number) => void;
   /**
    * Consent-only-candidate handling (PR 4): gates the one, deterministic, policy-approved
    * consent-resolution attempt against a not-yet-adopted candidate whose only content (at the
@@ -98,6 +122,12 @@ export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
    * relevanceAssessment above.
    */
   consentOnlyCandidateHandling?: ConsentOnlyCandidateOutcome;
+  /** Popup fingerprinting and retry protection: the sanitized candidate fingerprint computed for this popup, when a triggeringActionFingerprint was available -- see core/surfaceFingerprint.ts. */
+  candidateSurfaceFingerprint?: string;
+  /** True when this exact fingerprint already had a recorded outcome from an earlier encounter this run. */
+  fingerprintPreviouslySeen?: boolean;
+  /** Present only when a previously-seen fingerprint's cached outcome was reused without rescoring -- see FINGERPRINT_RECONSIDERATION_INTERVAL. */
+  popupReconsiderationReason?: "cached_no_new_evidence" | "bounded_reconsideration";
 }
 
 /**
@@ -334,9 +364,64 @@ export async function adoptOrCapturePopup(params: {
   // satisfying "relevance-rejected surfaces must not consume maxAdoptedSurfacesPerRun" by
   // construction. Skipped entirely (byte-for-byte prior behaviour) when the caller never set
   // relevanceObjectiveTexts -- see SurfaceAdoptionRequest's own doc comment.
+  // Popup fingerprinting and retry protection (see core/surfaceFingerprint.ts): computed
+  // before any relevance scoring, from data already on hand (the candidate's own landing
+  // URL and the triggering click's stable identity) -- never from sensitive query
+  // parameters or page content. Absent (no fingerprint, or no lookup/record callbacks
+  // supplied) reproduces prior behaviour exactly: every candidate is always fully scored.
+  const candidateSurfaceFingerprint = surfaceAdoption.triggeringActionFingerprint
+    ? computeCandidateSurfaceFingerprint({
+        candidateUrl: popupUrl,
+        triggeringActionFingerprint: surfaceAdoption.triggeringActionFingerprint,
+      })
+    : undefined;
+  const priorFingerprintOutcome =
+    candidateSurfaceFingerprint && surfaceAdoption.popupFingerprintLookup
+      ? surfaceAdoption.popupFingerprintLookup(candidateSurfaceFingerprint)
+      : undefined;
+  const fingerprintPreviouslySeen = priorFingerprintOutcome !== undefined;
+  // A previously-adopted fingerprint is never cached here at all in practice (an adopted
+  // surface becomes the active page, not re-encountered as a fresh popup candidate) -- this
+  // guard exists only so a stale/manually-constructed cache entry can never suppress a fresh
+  // scoring pass for what would otherwise be treated as adoptable.
+  const reuseCachedRejection =
+    priorFingerprintOutcome !== undefined &&
+    priorFingerprintOutcome.tier !== "adopt" &&
+    priorFingerprintOutcome.attempts % FINGERPRINT_RECONSIDERATION_INTERVAL !== 0;
+
   let relevanceAssessment: SurfaceRelevanceAssessment | undefined;
   let consentOnlyCandidateHandling: ConsentOnlyCandidateOutcome | undefined;
+  let popupReconsiderationReason: AdoptOrCapturePopupResult["popupReconsiderationReason"];
+  if (reuseCachedRejection && priorFingerprintOutcome) {
+    // Same candidate (same triggering click reopening the same host+path), no bounded
+    // reconsideration due yet: reuse the cached tier/score rather than re-running the
+    // resettle pass or making another Claude ambiguity call for a result already known.
+    popupReconsiderationReason = "cached_no_new_evidence";
+    relevanceAssessment = {
+      relevant: false,
+      tier: priorFingerprintOutcome.tier,
+      score: priorFingerprintOutcome.score,
+      adoptThreshold: 0.35,
+      rejectThreshold: 0.08,
+      resettled: false,
+      resolvedViaModelAssist: false,
+      uncertain: priorFingerprintOutcome.tier === "ambiguous",
+      signals: { title: "", headings: [], interactiveText: [] },
+    };
+    const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
+    return {
+      ...captureResult,
+      adoptionRejectedReason: "relevance_rejected",
+      relevanceAssessment,
+      candidateSurfaceFingerprint,
+      fingerprintPreviouslySeen,
+      popupReconsiderationReason,
+    };
+  }
   if (surfaceAdoption.relevanceObjectiveTexts && surfaceAdoption.relevanceObjectiveTexts.length > 0) {
+    if (fingerprintPreviouslySeen) {
+      popupReconsiderationReason = "bounded_reconsideration";
+    }
     const budget = surfaceAdoption.maxAdoptedSurfacesPerRun ?? DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN;
     const budgetExhausted = surfaceAdoption.adoptedSurfaceCount >= budget;
     if (!budgetExhausted) {
@@ -357,6 +442,7 @@ export async function adoptOrCapturePopup(params: {
           objectiveTexts: surfaceAdoption.relevanceObjectiveTexts,
           settleCeilingMs,
           ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
+          ambiguityEvidence: surfaceAdoption.ambiguityEvidence,
         });
 
         // Consent-only-candidate handling (PR 4, widened per your reject-tier challenge --
@@ -391,6 +477,10 @@ export async function adoptOrCapturePopup(params: {
         consentOnlyCandidateHandling = undefined;
       }
 
+      if (relevanceAssessment && candidateSurfaceFingerprint && surfaceAdoption.recordPopupFingerprintOutcome) {
+        surfaceAdoption.recordPopupFingerprintOutcome(candidateSurfaceFingerprint, relevanceAssessment.tier, relevanceAssessment.score);
+      }
+
       if (relevanceAssessment && !relevanceAssessment.relevant) {
         const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
         return {
@@ -398,6 +488,9 @@ export async function adoptOrCapturePopup(params: {
           adoptionRejectedReason: "relevance_rejected",
           relevanceAssessment,
           ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
+          ...(candidateSurfaceFingerprint ? { candidateSurfaceFingerprint } : {}),
+          fingerprintPreviouslySeen,
+          ...(popupReconsiderationReason ? { popupReconsiderationReason } : {}),
         };
       }
     }
@@ -421,6 +514,9 @@ export async function adoptOrCapturePopup(params: {
       ...(decision.extendedAllowedDomain ? { extendedAllowedDomain: decision.extendedAllowedDomain } : {}),
       ...(relevanceAssessment ? { relevanceAssessment } : {}),
       ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
+      ...(candidateSurfaceFingerprint ? { candidateSurfaceFingerprint } : {}),
+      fingerprintPreviouslySeen,
+      ...(popupReconsiderationReason ? { popupReconsiderationReason } : {}),
     };
   }
 
@@ -430,5 +526,8 @@ export async function adoptOrCapturePopup(params: {
     adoptionRejectedReason: decision.reason,
     ...(relevanceAssessment ? { relevanceAssessment } : {}),
     ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
+    ...(candidateSurfaceFingerprint ? { candidateSurfaceFingerprint } : {}),
+    fingerprintPreviouslySeen,
+    ...(popupReconsiderationReason ? { popupReconsiderationReason } : {}),
   };
 }

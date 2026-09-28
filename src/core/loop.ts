@@ -183,12 +183,14 @@ async function buildPanelMatchContext(params: {
   justOpenedThisStep?: SurfaceCausingAction;
 }): Promise<PanelMatchContext | undefined> {
   const { page, state, task, observation, justOpenedThisStep } = params;
-  const objectiveText = [task.objective, ...task.successCriteria.map((c) => c.description)]
-    .filter(Boolean)
-    .join(" ");
+  // Scored independently per anchor by gatherPanelEvidence -- never blended into one string
+  // (see panelEvidence.ts's own doc comment, mirroring surfaceRelevance.ts's fix).
+  const objectiveTexts = [task.objective, ...task.successCriteria.map((c) => c.description)].filter(
+    (part): part is string => Boolean(part && part.trim().length > 0),
+  );
 
   if (justOpenedThisStep) {
-    const evidence = await gatherPanelEvidence(page, { kind: "in_document" }, objectiveText);
+    const evidence = await gatherPanelEvidence(page, { kind: "in_document" }, objectiveTexts);
     return {
       evidence,
       causallyLinked: justOpenedThisStep.verifiedSuccessType !== undefined,
@@ -202,7 +204,7 @@ async function buildPanelMatchContext(params: {
     return undefined;
   }
   const causingAction = state.getSurfaceCausingAction(state.activeSurface);
-  const evidence = await gatherPanelEvidence(page, observation.activeSurface, objectiveText);
+  const evidence = await gatherPanelEvidence(page, observation.activeSurface, objectiveTexts);
   return {
     evidence,
     causallyLinked: Boolean(causingAction && causingAction.verifiedSuccessType !== undefined),
@@ -1292,10 +1294,10 @@ export async function runStep(params: {
       const clickedEl = observation.interactiveElements.find((el) => el.id === effectiveAction.target);
       const looksLikeDismiss = looksLikeGenericDismissControl(clickedEl?.accessibleName);
       if (looksLikeDismiss) {
-        const relevanceObjectiveTextForGuard = [task.objective, ...task.successCriteria.map((c) => c.description)]
-          .filter(Boolean)
-          .join(" ");
-        const guardPanelEvidence = await gatherPanelEvidence(page, activeSurfaceForGuard, relevanceObjectiveTextForGuard);
+        const relevanceObjectiveTextsForGuard = [task.objective, ...task.successCriteria.map((c) => c.description)].filter(
+          (part): part is string => Boolean(part && part.trim().length > 0),
+        );
+        const guardPanelEvidence = await gatherPanelEvidence(page, activeSurfaceForGuard, relevanceObjectiveTextsForGuard);
         // Override (b): strong evidence the surface is unrelated to the objective -- the
         // same generic relevance scoring as item 1's negative-evidence signal.
         const unrelatedEvidence = guardPanelEvidence?.relevance.tier === "reject";
@@ -1858,6 +1860,30 @@ export async function runStep(params: {
       ].filter((part): part is string => Boolean(part && part.trim().length > 0))
     : [];
 
+  // Three-tier surface-adoption corrective work (Tier 3, see core/surfaceRelevance.ts):
+  // compact, sanitized evidence for the Claude ambiguity resolver, built only from data this
+  // engine already has -- task.successCriteria's own descriptions/ids, split by whether
+  // state.satisfiedCriteriaIds (the engine's own one-way ratchet of already-verified
+  // milestones) already contains each one. Never sends cookies, tokens, personal data, or
+  // raw HTML -- see SurfaceRelevanceAmbiguityContext's own doc comment.
+  const unfinishedMilestones = isClick
+    ? task.successCriteria
+        .filter((criterion) => !state.satisfiedCriteriaIds.has(criterion.id))
+        .map((criterion) => ({ id: criterion.id, description: criterion.description }))
+    : [];
+  const completedMilestones = isClick
+    ? task.successCriteria
+        .filter((criterion) => state.satisfiedCriteriaIds.has(criterion.id))
+        .map((criterion) => ({ id: criterion.id, description: criterion.description }))
+    : [];
+
+  // Popup fingerprinting and retry protection (see core/surfaceFingerprint.ts and
+  // RunState.getPopupFingerprintOutcome/recordPopupFingerprintOutcome): the SAME stable
+  // candidate identity Route Memory itself uses for this exact click (computeCandidateIdentity
+  // below, at routeCandidate, recomputes this independently once effectiveAction is settled --
+  // both calls are pure and always agree for the same (action, observation) pair).
+  const triggeringActionFingerprint = isClick ? computeCandidateIdentity(effectiveAction, observation)?.id : undefined;
+
   const surfaceAdoptionRequest: SurfaceAdoptionRequest | undefined = isClick
     ? {
         enabled: Boolean(task.safety.allowSurfaceAdoption),
@@ -1868,6 +1894,15 @@ export async function runStep(params: {
         ...(relevanceObjectiveTexts.length > 0 ? { relevanceObjectiveTexts } : {}),
         ...(relevanceAmbiguityResolver ? { relevanceAmbiguityResolver } : {}),
         ...(task.safety.consentInteractionPolicy ? { consentInteractionPolicy: task.safety.consentInteractionPolicy } : {}),
+        ambiguityEvidence: {
+          unfinishedMilestones,
+          completedMilestones,
+          ...(task.journeyType ? { journeyType: task.journeyType } : {}),
+          ...(clickedCtaAccessibleName ? { triggeringCtaAccessibleName: clickedCtaAccessibleName } : {}),
+        },
+        ...(triggeringActionFingerprint ? { triggeringActionFingerprint } : {}),
+        popupFingerprintLookup: (fingerprint) => state.getPopupFingerprintOutcome(fingerprint),
+        recordPopupFingerprintOutcome: (fingerprint, tier, score) => state.recordPopupFingerprintOutcome(fingerprint, tier, score),
       }
     : undefined;
 
@@ -1996,6 +2031,13 @@ export async function runStep(params: {
       ...(actionResult.relevanceScore !== undefined ? { relevanceScore: actionResult.relevanceScore } : {}),
       ...(actionResult.relevanceTier ? { relevanceTier: actionResult.relevanceTier } : {}),
       ...(actionResult.consentActionTaken ? { consentActionTaken: true } : {}),
+      ...(actionResult.candidateSurfaceFingerprint
+        ? { candidateSurfaceFingerprint: actionResult.candidateSurfaceFingerprint }
+        : {}),
+      ...(actionResult.fingerprintPreviouslySeen ? { fingerprintPreviouslySeen: true } : {}),
+      ...(actionResult.popupReconsiderationReason
+        ? { popupReconsiderationReason: actionResult.popupReconsiderationReason }
+        : {}),
     });
   }
   if (actionResult.adoptionRejectedReason && task.captureModules.includes("errors")) {
@@ -2467,6 +2509,33 @@ export async function runStep(params: {
     const fallbackUnverified = actionResult.fallbackVerified === false;
     const advanced = milestoneProgress || clickSideEffect || (urlChanged && !fallbackUnverified);
     state.routeMemory.record(preDispatchDecisionPointFingerprint, routeCandidate, advanced ? "advanced" : "no_change");
+  }
+
+  // Popup fingerprinting and retry protection (see core/surfaceFingerprint.ts): a *repeat*
+  // encounter of the same candidate whose popup is already known (from an earlier encounter
+  // this run) not to be adoptable -- the cached tier/score was reused rather than rescored,
+  // see popupReconsiderationReason -- marks this exact click, at this exact decision point,
+  // as a dead end in Route Memory's own branch-result vocabulary. This is the fix for the
+  // confirmed production failure where the same rejected popup kept being reopened until
+  // stale_target_recovery_exhausted: the click that opens a since-rejected popup is
+  // frequently NOT itself a "successful" action (actions/click.ts's own resolveUnactionable
+  // Click returns success:false whenever no destinationUrl-fallback evidence exists), so it
+  // is deliberately NOT gated on actionResult.success/the advanced-vs-no_change block above
+  // -- record() is called directly here (safe: RouteMemory.record always creates or updates
+  // its own map entry) so recordBranchResult's own "must already be record()ed" guard is
+  // always satisfied, reusing the existing, already-tested Alternative Route Exploration
+  // mechanism (state.getExhaustedCandidates) rather than inventing a second, parallel
+  // exhausted-candidate concept.
+  if (
+    actionResult.popupReconsiderationReason === "cached_no_new_evidence" &&
+    routeCandidate &&
+    preDispatchDecisionPointFingerprint
+  ) {
+    state.routeMemory.record(preDispatchDecisionPointFingerprint, routeCandidate, "failed");
+    state.routeMemory.recordBranchResult(preDispatchDecisionPointFingerprint, routeCandidate.id, {
+      depthReached: 0,
+      result: "blocked",
+    });
   }
 
   if (wantsCtaClickCapture && isClick) {

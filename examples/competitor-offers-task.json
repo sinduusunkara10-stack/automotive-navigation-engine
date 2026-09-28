@@ -46,7 +46,7 @@
     "allowPersonalDataEntry": false,
     "requireDomainConfirmationOnRedirect": true
   },
-  "outputSchemaVersion": "1.29.0",
+  "outputSchemaVersion": "1.30.0",
   "metadata": {
     "useCase": "competitor-offers-monitoring",
     "requestedBy": "n8n-workflow-demo"

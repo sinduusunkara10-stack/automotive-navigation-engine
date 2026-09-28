@@ -3665,3 +3665,16 @@ Additive only. `$defs/routeAttemptDiagnostic` gains optional `reObservationAttem
 renamed, or had its unconditional meaning changed. No new action type, no new
 waiting/readiness framework, no second memory system, zero extra Claude calls on a normal run,
 `JOURNEY_MEMORY_*` flags unchanged (still default off).
+
+### Surface-adoption three-tier corrective work (schemaVersion 1.29.0 -> 1.30.0)
+
+Additive only, wiring the Tier-3 Claude ambiguity resolver (reasoning/
+claudeSurfaceRelevanceAmbiguityResolver.ts) and popup fingerprinting/retry protection (core/
+surfaceFingerprint.ts) onto the wire. `ActionResult` and `$defs/surfaceAdoptionAttemptDiagnostic`
+each gain optional `candidateSurfaceFingerprint`, `fingerprintPreviouslySeen`,
+`popupReconsiderationReason`. No existing field removed, renamed, or had its unconditional
+meaning changed; `relevanceScore`/`relevanceTier`/`consentActionTaken`/`extendedAllowedDomain`
+are reused as-is rather than duplicated under new names. `relevanceAmbiguityResolver` is now
+wired to a real, Claude-backed implementation in `src/api/runner.ts` (previously always
+undefined in production, so the ambiguous relevance band always failed closed) -- no schema
+change, since the resolver itself was already part of the internal (non-wire) surface.
