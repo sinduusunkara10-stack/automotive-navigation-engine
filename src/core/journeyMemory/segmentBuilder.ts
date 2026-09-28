@@ -243,6 +243,72 @@ export function buildRecoverySegments(params: {
   });
 }
 
+/**
+ * Recovery-segment eligibility visibility fix (production incident
+ * run_fae0519a-ef71-46b9-a053-4ca82bb30000, Task 3 item 4: "expose an explicit diagnostic
+ * rejection reason rather than a silent zero"). Computed from the exact same three diagnostic
+ * sources and the exact same eligibility/dedup rules buildRecoverySegments itself applies
+ * (never a second, divergent notion of eligibility) -- kept as a separate, additive function
+ * rather than changing buildRecoverySegments's own return shape, so every existing caller of
+ * that function is unaffected.
+ */
+export function computeRecoveryEligibilityDiagnostics(params: {
+  attempts: RecoveryAttemptDiagnostic[];
+  routeAttempts?: RouteAttemptDiagnostic[];
+  alternativeCandidateAttempts?: AlternativeCandidateAttemptDiagnostic[];
+}): {
+  recoveryCandidatesBuilt: number;
+  recoveryCandidatesRejected: number;
+  recoveryRejectionReasons: { reason: string; count: number }[];
+} {
+  const { attempts, routeAttempts, alternativeCandidateAttempts } = params;
+  const rawRouteAttempts = routeAttempts ?? [];
+  const rawAlternativeCandidateAttempts = alternativeCandidateAttempts ?? [];
+
+  const rejectionReasons = new Map<string, number>();
+  const bump = (reason: string) => rejectionReasons.set(reason, (rejectionReasons.get(reason) ?? 0) + 1);
+
+  for (const attempt of rawRouteAttempts) {
+    const eligible = attempt.status === "anchor_restored" || (attempt.status === "candidate_exhausted" && Boolean(attempt.terminationReason));
+    if (!eligible) {
+      bump(
+        attempt.status === "candidate_exhausted"
+          ? "candidate_exhausted_missing_termination_reason"
+          : `non_terminal_route_status_${attempt.status}`,
+      );
+    }
+  }
+
+  const normalized = [
+    ...normalizeRecoveryAttempts(attempts),
+    ...normalizeRouteAttempts(rawRouteAttempts),
+    ...normalizeAlternativeCandidateAttempts(rawAlternativeCandidateAttempts),
+  ];
+  const candidatesBuilt = attempts.length + rawRouteAttempts.length + rawAlternativeCandidateAttempts.length;
+
+  const seen = new Set<string>();
+  let dedupedOutCount = 0;
+  for (const input of normalized) {
+    const key = dedupeKey(input);
+    if (seen.has(key)) {
+      dedupedOutCount += 1;
+      continue;
+    }
+    seen.add(key);
+  }
+  if (dedupedOutCount > 0) {
+    bump("deduplicated_cross_source");
+  }
+
+  const recoveryCandidatesRejected = candidatesBuilt - (normalized.length - dedupedOutCount);
+
+  return {
+    recoveryCandidatesBuilt: candidatesBuilt,
+    recoveryCandidatesRejected,
+    recoveryRejectionReasons: [...rejectionReasons.entries()].map(([reason, count]) => ({ reason, count })),
+  };
+}
+
 export function combineSegments(
   forward: ForwardMemorySegment[],
   recovery: RecoveryMemorySegment[],

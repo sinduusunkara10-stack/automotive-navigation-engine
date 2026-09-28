@@ -3601,3 +3601,67 @@ Additive only. `actionResult` gains optional `goBackOutcome`/`goBackDiagnostics`
 above plus required `diagnosticsAttached`. `schemaVersion`/`outputSchemaVersion` moved
 `1.27.0` -> `1.28.0`. No existing field removed, renamed, or had its unconditional meaning
 changed.
+
+## 31. Branch-return bounded re-observation, checkpoint reconstruction, and recovery-segment eligibility (2026-09-28, 2nd occurrence)
+
+A third production run (`run_fae0519a-ef71-46b9-a053-4ca82bb30000`) reached §30's own
+`navigation_committed_restoration_unverified` outcome (working as designed) but still ended in
+`decision_point_restore_failed`, with `reObservationAttempted: false`,
+`fallbackNavigationAttempted: false`, and `recoverySegmentsBuilt: 0` despite 4 forward
+segments being written that same run. Full root-cause detail lives in
+`docs/journey-memory.md`'s "Branch-return re-observation and checkpoint reconstruction"
+section; this entry only places the fix in the engine's own architecture, alongside §17/§20/
+§22/§27/§30.
+
+- **`src/core/branchReturnRecovery.ts` (new)**: `matchesDecisionPoint` (synchronous, against a
+  step's own already-built `Observation` -- never a second DOM read that could bypass or
+  reorder `loop.ts`'s own per-step preamble) and `reobserveForBranchReturn` (a fresh,
+  bounded live re-observation: `buildObservation`, then up to
+  `MAX_BOUNDED_SCROLL_DISCOVERY_ATTEMPTS` rounds of `executeScroll` +
+  `waitForAdaptiveSettle` + re-check). Both try the branch's own exact
+  `decisionPointId` fingerprint first, then fall back to a semantic-vocabulary match
+  (`scoreSemanticPageMatch`, `title`/`headings` signals only -- see below) against the
+  branch's `DecisionPointCheckpoint`. `loop.ts`'s branch-return-hop path -- both its
+  hop-budget-exhausted branch and its failed-go_back-dispatch branch -- now runs this bounded
+  re-observation before `decision_point_restore_failed` can fire.
+- **Checkpoint reconstruction wired in (§30's own explicitly-deferred piece)**:
+  `attemptCheckpointReconstruction` (same file) is the last-resort fallback, run only once the
+  above re-observation still cannot verify restoration. It navigates via the ordinary
+  `navigate` action's own `executeNavigate` mechanics to the checkpoint's already-sanitized URL
+  only, restores at most a bounded scroll position, then re-verifies through
+  `reobserveForBranchReturn`. `RunState.reconstructionAttemptedFingerprints` guards against
+  reconstructing to the same checkpoint fingerprint twice in one run. The checkpoint itself
+  never verifies anything -- only the live re-observation that follows it does.
+- **Semantic-match false-positive fix**: comparing a checkpoint's full `candidateMeanings`
+  (every interactive element visible at branch entry, including persistent/background/filler
+  controls) against a live page's own interactive-element signal let two genuinely different
+  pages sharing the same background chrome score a near-perfect match. Restoration
+  verification now scores only `title`/`headings` (never `interactiveElements`), drops
+  `candidateMeanings` from the checkpoint's own anchor text, and skips semantic matching
+  entirely when the anchor text tokenizes to fewer than 4 distinct words (a checkpoint with no
+  semantic milestones otherwise collapses to just the origin page's own short title, trivially
+  a substring of an unrelated page's longer one).
+- **`recoverySegmentsBuilt: 0` fix**: `pushRouteAttemptDiagnostic`/
+  `pushAlternativeCandidateDiagnostic` (`loop.ts`) previously no-op'd for any branch whose
+  `entryReason` was `"ambiguity"` -- but the branch-return-hop path that throws
+  `decision_point_restore_failed` runs for every closed branch regardless of entry reason, so
+  an ordinary ambiguity-entered branch's restore-failure was silently never recorded, and
+  `buildRecoverySegments` had nothing to build from. The guard is now `if (!branch.result)
+  return;`, with `anchorCriterionId` falling back to `branch.decisionPointId` when
+  `recoveryAnchorCriterionId` is absent. New `computeRecoveryEligibilityDiagnostics`
+  (`segmentBuilder.ts`) exposes the full accounting (`recoveryCandidatesBuilt`,
+  `recoveryCandidatesRejected`, `recoveryRejectionReasons`) rather than a silent zero, using
+  the same eligibility rules `buildRecoverySegments` itself applies. A failed/unverified
+  restoration still never overwrites or outranks a verified success.
+
+### Schema impact
+
+Additive only. `$defs/routeAttemptDiagnostic` gains optional `reObservationAttempted`,
+`reObservationOutcome`, `fallbackNavigationAttempted`, `fallbackNavigationUsed`,
+`checkpointMatched`, `reconstructionOutcome`, `finalLiveVerificationOutcome` (version `1.1.0`
+-> `1.2.0`). `$defs/journeyMemoryDiagnostics` gains optional `recoveryCandidatesBuilt`,
+`recoveryCandidatesRejected`, `recoveryRejectionReasons` (version `1.1.0` -> `1.2.0`).
+`schemaVersion`/`outputSchemaVersion` moved `1.28.0` -> `1.29.0`. No existing field removed,
+renamed, or had its unconditional meaning changed. No new action type, no new
+waiting/readiness framework, no second memory system, zero extra Claude calls on a normal run,
+`JOURNEY_MEMORY_*` flags unchanged (still default off).

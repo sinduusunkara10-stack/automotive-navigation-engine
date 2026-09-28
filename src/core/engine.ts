@@ -37,7 +37,12 @@ import {
 import { readJourneyMemoryFlags, readJourneyMemoryTimingConfig } from "../config/journeyMemoryConfig.js";
 import { createJourneyMemoryStore } from "./journeyMemory/storeFactory.js";
 import { retrieveJourneyMemoryContext, recordJourneySegments } from "./journeyMemory/service.js";
-import { buildForwardSegments, buildRecoverySegments, combineSegments } from "./journeyMemory/segmentBuilder.js";
+import {
+  buildForwardSegments,
+  buildRecoverySegments,
+  combineSegments,
+  computeRecoveryEligibilityDiagnostics,
+} from "./journeyMemory/segmentBuilder.js";
 import { sanitizePageIdentity, buildSemanticSignature } from "./journeyMemory/sanitizer.js";
 import { logJourneyMemoryStartup, logJourneyMemoryRunCompletion } from "./journeyMemory/observability.js";
 import type { JourneyMemoryStore } from "./journeyMemory/store.js";
@@ -433,6 +438,11 @@ export async function runTask(params: {
         evidenceTier: "tier1",
         schemaVersion: JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION,
       });
+      const recoveryEligibility = computeRecoveryEligibilityDiagnostics({
+        attempts: state.recoveryAttemptDiagnostics,
+        routeAttempts: state.routeAttemptDiagnostics,
+        alternativeCandidateAttempts: state.alternativeCandidateDiagnostics,
+      });
       const segments = combineSegments(forwardSegments, recoverySegments);
       const eligibleSegmentsCount = segments.length;
       const writeResult = await recordJourneySegments(
@@ -456,7 +466,7 @@ export async function runTask(params: {
             ? "partial_write_failure"
             : undefined;
       journeyMemoryDiagnostics = {
-        version: "1.1.0",
+        version: "1.2.0",
         enabled: true,
         readEnabled: journeyMemoryFlags.readEnabled,
         writeEnabled: journeyMemoryFlags.writeEnabled,
@@ -479,6 +489,9 @@ export async function runTask(params: {
         historicalContextTokenEstimate: state.journeyMemoryPromptTokenEstimate,
         forwardSegmentsBuilt: forwardSegments.length,
         recoverySegmentsBuilt: recoverySegments.length,
+        recoveryCandidatesBuilt: recoveryEligibility.recoveryCandidatesBuilt,
+        recoveryCandidatesRejected: recoveryEligibility.recoveryCandidatesRejected,
+        recoveryRejectionReasons: recoveryEligibility.recoveryRejectionReasons,
         segmentsWriteAttempted: writeAttempted ? eligibleSegmentsCount : 0,
         segmentsWritten: writeResult.segmentsWritten,
         ...(writeFailureReason ? { writeFailureReason } : {}),
@@ -609,7 +622,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.28.0",
+    schemaVersion: "1.29.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -622,7 +635,7 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.28.0",
+      schemaVersion: "1.29.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
     }),
@@ -641,7 +654,7 @@ function buildTerminalResponse(params: {
       ...(state.recoveryAttemptDiagnostics.length > 0 || state.routeAttemptDiagnostics.length > 0
         ? {
             recovery: {
-              version: "1.1.0" as const,
+              version: "1.2.0" as const,
               anchorsRecorded: state.recoveryAnchors.length,
               attempts: state.recoveryAttemptDiagnostics,
               routeAttempts: state.routeAttemptDiagnostics,

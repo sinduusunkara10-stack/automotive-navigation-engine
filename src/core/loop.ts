@@ -23,6 +23,7 @@ import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import { captureDecisionPointCheckpoint } from "./decisionPointCheckpoint.js";
+import { attemptCheckpointReconstruction, matchesDecisionPoint, reobserveForBranchReturn } from "./branchReturnRecovery.js";
 import type { RouteMemoryOutcome } from "../types/routeMemory.js";
 import { waitForAdaptiveSettle } from "./robustNavigation.js";
 import {
@@ -745,15 +746,36 @@ export async function runStep(params: {
       // branch depth: each hop is followed by a fresh fingerprint check (at the top of
       // the *next* runStep call, since that's when the next observation exists), not a
       // fixed count of go_backs dispatched blindly in a row.
-      if (currentFingerprint === branch.decisionPointId) {
+      // Task 1 fix (production incident run_fae0519a-ef71-46b9-a053-4ca82bb30000): this check
+      // previously required an exact fingerprint match only, which a page differing from the
+      // original decision point by even one incidental element/query-parameter (a
+      // slow-hydrating control, a session-scoped query string) could never satisfy -- exactly
+      // the shape of the production incident's own goBackOutcome
+      // "navigation_committed_restoration_unverified" case. matchesDecisionPoint
+      // (core/branchReturnRecovery.ts) keeps the exact check first and only falls back to a
+      // semantic match against this branch's own checkpoint (never against position/URL
+      // alone) when that fails -- reusing this step's own already-built, already
+      // preamble-processed `observation`, never a second DOM read that could bypass or
+      // reorder the drawer/consent/panel-evidence handling above.
+      const topOfStepMatch = matchesDecisionPoint(observation, branch.decisionPointId, state.getCheckpointForBranch(branch.branchId));
+      if (topOfStepMatch.verified) {
         branch.returnStatus = "restored";
-        pushRouteAttemptDiagnostic({ state, branch, stepIndex, status: "anchor_restored" });
+        pushRouteAttemptDiagnostic({
+          state,
+          branch,
+          stepIndex,
+          status: "anchor_restored",
+          reObservationAttempted: true,
+          reObservationOutcome: topOfStepMatch.matchBasis === "fingerprint" ? "verified_by_fingerprint" : "verified_by_semantic_match",
+          finalLiveVerificationOutcome: "restored",
+        });
         pushRouteAttemptDiagnostic({
           state,
           branch,
           stepIndex,
           status: "candidate_exhausted",
           terminationReason: branch.result,
+          finalLiveVerificationOutcome: "restored",
         });
         pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
         state.archiveActiveBranch();
@@ -765,49 +787,136 @@ export async function runStep(params: {
         state.backtrackCount >= task.limits.maxBacktracks ||
         state.stepCount + 1 >= task.limits.maxSteps
       ) {
-        branch.returnStatus = "restore_failed";
-        pushRouteAttemptDiagnostic({
-          state,
-          branch,
-          stepIndex,
-          status: "candidate_exhausted",
-          progressEvidence: "the recovery anchor could not be safely restored",
-          terminationReason: "anchor_restore_failed",
+        // Re-observation/reconstruction gap fix, Tasks 1+2 (production incident
+        // run_fae0519a-ef71-46b9-a053-4ca82bb30000): decision_point_restore_failed must never
+        // fire on the strength of the exact-fingerprint recheck alone. Before giving up, run
+        // one bounded live re-observation (fingerprint, then semantic match against the
+        // branch's own checkpoint, with bounded scroll discovery) and, only if that still
+        // can't verify restoration, one last-resort checkpoint-reconstruction navigation
+        // (PR #68's own explicitly-deferred piece) -- both reusing only existing
+        // waitForAdaptiveSettle/observation/navigate machinery, never a new framework.
+        const checkpointForBranch = state.getCheckpointForBranch(branch.branchId);
+        const lastChanceReObservation = await reobserveForBranchReturn({
+          page,
+          withActiveSurface: (o) => withActiveSurface(o, state),
+          decisionPointFingerprint: branch.decisionPointId,
+          checkpoint: checkpointForBranch,
+          settleCeilingMs,
         });
-        pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
-        state.archiveActiveBranch();
-        const forcedAction: SelectedAction = { type: "stop_blocked" };
-        state.recordAction(forcedAction, { url: observation.url, title: observation.title });
-        if (task.captureModules.includes("errors")) {
-          recordDiagnosticError(captures, {
+        let finalRestored = lastChanceReObservation.verified;
+        let finalObservation = lastChanceReObservation.observation;
+        let reconstruction: Awaited<ReturnType<typeof attemptCheckpointReconstruction>> | undefined;
+        if (!finalRestored) {
+          reconstruction = await attemptCheckpointReconstruction({
+            page,
+            withActiveSurface: (o) => withActiveSurface(o, state),
+            checkpoint: checkpointForBranch,
+            decisionPointFingerprint: branch.decisionPointId,
+            allowedDomains: effectiveAllowedDomains,
+            actionNavigationTimeoutMs,
+            settleCeilingMs,
+            captures,
+            captureModules: task.captureModules,
             stepIndex,
-            category: "safety_guard_stop",
-            severity: "critical",
-            pageUrl: observation.url,
-            message:
-              `Could not verify a return to the original decision point after bounded branch ` +
-              `"${branch.candidateLabel}" ended (${branch.result}); stopping the run rather than ` +
-              `continuing from an unverified position.`,
-            recoverable: false,
-            stoppedRun: true,
+            alreadyAttemptedFingerprints: state.reconstructionAttemptedFingerprints,
           });
+          if (reconstruction.finalLiveVerificationOutcome === "restored" && reconstruction.observation) {
+            finalRestored = true;
+            finalObservation = reconstruction.observation;
+          }
         }
-        const stepLog = buildStepLog({
-          stepIndex,
-          observation,
-          decision:
-            `The original decision point could not be safely restored after bounded branch ` +
-            `"${branch.candidateLabel}" ended (${branch.result}); stopping.`,
-          selectedAction: forcedAction,
-          actionResult: { success: true },
-          satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
-          successCriteria: task.successCriteria,
-          safetyFlags: ["branch_restore_failed"],
-          reObservationAttempted: false,
-          recoveryAttempts: 0,
-        });
-        recordJourneyPathEntry(captures, task.captureModules, stepLog);
-        return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
+
+        if (finalRestored) {
+          branch.returnStatus = "restored";
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: "anchor_restored",
+            progressEvidence: reconstruction?.used
+              ? "restoration verified via last-resort checkpoint reconstruction"
+              : `restoration verified via live re-observation (${lastChanceReObservation.matchBasis})`,
+            reObservationAttempted: true,
+            reObservationOutcome:
+              lastChanceReObservation.matchBasis === "fingerprint"
+                ? "verified_by_fingerprint"
+                : lastChanceReObservation.matchBasis === "semantic_match"
+                  ? "verified_by_semantic_match"
+                  : "not_verified",
+            fallbackNavigationAttempted: reconstruction?.attempted ?? false,
+            fallbackNavigationUsed: reconstruction?.used ?? false,
+            checkpointMatched: reconstruction?.checkpointMatched ?? Boolean(checkpointForBranch),
+            reconstructionOutcome: reconstruction?.outcome ?? "not_attempted",
+            finalLiveVerificationOutcome: "restored",
+          });
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: "candidate_exhausted",
+            terminationReason: branch.result,
+            finalLiveVerificationOutcome: "restored",
+          });
+          pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+          state.archiveActiveBranch();
+          state.markAnchorRecovered(branch.decisionPointId, stepIndex);
+          observation = finalObservation;
+          // Falls through below to a completely ordinary decision this same step, using the
+          // freshly re-observed live page rather than the pre-recovery observation.
+        } else {
+          branch.returnStatus = "restore_failed";
+          pushRouteAttemptDiagnostic({
+            state,
+            branch,
+            stepIndex,
+            status: "candidate_exhausted",
+            progressEvidence: "the recovery anchor could not be safely restored",
+            terminationReason: "anchor_restore_failed",
+            reObservationAttempted: true,
+            reObservationOutcome: "not_verified",
+            fallbackNavigationAttempted: reconstruction?.attempted ?? false,
+            fallbackNavigationUsed: reconstruction?.used ?? false,
+            checkpointMatched: reconstruction?.checkpointMatched ?? Boolean(checkpointForBranch),
+            reconstructionOutcome: reconstruction?.outcome ?? "not_attempted",
+            finalLiveVerificationOutcome: "restore_failed",
+          });
+          pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+          state.archiveActiveBranch();
+          const forcedAction: SelectedAction = { type: "stop_blocked" };
+          state.recordAction(forcedAction, { url: observation.url, title: observation.title });
+          if (task.captureModules.includes("errors")) {
+            recordDiagnosticError(captures, {
+              stepIndex,
+              category: "safety_guard_stop",
+              severity: "critical",
+              pageUrl: observation.url,
+              message:
+                `Could not verify a return to the original decision point after bounded branch ` +
+                `"${branch.candidateLabel}" ended (${branch.result}), even after live re-observation` +
+                `${reconstruction?.attempted ? " and a last-resort checkpoint-reconstruction attempt" : ""}; ` +
+                `stopping the run rather than continuing from an unverified position.`,
+              recoverable: false,
+              stoppedRun: true,
+            });
+          }
+          const stepLog = buildStepLog({
+            stepIndex,
+            observation: finalObservation,
+            decision:
+              `The original decision point could not be safely restored after bounded branch ` +
+              `"${branch.candidateLabel}" ended (${branch.result}), even after live re-observation` +
+              `${reconstruction?.attempted ? " and checkpoint reconstruction" : ""}; stopping.`,
+            selectedAction: forcedAction,
+            actionResult: { success: true },
+            satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+            successCriteria: task.successCriteria,
+            safetyFlags: ["branch_restore_failed"],
+            reObservationAttempted: true,
+            recoveryAttempts: reconstruction?.attempted ? 2 : 1,
+          });
+          recordJourneyPathEntry(captures, task.captureModules, stepLog);
+          return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
+        }
       } else {
         branch.returnHopsAttempted += 1;
         pushRouteAttemptDiagnostic({
@@ -864,8 +973,111 @@ export async function runStep(params: {
         const goBackCommittedUnverified = returnActionResult.goBackOutcome === "navigation_committed_restoration_unverified";
         if (goBackCommittedUnverified) {
           await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
+          // Task 1 fix (production incident run_fae0519a-ef71-46b9-a053-4ca82bb30000): this
+          // go_back committed (per actions/goBack.ts, the common case for every successful
+          // history navigation -- the executor itself never assigns "restoration_verified")
+          // but Playwright's own load-completion wait timed out. Deliberately never
+          // re-observes here with a fresh buildObservation() call -- that would read the live
+          // page ahead of, and so bypass/reorder, this same runStep function's own
+          // preamble (drawer/modal formalization, proactive consent handling, panel-evidence
+          // gathering -- all of which normally run once per step, right before this block, on
+          // exactly one canonical observation). Falls through to the ordinary "still
+          // returning" stepLog; the *next* runStep call's own top-of-function check
+          // (matchesDecisionPoint, above) is the real, bounded live re-observation this
+          // hop's restoration is verified against -- now with a semantic-match fallback, not
+          // only the previous brittle exact-fingerprint comparison -- so a page differing by
+          // one incidental control/query-parameter is still recognised, without ever bypassing
+          // this function's own per-step evidence-gathering order.
         }
         if (!returnActionResult.success && !goBackCommittedUnverified) {
+          // Re-observation/reconstruction gap fix, Tasks 1+2: a go_back that failed to
+          // execute at all is still a restore-failure event that never had live
+          // re-observation or checkpoint-reconstruction attempted against it. Give it the
+          // same bounded last-chance recovery as the hop-budget-exhausted path before
+          // declaring decision_point_restore_failed -- the page may still be in a genuinely
+          // recognisable, restorable state even though this particular hop's own dispatch
+          // reported failure.
+          const checkpointForBranch = state.getCheckpointForBranch(branch.branchId);
+          const lastChanceReObservation = await reobserveForBranchReturn({
+            page,
+            withActiveSurface: (o) => withActiveSurface(o, state),
+            decisionPointFingerprint: branch.decisionPointId,
+            checkpoint: checkpointForBranch,
+            settleCeilingMs,
+          });
+          let finalRestored = lastChanceReObservation.verified;
+          let finalObservation = lastChanceReObservation.observation;
+          let reconstruction: Awaited<ReturnType<typeof attemptCheckpointReconstruction>> | undefined;
+          if (!finalRestored) {
+            reconstruction = await attemptCheckpointReconstruction({
+              page,
+              withActiveSurface: (o) => withActiveSurface(o, state),
+              checkpoint: checkpointForBranch,
+              decisionPointFingerprint: branch.decisionPointId,
+              allowedDomains: effectiveAllowedDomains,
+              actionNavigationTimeoutMs,
+              settleCeilingMs,
+              captures,
+              captureModules: task.captureModules,
+              stepIndex,
+              alreadyAttemptedFingerprints: state.reconstructionAttemptedFingerprints,
+            });
+            if (reconstruction.finalLiveVerificationOutcome === "restored" && reconstruction.observation) {
+              finalRestored = true;
+              finalObservation = reconstruction.observation;
+            }
+          }
+
+          if (finalRestored) {
+            branch.returnStatus = "restored";
+            pushRouteAttemptDiagnostic({
+              state,
+              branch,
+              stepIndex,
+              status: "anchor_restored",
+              progressEvidence: reconstruction?.used
+                ? "restoration verified via last-resort checkpoint reconstruction after a failed return hop"
+                : `restoration verified via live re-observation (${lastChanceReObservation.matchBasis}) after a failed return hop`,
+              reObservationAttempted: true,
+              reObservationOutcome:
+                lastChanceReObservation.matchBasis === "fingerprint"
+                  ? "verified_by_fingerprint"
+                  : lastChanceReObservation.matchBasis === "semantic_match"
+                    ? "verified_by_semantic_match"
+                    : "not_verified",
+              fallbackNavigationAttempted: reconstruction?.attempted ?? false,
+              fallbackNavigationUsed: reconstruction?.used ?? false,
+              checkpointMatched: reconstruction?.checkpointMatched ?? Boolean(checkpointForBranch),
+              reconstructionOutcome: reconstruction?.outcome ?? "not_attempted",
+              finalLiveVerificationOutcome: "restored",
+            });
+            pushRouteAttemptDiagnostic({
+              state,
+              branch,
+              stepIndex,
+              status: "candidate_exhausted",
+              terminationReason: branch.result,
+              finalLiveVerificationOutcome: "restored",
+            });
+            pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+            state.archiveActiveBranch();
+            state.markAnchorRecovered(branch.decisionPointId, stepIndex);
+            const stepLog = buildStepLog({
+              stepIndex,
+              observation: finalObservation,
+              decision: `Branch return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget} for bounded branch "${branch.candidateLabel}" failed to execute, but live re-observation${reconstruction?.used ? " (via checkpoint reconstruction)" : ""} still verified restoration.`,
+              selectedAction: forcedAction,
+              actionResult: returnActionResult,
+              satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
+              successCriteria: task.successCriteria,
+              safetyFlags: ["branch_return_attempted"],
+              reObservationAttempted: true,
+              recoveryAttempts: reconstruction?.attempted ? 2 : 1,
+            });
+            recordJourneyPathEntry(captures, task.captureModules, stepLog);
+            return { stepLog };
+          }
+
           branch.returnStatus = "restore_failed";
           pushRouteAttemptDiagnostic({
             state,
@@ -874,6 +1086,13 @@ export async function runStep(params: {
             status: "candidate_exhausted",
             progressEvidence: "the return hop itself failed to execute",
             terminationReason: "go_back_failed",
+            reObservationAttempted: true,
+            reObservationOutcome: "not_verified",
+            fallbackNavigationAttempted: reconstruction?.attempted ?? false,
+            fallbackNavigationUsed: reconstruction?.used ?? false,
+            checkpointMatched: reconstruction?.checkpointMatched ?? Boolean(checkpointForBranch),
+            reconstructionOutcome: reconstruction?.outcome ?? "not_attempted",
+            finalLiveVerificationOutcome: "restore_failed",
           });
           pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
           state.archiveActiveBranch();
@@ -884,22 +1103,22 @@ export async function runStep(params: {
               severity: "critical",
               pageUrl: observation.url,
               actionType: "go_back",
-              message: `A return hop toward the original decision point failed to execute (${returnActionResult.error ?? "unknown error"}); stopping.`,
+              message: `A return hop toward the original decision point failed to execute (${returnActionResult.error ?? "unknown error"}), and live re-observation${reconstruction?.attempted ? " plus checkpoint reconstruction" : ""} could not verify restoration either; stopping.`,
               recoverable: false,
               stoppedRun: true,
             });
           }
           const stepLog = buildStepLog({
             stepIndex,
-            observation,
-            decision: `Branch return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget} for bounded branch "${branch.candidateLabel}" failed to execute; the original decision point could not be restored.`,
+            observation: finalObservation,
+            decision: `Branch return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget} for bounded branch "${branch.candidateLabel}" failed to execute; the original decision point could not be restored, even after live re-observation${reconstruction?.attempted ? " and checkpoint reconstruction" : ""}.`,
             selectedAction: forcedAction,
             actionResult: returnActionResult,
             satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
             successCriteria: task.successCriteria,
             safetyFlags: ["branch_restore_failed"],
-            reObservationAttempted: false,
-            recoveryAttempts: 0,
+            reObservationAttempted: true,
+            recoveryAttempts: reconstruction?.attempted ? 2 : 1,
           });
           recordJourneyPathEntry(captures, task.captureModules, stepLog);
           return { stepLog, terminal: "blocked", finishReason: "decision_point_restore_failed" };
@@ -2529,7 +2748,11 @@ export async function runStep(params: {
  */
 function pushAlternativeCandidateDiagnostic(params: { state: RunState; branch: BranchRecord; stepIndex: number; budget: number }): void {
   const { state, branch, stepIndex, budget } = params;
-  if (branch.entryReason !== "milestone_recovery" || !branch.recoveryAnchorCriterionId || !branch.result) {
+  // Recovery-segment-gap fix, part 1 (see pushRouteAttemptDiagnostic's own comment above):
+  // no longer restricted to "milestone_recovery"-entered branches -- an "ambiguity"-entered
+  // branch's own outcome is exactly as real a recovery-diagnostic event, and previously
+  // silently dropped it entirely.
+  if (!branch.result) {
     return;
   }
   const progressResult: RouteMemoryOutcome =
@@ -2542,7 +2765,7 @@ function pushAlternativeCandidateDiagnostic(params: { state: RunState; branch: B
           : "failed";
   state.alternativeCandidateDiagnostics.push({
     anchorFingerprint: branch.decisionPointId,
-    anchorCriterionId: branch.recoveryAnchorCriterionId,
+    anchorCriterionId: branch.recoveryAnchorCriterionId ?? branch.decisionPointId,
     candidateId: branch.candidateId,
     candidateLabel: branch.candidateLabel,
     stepIndex,
@@ -2568,14 +2791,41 @@ function pushRouteAttemptDiagnostic(params: {
   status: RouteStatus;
   progressEvidence?: string;
   terminationReason?: string;
+  reObservationAttempted?: boolean;
+  reObservationOutcome?: "verified_by_fingerprint" | "verified_by_semantic_match" | "not_verified";
+  fallbackNavigationAttempted?: boolean;
+  fallbackNavigationUsed?: boolean;
+  checkpointMatched?: boolean;
+  reconstructionOutcome?: "not_attempted" | "verified" | "unverified" | "skipped_fingerprint_guard" | "skipped_no_checkpoint";
+  finalLiveVerificationOutcome?: "restored" | "unverified" | "restore_failed";
 }): void {
-  const { state, branch, stepIndex, status, progressEvidence, terminationReason } = params;
-  if (branch.entryReason !== "milestone_recovery" || !branch.recoveryAnchorCriterionId) {
-    return;
-  }
+  const {
+    state,
+    branch,
+    stepIndex,
+    status,
+    progressEvidence,
+    terminationReason,
+    reObservationAttempted,
+    reObservationOutcome,
+    fallbackNavigationAttempted,
+    fallbackNavigationUsed,
+    checkpointMatched,
+    reconstructionOutcome,
+    finalLiveVerificationOutcome,
+  } = params;
+  // Recovery-segment-gap fix, part 1 (production incident run_fae0519a-ef71-46b9-a053-4ca82bb30000):
+  // previously silently no-op'd for any "ambiguity"-entered branch (no recoveryAnchorCriterionId
+  // ever exists for that entry path), which meant every branch-return-hop restore-failure or
+  // -success on that path -- including the production incident's own branch -- was invisible
+  // to TaskResponse.diagnostics.recovery.routeAttempts and, downstream, to
+  // journeyMemory/segmentBuilder.ts's buildRecoverySegments (see engine.ts). Every branch now
+  // gets a real diagnostic record, falling back to the branch's own decisionPointId as the
+  // anchor identity when no milestone-anchored recoveryAnchorCriterionId exists -- still a
+  // stable, sanitization-safe string, never page content.
   state.routeAttemptDiagnostics.push({
     anchorFingerprint: branch.decisionPointId,
-    anchorCriterionId: branch.recoveryAnchorCriterionId,
+    anchorCriterionId: branch.recoveryAnchorCriterionId ?? branch.decisionPointId,
     candidateId: branch.candidateId,
     candidateLabel: branch.candidateLabel,
     candidateRank: branch.candidateRank,
@@ -2590,6 +2840,13 @@ function pushRouteAttemptDiagnostic(params: {
     ...(progressEvidence ? { progressEvidence } : {}),
     consentInterruptionsHandled: branch.consentInterruptionsHandled,
     ...(terminationReason ? { terminationReason } : {}),
+    ...(reObservationAttempted !== undefined ? { reObservationAttempted } : {}),
+    ...(reObservationOutcome ? { reObservationOutcome } : {}),
+    ...(fallbackNavigationAttempted !== undefined ? { fallbackNavigationAttempted } : {}),
+    ...(fallbackNavigationUsed !== undefined ? { fallbackNavigationUsed } : {}),
+    ...(checkpointMatched !== undefined ? { checkpointMatched } : {}),
+    ...(reconstructionOutcome ? { reconstructionOutcome } : {}),
+    ...(finalLiveVerificationOutcome ? { finalLiveVerificationOutcome } : {}),
   });
 }
 

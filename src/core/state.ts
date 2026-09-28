@@ -792,4 +792,15 @@ export class RunState {
     this.checkpoints.length = 0;
     this.checkpoints.push(...remaining);
   }
+
+  /**
+   * Checkpoint-reconstruction loop guard (Task 2, production incident
+   * run_fae0519a-ef71-46b9-a053-4ca82bb30000): every DecisionPointCheckpoint.fingerprint this
+   * run has already attempted a reconstruction navigation for -- see
+   * core/branchReturnRecovery.ts's attemptCheckpointReconstruction, which refuses to
+   * reconstruct to the same fingerprint twice. Run-scoped (never cleared mid-run), so even a
+   * later, different branch that happens to recapture an equivalent checkpoint at the same
+   * decision point cannot spend a second unbounded reconstruction attempt against it.
+   */
+  readonly reconstructionAttemptedFingerprints = new Set<string>();
 }
