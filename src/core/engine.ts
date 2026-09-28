@@ -39,6 +39,7 @@ import { createJourneyMemoryStore } from "./journeyMemory/storeFactory.js";
 import { retrieveJourneyMemoryContext, recordJourneySegments } from "./journeyMemory/service.js";
 import { buildForwardSegments, buildRecoverySegments, combineSegments } from "./journeyMemory/segmentBuilder.js";
 import { sanitizePageIdentity, buildSemanticSignature } from "./journeyMemory/sanitizer.js";
+import { logJourneyMemoryStartup, logJourneyMemoryRunCompletion } from "./journeyMemory/observability.js";
 import type { JourneyMemoryStore } from "./journeyMemory/store.js";
 import { analyzeHost } from "../discovery/registrableDomain.js";
 import type { JourneyMemoryDiagnostics } from "../types/journeyMemory.js";
@@ -352,6 +353,7 @@ export async function runTask(params: {
     // docs/journey-memory.md. Never throws: createJourneyMemoryStore/retrieval both fail
     // safe on any Redis error, absence, or timeout.
     const journeyMemoryFlags = readJourneyMemoryFlags();
+    logJourneyMemoryStartup(journeyMemoryFlags);
     const journeyMemoryTiming = readJourneyMemoryTimingConfig();
     const journeyMemoryStore = journeyMemoryFlags.enabled
       ? (params.journeyMemoryStore ?? (await createJourneyMemoryStore(journeyMemoryFlags, journeyMemoryTiming)))
@@ -422,6 +424,8 @@ export async function runTask(params: {
       });
       const recoverySegments = buildRecoverySegments({
         attempts: state.recoveryAttemptDiagnostics,
+        routeAttempts: state.routeAttemptDiagnostics,
+        alternativeCandidateAttempts: state.alternativeCandidateDiagnostics,
         steps,
         runId: effectiveTask.taskId,
         registrableDomain: currentRegistrableDomain,
@@ -430,6 +434,7 @@ export async function runTask(params: {
         schemaVersion: JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION,
       });
       const segments = combineSegments(forwardSegments, recoverySegments);
+      const eligibleSegmentsCount = segments.length;
       const writeResult = await recordJourneySegments(
         journeyMemoryStore,
         journeyMemoryFlags,
@@ -437,13 +442,27 @@ export async function runTask(params: {
         journeyMemoryTiming.maxRecordsPerDomain,
       );
       const context = state.journeyMemory;
+      // Production diagnostics visibility fix (run_b3743f06-1667-443e-b9fa-e804aa5caecf):
+      // segmentsWriteAttempted/writeFailureReason let a caller distinguish "zero eligible
+      // segments" from "a write was attempted but nothing was actually persisted" --
+      // recordJourneySegments fails safe (never throws), so a mismatch between
+      // eligibleSegmentsCount>0 and segmentsWritten===0 here is the only signal of a
+      // swallowed write failure, never itself a reason to fail the run.
+      const writeAttempted = journeyMemoryFlags.writeEnabled && journeyMemoryStore !== undefined && eligibleSegmentsCount > 0;
+      const writeFailureReason =
+        writeAttempted && writeResult.segmentsWritten === 0
+          ? "write_failed_or_all_rejected"
+          : writeAttempted && writeResult.segmentsWritten < eligibleSegmentsCount
+            ? "partial_write_failure"
+            : undefined;
       journeyMemoryDiagnostics = {
-        version: "1.0.0",
+        version: "1.1.0",
         enabled: true,
         readEnabled: journeyMemoryFlags.readEnabled,
         writeEnabled: journeyMemoryFlags.writeEnabled,
         storageAvailable: context?.storageAvailable ?? journeyMemoryStore !== undefined,
         lookupCompleted: context?.lookupCompleted ?? false,
+        lookupAttempted: journeyMemoryFlags.enabled && journeyMemoryFlags.readEnabled,
         ...(context ? { lookupDurations: context.durations } : {}),
         candidatesConsidered: context?.candidatesConsidered ?? 0,
         candidatesAccepted: context?.accepted.length ?? 0,
@@ -458,10 +477,37 @@ export async function runTask(params: {
           : {}),
         historicalContextRecordCount: state.journeyMemoryPromptRecordCount,
         historicalContextTokenEstimate: state.journeyMemoryPromptTokenEstimate,
+        forwardSegmentsBuilt: forwardSegments.length,
+        recoverySegmentsBuilt: recoverySegments.length,
+        segmentsWriteAttempted: writeAttempted ? eligibleSegmentsCount : 0,
         segmentsWritten: writeResult.segmentsWritten,
+        ...(writeFailureReason ? { writeFailureReason } : {}),
         confidenceChanges: writeResult.confidenceChanges,
         ...(context?.unavailableReason ? { unavailableReason: context.unavailableReason } : {}),
+        diagnosticsAttached: true,
       };
+
+      // Production diagnostics visibility fix: a safe, server-side-only completion log
+      // (runId/taskId, storage availability, lookup/segment counts, write outcome -- never
+      // secrets, cookies, or page content) independent of what the HTTP response actually
+      // carries, so "the deployment ran different code than expected" is distinguishable
+      // from "the response field was silently dropped downstream" without needing to
+      // reproduce the run.
+      logJourneyMemoryRunCompletion({
+        runId: effectiveTask.taskId,
+        taskId: task.taskId,
+        storageAvailable: journeyMemoryDiagnostics.storageAvailable,
+        lookupAttempted: journeyMemoryDiagnostics.lookupAttempted ?? false,
+        candidatesConsidered: journeyMemoryDiagnostics.candidatesConsidered,
+        candidatesAccepted: journeyMemoryDiagnostics.candidatesAccepted,
+        candidatesRejected: journeyMemoryDiagnostics.candidatesRejected,
+        forwardSegmentsBuilt: journeyMemoryDiagnostics.forwardSegmentsBuilt ?? 0,
+        recoverySegmentsBuilt: journeyMemoryDiagnostics.recoverySegmentsBuilt ?? 0,
+        segmentsWriteAttempted: journeyMemoryDiagnostics.segmentsWriteAttempted ?? 0,
+        segmentsWritten: journeyMemoryDiagnostics.segmentsWritten,
+        writeFailureReason: journeyMemoryDiagnostics.writeFailureReason,
+        diagnosticsAttached: true,
+      });
     }
 
     return buildTerminalResponse({
@@ -563,7 +609,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.27.0",
+    schemaVersion: "1.28.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -576,7 +622,7 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.27.0",
+      schemaVersion: "1.28.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
     }),

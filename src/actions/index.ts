@@ -69,7 +69,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     case "wait":
       return executeWait(page, action);
     case "go_back":
-      return executeGoBack(page);
+      return executeGoBack(page, actionNavigationTimeoutMs);
     case "navigate":
       return executeNavigate({
         page,

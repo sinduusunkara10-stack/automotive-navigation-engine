@@ -13,6 +13,46 @@ route segments (e.g. reaching a configurator, clicking Continue, reaching a fina
 unavailable to inform a later, unfamiliar decision point's recovery. This feature makes that
 evidence available across runs, safely and boundedly.
 
+## Journey Memory remediation pass (2026-09-28)
+
+A second, production `decision_point_restore_failed` run
+(`run_b3743f06-1667-443e-b9fa-e804aa5caecf`) traced to two bugs distinct from the "Why" above,
+both now fixed:
+
+1. **`src/actions/goBack.ts`** used a hardcoded 5000ms `page.goBack()` timeout waiting for
+   Playwright's default `waitUntil: "load"`, and reported hard failure on timeout without
+   ever checking `page.url()` first -- so a slow-settling SPA that had genuinely reached its
+   target URL after 5s was misclassified as a restore failure. It now uses the same
+   configurable `actionNavigationTimeoutMs` mechanism click/navigate already use, and
+   `waitUntil: "commit"`, with explicit outcome states (`no_navigation`,
+   `navigation_committed_restoration_unverified`, `restoration_verified`,
+   `blank_or_unusable_page`, `restoration_failed` -- see `GoBackOutcome`). A genuinely
+   committed, non-blank URL is now handed to the engine's existing per-step re-observation
+   (`src/core/loop.ts`'s fingerprint check) for live verification, rather than being reported
+   as a hard failure on the strength of a Playwright-level timeout alone.
+2. **`buildRecoverySegments`** (`src/core/journeyMemory/segmentBuilder.ts`) only read
+   `RunState.recoveryAttemptDiagnostics` (the anchor-hop recovery path) -- but the
+   branch-return-hop path that actually throws `decision_point_restore_failed` writes to
+   `RunState.routeAttemptDiagnostics`/`alternativeCandidateDiagnostics` instead, so those
+   restore-failure events were never captured as journey-memory recovery segments at all.
+   `buildRecoverySegments` now normalizes and consumes all three sources (tagged
+   `segmentSource: "recovery_attempt" | "route_attempt" | "alternative_candidate"`, deduped
+   across sources), still through the same Tier1-4 abstraction/retention pipeline unchanged.
+
+This pass also added a small, bounded, **in-process-RAM-only** decision-point checkpoint
+(`src/core/decisionPointCheckpoint.ts`) captured just before entering a bounded branch --
+guidance/recognition only, alongside `RouteMemory`/`branchHistory` inside the same single-run
+`RunState`, never persisted, never a second memory system, and never itself independently
+verifying a milestone. It is discarded when its branch completes or the run ends.
+
+`diagnostics.journeyMemory` was re-verified end to end (flag parsing through the GET-result
+endpoint) and confirmed already correctly attached whenever `enabled` resolves true; no bug
+was found in that path. Observability was still added: a safe startup log of resolved flags,
+a safe run-completion log independent of the HTTP response, and new additive
+`diagnostics.journeyMemory` fields -- `lookupAttempted`, `forwardSegmentsBuilt`,
+`recoverySegmentsBuilt`, `segmentsWriteAttempted`, `writeFailureReason`, `diagnosticsAttached`,
+`persistenceConfirmed` (see `$defs/journeyMemoryDiagnostics`, version `1.1.0`).
+
 ## Design summary
 
 - **Storage**: Redis, keyspace `nav-engine:journey-memory:*` (separate from the existing
@@ -201,28 +241,47 @@ themselves, never as claims already verified by this repo's own tests.
 A short, owner-run procedure for verifying this feature end to end against the real Render
 Redis instance, once the checklist above is satisfied. This repo's own tests already prove
 the code paths below work against a Redis test-double (see "What's verified where"); this
-procedure is what additionally confirms them against the real, deployed Redis.
+procedure is what additionally confirms them against the real, deployed Redis. **Write-only
+mode (step 1) stays the recommended state until every step below has been confirmed once --
+do not enable read mode (step 6) before then.**
 
 1. Set `JOURNEY_MEMORY_ENABLED=true`, `JOURNEY_MEMORY_READ_ENABLED=false`,
    `JOURNEY_MEMORY_WRITE_ENABLED=true` (write-only mode) on the service.
-2. Run one controlled navigation task against a real or staging target.
-3. Confirm sanitized segments appear in Redis -- via the owner's own inspection
-   (`redis-cli --scan --pattern 'nav-engine:journey-memory:*'` or Render's Key Value
-   browser), not via this repo's own diagnostics alone.
-4. Restart/redeploy the service.
-5. Confirm the records written in step 3 are still present after the restart (persistence
-   checklist item above).
-6. Switch the service to full read+write (`JOURNEY_MEMORY_READ_ENABLED`/
-   `JOURNEY_MEMORY_WRITE_ENABLED` unset, or both explicitly `true`).
-7. Run a second, related navigation task.
-8. Confirm that run's response carries `diagnostics.journeyMemory` showing retrieval
-   actually happened (`lookupCompleted: true`, `candidatesConsidered > 0`) and, if the
-   escalation signal fired, `guidanceUsed: true`.
-9. Confirm, via that same response's normal `steps[]`/`engineAssessment.
-   satisfiedSuccessCriteriaIds` evidence (never from `diagnostics.journeyMemory` alone), that
-   the second run genuinely re-executed and re-verified the live journey rather than
-   short-circuiting from memory -- e.g. its own `steps[]` show real navigation/clicks, and
-   every satisfied criterion has a corresponding live step where it was actually observed.
+2. Run one controlled navigation task against a real or staging target, ideally one that
+   exercises at least one bounded branch/recovery so a recovery segment (not only a forward
+   one) is produced.
+3. Confirm `diagnostics.journeyMemory.storageAvailable === true` on that run's response.
+4. Confirm `diagnostics.journeyMemory.segmentsWriteAttempted > 0` where eligible (i.e. the
+   run produced at least one forward or recovery segment -- `forwardSegmentsBuilt +
+   recoverySegmentsBuilt > 0`).
+5. Confirm `diagnostics.journeyMemory.segmentsWritten > 0` (and, if it is ever less than
+   `segmentsWriteAttempted`, note `writeFailureReason` -- a partial/failed write never fails
+   the run itself, but should not be silently ignored here).
+6. Check the real Redis instance directly and confirm the **only** keyspace touched is
+   `nav-engine:journey-memory:*` (`redis-cli --scan --pattern 'nav-engine:journey-memory:*'`
+   or Render's own Key Value browser) -- no other keyspace should have been written to.
+7. Confirm the TTL on a sampled key (`redis-cli TTL <key>`) is a positive value at or below
+   `JOURNEY_MEMORY_RETENTION_DAYS` worth of seconds (default 90 days), not -1/no-expiry.
+8. Restart/redeploy the service, on a Render plan the owner has confirmed supports it (this
+   repo makes no claim about which plan is active -- that stays owner-only, see the
+   checklist above). Confirm the records written in steps 3-5 are still present and readable
+   after the restart, where the plan supports persistence across restarts.
+9. Confirm, by eyeballing a few of those Redis values directly, that only sanitized content
+   is present -- no raw URLs, query strings, tokens, cookies, or PII (sanitizer.ts's own
+   design intends this to always be true; this step is the owner's own independent visual
+   confirmation).
+10. **Only once steps 1-9 have all been confirmed**, switch the service to full read+write
+    (`JOURNEY_MEMORY_READ_ENABLED`/`JOURNEY_MEMORY_WRITE_ENABLED` unset, or both explicitly
+    `true`).
+11. Run a second, related navigation task.
+12. Confirm that run's response carries `diagnostics.journeyMemory` showing retrieval
+    actually happened (`lookupAttempted: true`, `lookupCompleted: true`,
+    `candidatesConsidered > 0`) and, if the escalation signal fired, `guidanceUsed: true`.
+13. Confirm, via that same response's normal `steps[]`/`engineAssessment.
+    satisfiedSuccessCriteriaIds` evidence (never from `diagnostics.journeyMemory` alone), that
+    the second run genuinely re-executed and re-verified the live journey rather than
+    short-circuiting from memory -- e.g. its own `steps[]` show real navigation/clicks, and
+    every satisfied criterion has a corresponding live step where it was actually observed.
 
 ## What's verified where
 

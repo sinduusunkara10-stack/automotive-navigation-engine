@@ -198,13 +198,13 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.26.0",
+    schemaVersion: "1.27.0",
     taskId: "branch-exploration",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.27.0",
+    outputSchemaVersion: "1.28.0",
     ...overrides,
   };
 }
@@ -496,6 +496,52 @@ test("a branch that loops back to a decision point it already visited closes as 
     // never assumed, always driven by the fingerprint check.
     const branchReturnSteps = response.steps.filter((s) => s.safetyFlags?.includes("branch_return_attempted"));
     assert.equal(branchReturnSteps.length, 3, "expected exactly depth+1 (2+1=3) return hops");
+    assert.ok(branchReturnSteps.every((s) => s.selectedAction.type === "go_back"));
+
+    const validation = await validateAgainstTaskResponseSchema(response);
+    assert.ok(validation.valid, validation.errorsText);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("goBack timeout/classification fix (production incident run_b3743f06-1667-443e-b9fa-e804aa5caecf): the same bounded, fingerprint-verified multi-hop branch return still completes correctly under a much tighter (but locally reachable) actionNavigationTimeoutMs, using waitUntil:\"commit\" rather than the previous fixed 5000ms \"load\" wait -- no go_back hop is misclassified as decision_point_restore_failed", async () => {
+  const { baseUrl, close } = await startFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/w3/start.html`,
+      objective: "Proceed to explore and arrive at a suitable destination.",
+      successCriteria: [
+        {
+          id: "reached-outcome",
+          type: "url_pattern",
+          description: "An outcome page that this wing never actually reaches.",
+          config: { pattern: `${baseUrl}/w3/never-reached.html` },
+          required: true,
+        },
+      ],
+      limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 8 },
+    });
+    const provider = new RouteMemoryAwareScriptedProvider(["Go", "First path", "Next", "Back to first"]);
+    // Tight enough to have failed against the old, hardcoded 5000ms "load"-waiting
+    // implementation on a genuinely slow-settling page, but reachable for a local fixture
+    // server's own "commit" milestone (goBack.ts's actual mechanism now) -- proving the
+    // bounded, fingerprint-verified return still completes end to end.
+    const response = await runTask({ page, task, reasoning: provider, actionNavigationTimeoutMs: 200 });
+
+    assert.notEqual(response.status, "success");
+    assert.notEqual(
+      response.diagnostics.finishReason,
+      "decision_point_restore_failed",
+      "a go_back that genuinely committed must never be misclassified as a restore failure",
+    );
+
+    const branchReturnSteps = response.steps.filter((s) => s.safetyFlags?.includes("branch_return_attempted"));
+    assert.equal(branchReturnSteps.length, 3, "expected exactly depth+1 (2+1=3) return hops, exactly as under the default timeout");
     assert.ok(branchReturnSteps.every((s) => s.selectedAction.type === "go_back"));
 
     const validation = await validateAgainstTaskResponseSchema(response);

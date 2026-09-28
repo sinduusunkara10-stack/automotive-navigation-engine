@@ -43,7 +43,7 @@ async function isReachable(): Promise<boolean> {
 
 function fakeResult(taskId: string): TaskResponse {
   return {
-    schemaVersion: "1.27.0",
+    schemaVersion: "1.28.0",
     taskId,
     status: "success",
     statusReason: "stop_success_action",
