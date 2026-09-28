@@ -13,6 +13,17 @@
     >
       Continue to Offer
     </button>
-    <button type="button" onclick="location.href = 'full-engine-recovered-milestone.html'">Continue After Return</button>
+    <button type="button" id="continue-after-return">Continue After Return</button>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      document.getElementById("continue-after-return").addEventListener("click", function () {
+        // Dispatched on the OPENER, after the adopted popup already closed itself and the run
+        // resumed here -- proves the opener's own original, run-start-attached listener (never
+        // touched by the adopted-surface listener handoff, which only ever attaches to adopted
+        // Pages) is still live and un-duplicated after an adopt-then-close cycle.
+        window.dataLayer.push({ event: "recovery_continue", cta: "continue_after_return", fictionalId: "FIX-RECOVERY-001" });
+        location.href = "full-engine-recovered-milestone.html";
+      });
+    </script>
   </body>
 </html>

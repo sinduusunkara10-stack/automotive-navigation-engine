@@ -262,7 +262,7 @@ export async function runTask(params: {
     : undefined;
   const detachDataLayerPushCapture = dataLayerPushCapture?.detach;
   if (dataLayerPushCapture) {
-    state.mainDataLayerPushListenerActive = dataLayerPushCapture.attached;
+    state.setDataLayerPushListenerActive(page, dataLayerPushCapture.attached);
   }
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
@@ -542,6 +542,7 @@ export async function runTask(params: {
     detachGa4Capture?.();
     detachDataLayerPushCapture?.();
     detachErrorCapture?.();
+    state.detachAllAdoptedSurfaceListeners();
   }
 }
 

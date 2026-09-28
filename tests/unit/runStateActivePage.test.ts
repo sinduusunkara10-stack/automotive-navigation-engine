@@ -111,3 +111,51 @@ test("re-entering a surface that previously extended trust resumes that same ext
   state.pushSurface("adopted-1", fakePage("p1-again"));
   assert.deepEqual(state.effectiveAllowedDomains(base), ["127.0.0.1", "localhost"]);
 });
+
+/**
+ * Adopted-surface listener handoff (owner-mandated corrective pass, follow-up to PR #71):
+ * pure-logic coverage of the RunState dedup guard core/loop.ts relies on before calling
+ * attachAdoptedSurfaceListeners -- proves a Page can never have its real-time GA4/dataLayer
+ * observers attached twice (e.g. a fingerprint-cached re-adoption of the same popup), and
+ * that run-end cleanup detaches every registered listener exactly once.
+ */
+test("hasAttachedListeners/markListenersAttached: the same adopted Page is never attached twice", () => {
+  const state = new RunState();
+  const popup = fakePage("popup-1");
+  assert.equal(state.hasAttachedListeners(popup), false);
+
+  let attachCount = 0;
+  const attachIfNeeded = () => {
+    if (!state.hasAttachedListeners(popup)) {
+      attachCount++;
+      state.markListenersAttached(popup, () => {});
+    }
+  };
+  attachIfNeeded();
+  attachIfNeeded(); // simulates a second adoption/observation of the same Page
+
+  assert.equal(attachCount, 1, "the same Page must never have its listeners attached twice");
+  assert.equal(state.hasAttachedListeners(popup), true);
+});
+
+test("detachAllAdoptedSurfaceListeners calls every registered detach exactly once, and a second cleanup call is a safe no-op", () => {
+  const state = new RunState();
+  const popup1 = fakePage("popup-1");
+  const popup2 = fakePage("popup-2");
+  let detach1Calls = 0;
+  let detach2Calls = 0;
+  state.markListenersAttached(popup1, () => {
+    detach1Calls++;
+  });
+  state.markListenersAttached(popup2, () => {
+    detach2Calls++;
+  });
+
+  state.detachAllAdoptedSurfaceListeners();
+  assert.equal(detach1Calls, 1);
+  assert.equal(detach2Calls, 1);
+
+  state.detachAllAdoptedSurfaceListeners();
+  assert.equal(detach1Calls, 1, "a second cleanup call must never re-invoke an already-detached listener");
+  assert.equal(detach2Calls, 1);
+});

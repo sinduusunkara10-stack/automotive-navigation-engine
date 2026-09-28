@@ -82,13 +82,27 @@ export class RunState {
   backtrackCount = 0;
   readonly startedAtMs = Date.now();
   /**
-   * Analytics-capture reliability fix: whether the run-lifetime dataLayer.push observer
-   * (capture-modules/dataLayer.ts's attachDataLayerPushCapture) actually attached to the
-   * main tracked page -- true by default (meaning "not requested/not yet known"; only ever
-   * set false by a genuine attach failure) so a task that never requests data_layer_evidence
-   * is never penalized by this flag. See analyticsCaptureClassification.ts's CaptureHealth.
+   * Analytics-capture reliability fix, later made per-Page by the adopted-surface listener
+   * handoff (owner-mandated corrective pass, follow-up to PR #71): whether the real-time
+   * dataLayer.push observer (capture-modules/dataLayer.ts's attachDataLayerPushCapture)
+   * actually attached to a given Page -- true by default for any Page never recorded here
+   * (meaning "not requested/not yet known"), so a task that never requests
+   * data_layer_evidence is never penalized. Originally a single flat boolean covering only
+   * the run's one tracked page; that ratcheted false forever the moment any one adopted
+   * popup's attach failed (e.g. a popup that closes itself within milliseconds of adoption),
+   * permanently misreporting captureHealth for a later, perfectly healthy click back on the
+   * opener once the run returned to it. Tracked per-Page instead so
+   * getDataLayerPushListenerActive always reflects whichever Page is actually active now.
    */
-  mainDataLayerPushListenerActive = true;
+  private readonly dataLayerPushListenerActiveByPage = new WeakMap<object, boolean>();
+
+  setDataLayerPushListenerActive(page: object, active: boolean): void {
+    this.dataLayerPushListenerActiveByPage.set(page, active);
+  }
+
+  getDataLayerPushListenerActive(page: object): boolean {
+    return this.dataLayerPushListenerActiveByPage.get(page) ?? true;
+  }
   readonly actionHistory: RecordedAction[] = [];
   readonly visitedUrls: string[] = [];
   /**
@@ -229,6 +243,38 @@ export class RunState {
   recordPopupFingerprintOutcome(fingerprint: string, tier: "adopt" | "reject" | "ambiguous", score: number): void {
     const existing = this.popupFingerprintOutcomes.get(fingerprint);
     this.popupFingerprintOutcomes.set(fingerprint, { tier, score, attempts: (existing?.attempts ?? 0) + 1 });
+  }
+
+  /**
+   * Adopted-surface listener handoff (surface-adoption corrective pass, follow-up to PR #71):
+   * the same real-time GA4/dataLayer-push/error observers engine.ts attaches once to the
+   * originally-tracked Page at run start must also be attached to a popup the moment it is
+   * adopted -- otherwise a click dispatched inside the adopted surface can never produce a
+   * CONFIRMED, race-safe analytics correlation (see core/loop.ts's surface-adoption block).
+   * This Set is the dedup guard: a Page is attached at most once per run, even if it is
+   * somehow re-entered as the active surface more than once (e.g. adopted, returned from,
+   * then re-adopted). Never persisted beyond this run.
+   */
+  private readonly listenerAttachedPages = new WeakSet<object>();
+  private readonly adoptedSurfaceListenerDetachers: (() => void)[] = [];
+
+  hasAttachedListeners(page: object): boolean {
+    return this.listenerAttachedPages.has(page);
+  }
+
+  markListenersAttached(page: object, detach: () => void): void {
+    this.listenerAttachedPages.add(page);
+    this.adoptedSurfaceListenerDetachers.push(detach);
+  }
+
+  detachAllAdoptedSurfaceListeners(): void {
+    for (const detach of this.adoptedSurfaceListenerDetachers.splice(0)) {
+      try {
+        detach();
+      } catch {
+        /* best-effort only -- a popup that already closed itself has nothing left to detach */
+      }
+    }
   }
 
   /**

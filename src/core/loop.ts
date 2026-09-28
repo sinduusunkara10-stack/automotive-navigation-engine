@@ -21,6 +21,7 @@ import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
+import { attachAdoptedSurfaceListeners } from "../capture-modules/adoptedSurfaceListeners.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import { captureDecisionPointCheckpoint } from "./decisionPointCheckpoint.js";
 import { attemptCheckpointReconstruction, matchesDecisionPoint, reobserveForBranchReturn } from "./branchReturnRecovery.js";
@@ -1986,6 +1987,25 @@ export async function runStep(params: {
     const { page: adoptedPage, url: adoptedUrl, extendedAllowedDomain } = surfaceAdoptionRequest.adopted;
     const newSurfaceId = state.nextAdoptedSurfaceId();
     state.pushSurface(newSurfaceId, adoptedPage);
+    // Adopted-surface listener handoff (surface-adoption corrective pass, follow-up to
+    // PR #71): the same real-time GA4/dataLayer-push/error observers engine.ts attached
+    // once to the originally-tracked Page at run start must also be attached here, the
+    // moment a popup becomes the active surface -- otherwise a click dispatched inside it
+    // could never be CONFIRMED via the real-time push-observer window (only the coarser
+    // per-step snapshot diff). Dedup via RunState so a Page already attached (e.g. a
+    // fingerprint-cached re-adoption) is never double-attached.
+    if (!state.hasAttachedListeners(adoptedPage)) {
+      const { detach, dataLayerPushListenerActive } = await attachAdoptedSurfaceListeners(
+        adoptedPage,
+        captures,
+        () => state.stepCount,
+        task.captureModules,
+      );
+      state.markListenersAttached(adoptedPage, detach);
+      if (task.captureModules.includes("data_layer_evidence")) {
+        state.setDataLayerPushListenerActive(adoptedPage, dataLayerPushListenerActive);
+      }
+    }
     if (extendedAllowedDomain) {
       state.extendAllowedDomainForCurrentSurface(extendedAllowedDomain);
     }
@@ -2577,7 +2597,7 @@ export async function runStep(params: {
     const captureHealth = computeCaptureHealth({
       isClick,
       dataLayerReplaced: Boolean(dataLayerDelta?.replaced),
-      dataLayerPushListenerActive: state.mainDataLayerPushListenerActive,
+      dataLayerPushListenerActive: state.getDataLayerPushListenerActive(page),
       networkListenerActive: true,
       dataLayerPushesObservedInWindowCount: dataLayerPushesInWindow.length,
       dataLayerModuleRequested: wantsDataLayerPushWindow,

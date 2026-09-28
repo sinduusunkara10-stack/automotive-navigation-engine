@@ -6,6 +6,7 @@ import { runTask } from "../../src/core/engine.js";
 import type { TaskRequest } from "../../src/types/task-request.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 import { ScriptedReasoningProvider, byAccessibleName } from "../helpers/scriptedReasoningProvider.js";
+import { buildAnalyticsReportingRowsItems } from "../../n8n/buildAnalyticsReportingRows.js";
 
 /**
  * Full-engine active-tab continuation (owner-mandated corrective pass, follow-up to PR #71):
@@ -19,18 +20,21 @@ import { ScriptedReasoningProvider, byAccessibleName } from "../helpers/scripted
  * second milestone inside it, and preserve its analytics -- while the opener itself is never
  * touched again and no opener element is ever replayed against the popup's own document.
  *
- * Known, pre-existing limitation surfaced while building this test (not introduced or fixed
- * here -- see the corrective pass's final report): engine.ts's real-time dataLayer/GA4 push
- * observer (attachDataLayerPushCapture/attachGa4NetworkCapture) is wired once, at run start,
- * onto the originally-tracked Page only -- it is never re-attached once surface adoption makes
- * a popup the active Page. A click dispatched inside an adopted popup therefore always sees an
- * empty dataLayerPushesObservedDuringActionWindow/ga4 window, so any analytics fired by a click
- * handler immediately before a same-tab navigation *inside an adopted popup* can only ever
- * reach the coarser, less-confident dataLayerDelta path (correctly conservative:
- * ENGINE_CAPTURE_INCOMPLETE, never silently promoted to CONFIRMED) -- the exact race the
- * main-page path already solves via that observer. This does not lose the evidence (it is
- * still retained in captures.*, proven below), but it does mean it can never be confirmed as
- * click-correlated for an adopted surface today.
+ * Listener-handoff fix (owner-mandated corrective pass, follow-up to PR #71): a previous
+ * version of this test documented a known gap here -- engine.ts's real-time dataLayer/GA4
+ * push observer was wired once, at run start, onto the originally-tracked Page only, and
+ * never re-attached once surface adoption made a popup the active Page, so a click dispatched
+ * inside an adopted popup could never be CONFIRMED via the real-time window (only the coarser
+ * per-step snapshot diff). That gap is now closed: core/loop.ts calls
+ * attachAdoptedSurfaceListeners (src/capture-modules/adoptedSurfaceListeners.ts) the moment a
+ * popup is adopted, reusing the exact same attachGa4NetworkCapture/attachDataLayerPushCapture/
+ * attachErrorCapture functions the main page already used (never a second analytics
+ * mechanism), deduplicated per-Page via RunState.hasAttachedListeners/markListenersAttached,
+ * and detached at run end via RunState.detachAllAdoptedSurfaceListeners. The first test below
+ * now proves a click dispatched *inside* the adopted popup (Submit Application, on
+ * full-engine-financing.html) reaches CONFIRMED/CAPTURED via the real-time window, for both a
+ * dataLayer push and a GA4 beacon, with no duplicate evidence; the recovery-case test proves
+ * the opener's own original listener keeps working, un-duplicated, after the popup closes.
  *
  * Two static-server hostnames ("127.0.0.1" and "localhost") both resolve to the same local
  * server -- a genuinely different hostname string for allowedDomains/domain-policy purposes,
@@ -63,7 +67,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
         config: { pattern: successPattern },
       },
     ],
-    captureModules: ["page_visits", "cta_clicks", "data_layer_evidence"],
+    captureModules: ["page_visits", "cta_clicks", "data_layer_evidence", "ga4_network_events"],
     limits: { maxSteps: 12, maxBacktracks: 3 },
     safety: {
       allowedActions: ["click", "capture", "go_back", "stop_success", "stop_blocked", "stop_failure"],
@@ -146,18 +150,67 @@ test("full-engine active-tab continuation: cross-host popup adopted deterministi
     assert.equal(response.status, "success");
     assert.equal(response.finalUrl, `${crossHostBase(baseUrl)}/full-engine-milestone.html`);
 
-    // 14: popup analytics (dataLayer push on full-engine-financing.html) were preserved --
-    // never silently dropped just because the evidence came from an adopted popup rather
-    // than the main page. Note: this specific push is a page-load event (not a same-window
-    // click-attributed one), so it is correctly retained as raw evidence and surfaced via
-    // the action's own dataLayerDelta, without being promoted to a CONFIRMED/click-correlated
-    // analyticsReportingRows entry -- see this test's own file-level limitations note.
-    const dataLayerEvents = response.captures?.data_layer_evidence ?? [];
+    // 14 (listener-handoff fix): the popup's OWN click (Submit Application) fires a
+    // dataLayer.push AND a GA4 beacon *inside the adopted popup*, immediately before a
+    // same-window navigation -- the exact click-vs-navigation race the main page's own
+    // real-time push observer already solves. Proves: listener attachment occurred on
+    // adoption (captureHealth reports it active), both events are observed in real time
+    // under the popup's own click action (never lost to the coarser per-step diff), both
+    // reach CONFIRMED/CAPTURED classification, and neither is duplicated.
     const ctaClicks = response.captures?.cta_clicks ?? [];
-    const preserved =
-      dataLayerEvents.some((c) => c.raw.some((r) => r.event === "quote_form_started")) ||
-      ctaClicks.some((c) => c.actionAnalytics?.dataLayerDelta?.newEntries.some((r) => r.event === "quote_form_started"));
-    assert.ok(preserved, "expected the popup's own dataLayer.push evidence to be preserved somewhere in captures, never silently dropped");
+    const submitClick = ctaClicks.find((c) => c.ctaText === "Submit Application");
+    assert.ok(submitClick, "expected a recorded click for the popup's own 'Submit Application' button");
+    const submitAnalytics = submitClick!.actionAnalytics;
+
+    assert.equal(
+      submitAnalytics?.captureHealth?.dataLayerPushListenerActive,
+      true,
+      "listener attachment on adoption: the push observer must be reported active for this click inside the adopted popup",
+    );
+
+    const pushesInWindow = submitAnalytics?.dataLayerPushesObservedDuringActionWindow ?? [];
+    const submittedPushes = pushesInWindow.flatMap((entry) => entry.raw).filter((r) => r.event === "quote_form_submitted");
+    assert.equal(
+      submittedPushes.length,
+      1,
+      "a later click inside the popup must emit exactly one real-time-observed data-layer event, never zero (lost) and never duplicated",
+    );
+    assert.ok(
+      pushesInWindow.every((entry) => entry.source === "main_frame" && entry.contextId === "main"),
+      "adopted-popup evidence must be tagged the same way as the currently-active tracked surface",
+    );
+
+    const ga4InWindow = submitAnalytics?.ga4RequestsObservedDuringActionWindow ?? [];
+    const submittedGa4 = ga4InWindow.filter((e) => e.params?.en === "quote_form_submitted");
+    assert.equal(
+      submittedGa4.length,
+      1,
+      "a later click inside the popup must emit exactly one real-time-observed GA4/network event, never zero and never duplicated",
+    );
+
+    assert.equal(submitAnalytics?.analyticsCapture?.status, "CAPTURED", "correlation must become CONFIRMED (CAPTURED) for the popup's own click");
+    assert.equal(submitAnalytics?.analyticsCapture?.triggerSegment, "PHYSICAL_CLICK");
+    assert.ok(
+      submitAnalytics?.analyticsCapture?.confirmedDataLayerPushes.some((p) => p.raw.some((r) => r.event === "quote_form_submitted")),
+      "expected the popup's own data-layer push to be a CONFIRMED event",
+    );
+    assert.ok(
+      submitAnalytics?.analyticsCapture?.confirmedGa4Events.some((e) => e.params?.en === "quote_form_submitted"),
+      "expected the popup's own GA4 beacon to be a CONFIRMED event",
+    );
+
+    // n8n confirmation: the engine-owned analyticsReportingRows contract (schema 1.30.0)
+    // must surface this now-CONFIRMED popup-action row, and buildAnalyticsReportingRowsItems
+    // (n8n/buildAnalyticsReportingRows.ts) must pass it through unfiltered.
+    const submitRow = response.analyticsReportingRows?.find((r) => r.stepIndex === submitClick!.stepIndex && r.ctaText === "Submit Application");
+    assert.ok(submitRow, "expected the popup click's own row in the engine-owned analyticsReportingRows contract");
+    assert.equal(submitRow?.analyticsCaptureStatus, "CAPTURED");
+
+    const n8nItems = buildAnalyticsReportingRowsItems([response as unknown as Parameters<typeof buildAnalyticsReportingRowsItems>[0][number]]);
+    assert.ok(
+      n8nItems.some((item) => item.json.stepIndex === submitClick!.stepIndex && item.json.ctaText === "Submit Application"),
+      "expected the n8n reporting-row module to pass the popup's now-CONFIRMED row through unfiltered",
+    );
 
     // 16: no repeated-popup/stale-target loop -- exactly one adoption for the whole run.
     const surfaceAdoption = response.diagnostics.surfaceAdoption;
@@ -234,6 +287,23 @@ test("full-engine recovery case: closing the adopted popup safely restores the o
       (s) => s.observation.activeSurface?.kind === "main" && s.currentUrl === `${baseUrl}/full-engine-source-recovery.html`,
     );
     assert.ok(mainStepsAfterClose.length >= 1, "expected the run to resume observing the opener as 'main' after the popup closed");
+
+    // Listener-handoff fix, opener side: "Continue After Return" is clicked on the OPENER
+    // itself, after the adopted popup already closed and the run resumed there -- proves the
+    // opener's own original (run-start-attached) listener is still live and un-duplicated
+    // after an adopt-then-close cycle (the adopted-surface listener handoff never touches the
+    // opener's own listeners at all, by construction).
+    const returnClick = (response.captures?.cta_clicks ?? []).find((c) => c.ctaText === "Continue After Return");
+    assert.ok(returnClick, "expected a recorded click for the opener's own 'Continue After Return' button");
+    const returnPushes = (returnClick!.actionAnalytics?.dataLayerPushesObservedDuringActionWindow ?? [])
+      .flatMap((entry) => entry.raw)
+      .filter((r) => r.event === "recovery_continue");
+    assert.equal(
+      returnPushes.length,
+      1,
+      "the opener must keep capturing correctly after the popup closes, with exactly one entry for its own post-return click -- never zero and never duplicated",
+    );
+    assert.equal(returnClick!.actionAnalytics?.captureHealth?.dataLayerPushListenerActive, true);
   } finally {
     await page.close();
     await browser.close();
