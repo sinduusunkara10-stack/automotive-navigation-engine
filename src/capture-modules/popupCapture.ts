@@ -2,9 +2,9 @@ import type { Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { ConsentInteractionPolicy, SurfaceAdoptionDomainPolicy } from "../types/task-request.js";
-import { attachGa4NetworkCapture } from "./ga4NetworkEvents.js";
-import { attachDataLayerPushCapture, captureDataLayer } from "./dataLayer.js";
-import { popupContextId } from "./captureContext.js";
+import { attachGa4NetworkCapture, type Ga4NetworkCaptureContext } from "./ga4NetworkEvents.js";
+import { attachDataLayerPushCapture, captureDataLayer, type DataLayerPushCaptureContext } from "./dataLayer.js";
+import { popupContextId, MAIN_CONTEXT_ID } from "./captureContext.js";
 import { POPUP_ADOPTION_WINDOW_MS } from "../config/captureLimits.js";
 import { waitForAdaptiveSettle, DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS } from "../core/robustNavigation.js";
 import { decideSurfaceAdoption, DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN, type AdoptionRejectionReason } from "../core/surfaceAdoption.js";
@@ -98,7 +98,13 @@ export interface SurfaceAdoptionRequest {
    * off the same request object it passed in, immediately after dispatchAction returns, and
    * never reuses the object across steps.
    */
-  adopted?: { page: Page; url: string | undefined; extendedAllowedDomain?: string };
+  adopted?: {
+    page: Page;
+    url: string | undefined;
+    extendedAllowedDomain?: string;
+    /** See AdoptOrCapturePopupResult.adoptedListenerHandles's own doc comment. */
+    adoptedListenerHandles?: { detach: () => void; dataLayerPushAttached: boolean };
+  };
 }
 
 export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
@@ -128,6 +134,13 @@ export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
   fingerprintPreviouslySeen?: boolean;
   /** Present only when a previously-seen fingerprint's cached outcome was reused without rescoring -- see FINGERPRINT_RECONSIDERATION_INTERVAL. */
   popupReconsiderationReason?: "cached_no_new_evidence" | "bounded_reconsideration";
+  /**
+   * Present only when adoptedPage is set: the already-attached (and just retagged to the
+   * main-surface convention, see retagPopupContextCaptureAsMain) popup_context GA4/dataLayer
+   * listeners, handed to core/loop.ts so it registers them with RunState instead of attaching
+   * a second, duplicate set via adoptedSurfaceListeners.ts.
+   */
+  adoptedListenerHandles?: { detach: () => void; dataLayerPushAttached: boolean };
 }
 
 /**
@@ -237,12 +250,97 @@ export async function attemptConsentOnlyCandidateResolution(params: {
  * fallback, unchanged by this fix). This is capture-only: it never affects navigation
  * safety, allowedDomains enforcement, or which page the reasoning layer observes next.
  */
-export async function adoptPopupForCapture(params: {
-  popup: Page;
-  captures: Captures;
-  stepIndex: number;
-  captureModules: CaptureModuleName[];
-}): Promise<AdoptPopupForCaptureResult> {
+/** Handles returned by attachPopupContextCapture -- see its own doc comment. */
+export interface PopupContextCaptureHandles {
+  detachGa4?: () => void;
+  detachPush?: () => void;
+  /** Mutable -- retagPopupContextCaptureAsMain flips these in place so an already-attached listener's *future* events are tagged as the run's main surface, with no second attach. */
+  ga4Context?: Ga4NetworkCaptureContext;
+  pushContext?: DataLayerPushCaptureContext;
+  /** Mirrors attachDataLayerPushCapture's own `attached` -- true (never requested/never known to have failed) when data_layer_evidence wasn't requested at all. */
+  dataLayerPushAttached: boolean;
+}
+
+/**
+ * Attaches the same generic GA4-network/dataLayer-push capture used everywhere else in this
+ * engine to a just-detected popup candidate, tagged `source: "popup_context"` -- called as
+ * early as possible relative to the popup actually being created (item A.3 of the original
+ * cross-client analytics-capture fix, and the owner-mandated destination-load-evidence
+ * requirement for the surface-adoption path below): before `waitForLoadState`, before
+ * relevance scoring, before anything else that would let the destination document's own
+ * inline scripts run first. Exported so adoptOrCapturePopup (below) can attach it once, up
+ * front, and reuse the same handles regardless of whether the candidate is ultimately adopted
+ * or rejected -- never a second, duplicate attach on the same Page (Playwright has no way to
+ * re-register the same exposeBinding name on a Page, so a naive second attach on adoption
+ * would silently fail and could double-wrap window.dataLayer.push on this Page's next
+ * navigation). See retagPopupContextCaptureAsMain for how an adopted candidate's tagging
+ * changes without any second attach.
+ */
+export async function attachPopupContextCapture(
+  popup: Page,
+  captures: Captures,
+  stepIndex: number,
+  captureModules: CaptureModuleName[],
+): Promise<PopupContextCaptureHandles> {
+  const wantsGa4 = captureModules.includes("ga4_network_events");
+  const wantsDataLayer = captureModules.includes("data_layer_evidence");
+  if (!wantsGa4 && !wantsDataLayer) {
+    return { dataLayerPushAttached: true };
+  }
+  const contextId = popupContextId(stepIndex);
+  // GA4 attach first (synchronous -- see ga4NetworkEvents.ts), then dataLayer attach
+  // (awaited, since it needs a round trip to register the exposeBinding/addInitScript) --
+  // same ordering adoptPopupForCapture's own pre-existing attach used, preserved so this is
+  // a pure extraction, not a timing change for the path that already worked.
+  const ga4Context: Ga4NetworkCaptureContext | undefined = wantsGa4 ? { contextId, forcedSource: "popup_context" } : undefined;
+  const detachGa4 = ga4Context ? attachGa4NetworkCapture(popup, captures, () => stepIndex, ga4Context) : undefined;
+  const pushContext: DataLayerPushCaptureContext | undefined = wantsDataLayer ? { contextId, forcedSource: "popup_context" } : undefined;
+  const pushResult = pushContext ? await attachDataLayerPushCapture(popup, captures, () => stepIndex, pushContext) : undefined;
+  return {
+    detachGa4,
+    detachPush: pushResult?.detach,
+    ga4Context,
+    pushContext,
+    dataLayerPushAttached: pushResult?.attached ?? true,
+  };
+}
+
+/**
+ * Flips an already-attached popup_context capture's tagging, in place, to the run's main
+ * surface convention (contextId "main", forcedSource unset so the ordinary
+ * main_frame/child_frame frame classification applies) -- called the instant a candidate is
+ * adopted. ga4NetworkEvents.ts/dataLayer.ts both read forcedSource/contextId off this same
+ * context object at event time, never a value captured at attach time, so this takes effect
+ * for every future event with zero risk of a duplicate attach.
+ */
+export function retagPopupContextCaptureAsMain(handles: PopupContextCaptureHandles): void {
+  if (handles.ga4Context) {
+    handles.ga4Context.forcedSource = undefined;
+    handles.ga4Context.contextId = MAIN_CONTEXT_ID;
+  }
+  if (handles.pushContext) {
+    handles.pushContext.forcedSource = undefined;
+    handles.pushContext.contextId = MAIN_CONTEXT_ID;
+  }
+}
+
+export async function adoptPopupForCapture(
+  params: {
+    popup: Page;
+    captures: Captures;
+    stepIndex: number;
+    captureModules: CaptureModuleName[];
+  },
+  /**
+   * Already-attached listener handles from a caller that ran attachPopupContextCapture
+   * itself, earlier, before this candidate's adoption decision was even made (see
+   * adoptOrCapturePopup below). When supplied, this function reuses them instead of
+   * attaching its own -- attaching twice on the same Page would silently duplicate every
+   * subsequent event. Absent for this function's other, pre-existing caller (the
+   * surfaceAdoption-disabled path), which still attaches its own exactly as before.
+   */
+  preAttached?: PopupContextCaptureHandles,
+): Promise<AdoptPopupForCaptureResult> {
   const { popup, captures, stepIndex, captureModules } = params;
   const wantsGa4 = captureModules.includes("ga4_network_events");
   const wantsDataLayer = captureModules.includes("data_layer_evidence");
@@ -258,26 +356,29 @@ export async function adoptPopupForCapture(params: {
   const beforeGa4Count = captures.ga4_network_events?.length ?? 0;
   const beforeDataLayerCount = captures.data_layer_evidence?.length ?? 0;
 
-  let detachGa4: (() => void) | undefined;
-  let detachPush: (() => void) | undefined;
+  let detachGa4: (() => void) | undefined = preAttached?.detachGa4;
+  let detachPush: (() => void) | undefined = preAttached?.detachPush;
 
   try {
     // Attached before anything else in this function waits on anything -- as early as
     // possible relative to the popup event firing (item A.3 of the fix), so a request/push
-    // that lands during the popup's own initial load is never missed.
-    if (wantsGa4) {
-      detachGa4 = attachGa4NetworkCapture(popup, captures, () => stepIndex, {
-        contextId,
-        forcedSource: "popup_context",
-      });
-    }
-    if (wantsDataLayer) {
-      detachPush = (
-        await attachDataLayerPushCapture(popup, captures, () => stepIndex, {
+    // that lands during the popup's own initial load is never missed. Skipped when the
+    // caller already attached these (preAttached set) -- see this function's own doc comment.
+    if (!preAttached) {
+      if (wantsGa4) {
+        detachGa4 = attachGa4NetworkCapture(popup, captures, () => stepIndex, {
           contextId,
           forcedSource: "popup_context",
-        })
-      ).detach;
+        });
+      }
+      if (wantsDataLayer) {
+        detachPush = (
+          await attachDataLayerPushCapture(popup, captures, () => stepIndex, {
+            contextId,
+            forcedSource: "popup_context",
+          })
+        ).detach;
+      }
     }
 
     // Bounded settle window: long enough for an already-in-flight beacon/push to land,
@@ -323,12 +424,21 @@ export async function adoptPopupForCapture(params: {
  * enabled, the popup is given a bounded chance to reach a real document (so its landing
  * hostname can actually be checked), decideSurfaceAdoption (core/surfaceAdoption.ts) is
  * consulted, and:
- *   - adopted: the popup is left open (never closed, never instrumented with the
- *     capture-only GA4/dataLayer listeners above -- once adopted it becomes the engine's own
- *     active surface and is captured/observed exactly like the main page from the next step
- *     on) after one settle wait so its own initial render has a chance to finish;
+ *   - adopted: the temporary popup_context listeners below are detached (never closed) --
+ *     once adopted it becomes the engine's own active surface, and core/loop.ts attaches the
+ *     permanent main_frame listeners (adoptedSurfaceListeners.ts) for everything from here on;
  *   - rejected: falls through to the exact same capture-only-and-close path as before,
  *     tagged with the specific rejection reason for diagnostics.
+ *
+ * Owner-mandated destination-load-evidence fix: attachPopupContextCapture below is now called
+ * *before* the `waitForLoadState`/relevance-scoring work this function does, not after --
+ * previously, a popup's own head-script dataLayer.push/GA4 beacon (the common pattern for
+ * "landing page fires its own analytics on load") had almost always already run by the time
+ * this function got around to instrumenting it, since relevance scoring needs the document to
+ * have already loaded far enough to read title/headings. Attaching first (matching the
+ * surfaceAdoption-disabled path below, and Playwright's addInitScript guarantee that it runs
+ * before a document's own scripts once registered) means that evidence is captured regardless
+ * of the eventual adopt/reject outcome, exactly like the non-adoption path already did.
  */
 export async function adoptOrCapturePopup(params: {
   popup: Page;
@@ -344,6 +454,8 @@ export async function adoptOrCapturePopup(params: {
   if (!surfaceAdoption?.enabled) {
     return adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
   }
+
+  const earlyCapture = await attachPopupContextCapture(popup, captures, stepIndex, captureModules);
 
   await popup.waitForLoadState("domcontentloaded", { timeout: POPUP_ADOPTION_WINDOW_MS }).catch(() => {});
   let popupUrl: string | undefined;
@@ -408,7 +520,7 @@ export async function adoptOrCapturePopup(params: {
       uncertain: priorFingerprintOutcome.tier === "ambiguous",
       signals: { title: "", headings: [], interactiveText: [] },
     };
-    const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
+    const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules }, earlyCapture);
     return {
       ...captureResult,
       adoptionRejectedReason: "relevance_rejected",
@@ -482,7 +594,7 @@ export async function adoptOrCapturePopup(params: {
       }
 
       if (relevanceAssessment && !relevanceAssessment.relevant) {
-        const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
+        const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules }, earlyCapture);
         return {
           ...captureResult,
           adoptionRejectedReason: "relevance_rejected",
@@ -507,10 +619,24 @@ export async function adoptOrCapturePopup(params: {
 
   if (decision.adopt) {
     await waitForAdaptiveSettle(popup, { ceilingMs: POPUP_ADOPTION_WINDOW_MS });
+    // Retag (never detach) the already-attached popup_context listeners to the main-surface
+    // convention -- core/loop.ts registers these same handles with RunState instead of
+    // attaching a second, duplicate set (adoptedSurfaceListeners.ts is only ever used as a
+    // fallback). This is what makes destination-load evidence (captured above, before this
+    // point, under the popup_context tag) and every later in-tab click's evidence share one
+    // continuous, gap-free listener -- never detached and re-attached at all.
+    retagPopupContextCaptureAsMain(earlyCapture);
     return {
       observed: false,
       adoptedPage: popup,
       adoptedUrl: popupUrl,
+      adoptedListenerHandles: {
+        detach: () => {
+          earlyCapture.detachGa4?.();
+          earlyCapture.detachPush?.();
+        },
+        dataLayerPushAttached: earlyCapture.dataLayerPushAttached,
+      },
       ...(decision.extendedAllowedDomain ? { extendedAllowedDomain: decision.extendedAllowedDomain } : {}),
       ...(relevanceAssessment ? { relevanceAssessment } : {}),
       ...(consentOnlyCandidateHandling ? { consentOnlyCandidateHandling } : {}),
@@ -520,7 +646,7 @@ export async function adoptOrCapturePopup(params: {
     };
   }
 
-  const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules });
+  const captureResult = await adoptPopupForCapture({ popup, captures, stepIndex, captureModules }, earlyCapture);
   return {
     ...captureResult,
     adoptionRejectedReason: decision.reason,

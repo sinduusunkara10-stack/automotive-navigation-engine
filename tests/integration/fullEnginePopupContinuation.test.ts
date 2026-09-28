@@ -25,16 +25,30 @@ import { buildAnalyticsReportingRowsItems } from "../../n8n/buildAnalyticsReport
  * push observer was wired once, at run start, onto the originally-tracked Page only, and
  * never re-attached once surface adoption made a popup the active Page, so a click dispatched
  * inside an adopted popup could never be CONFIRMED via the real-time window (only the coarser
- * per-step snapshot diff). That gap is now closed: core/loop.ts calls
- * attachAdoptedSurfaceListeners (src/capture-modules/adoptedSurfaceListeners.ts) the moment a
- * popup is adopted, reusing the exact same attachGa4NetworkCapture/attachDataLayerPushCapture/
- * attachErrorCapture functions the main page already used (never a second analytics
- * mechanism), deduplicated per-Page via RunState.hasAttachedListeners/markListenersAttached,
- * and detached at run end via RunState.detachAllAdoptedSurfaceListeners. The first test below
- * now proves a click dispatched *inside* the adopted popup (Submit Application, on
- * full-engine-financing.html) reaches CONFIRMED/CAPTURED via the real-time window, for both a
- * dataLayer push and a GA4 beacon, with no duplicate evidence; the recovery-case test proves
- * the opener's own original listener keeps working, un-duplicated, after the popup closes.
+ * per-step snapshot diff). That gap is now closed via popupCapture.ts's
+ * attachPopupContextCapture/retagPopupContextCaptureAsMain: GA4/dataLayer listeners are
+ * attached to every popup candidate *before* relevance scoring even runs (so destination-load
+ * evidence that fires during/at initial load is never lost), then simply retagged in place
+ * from "popup_context" to "main" on adoption -- no detach/reattach, so no duplicate listeners
+ * and no lost coverage. core/loop.ts's attachAdoptedSurfaceListeners
+ * (src/capture-modules/adoptedSurfaceListeners.ts) remains only as a defensive fallback for a
+ * surface adopted without pre-attached handles; both paths reuse the same
+ * attachGa4NetworkCapture/attachDataLayerPushCapture/attachErrorCapture functions the main page
+ * already used (never a second analytics mechanism), deduplicated per-Page via
+ * RunState.hasAttachedListeners/markListenersAttached and detached at run end via
+ * RunState.detachAllAdoptedSurfaceListeners. dataLayer.ts additionally wraps the *current*
+ * document synchronously via page.evaluate() (not just addInitScript, which only covers
+ * documents that haven't started running scripts yet at registration time), seeded from any
+ * pre-existing window.dataLayer entries, so a same-origin popup whose destination document is
+ * already executing by attach time (the nested-popup case below) doesn't lose pushes either.
+ *
+ * The first test below proves a click dispatched *inside* the adopted popup (Submit
+ * Application, on full-engine-financing.html) reaches CONFIRMED/CAPTURED via the real-time
+ * window, for both a dataLayer push and a GA4 beacon, with no duplicate evidence, and that the
+ * popup's own page-load evidence and the n8n-facing analyticsReportingRows row both survive;
+ * the nested-popup test proves the same pipeline applies recursively to a popup opened from an
+ * already-adopted popup; the recovery-case test proves the opener's own original listener
+ * keeps working, un-duplicated, after the popup closes.
  *
  * Two static-server hostnames ("127.0.0.1" and "localhost") both resolve to the same local
  * server -- a genuinely different hostname string for allowedDomains/domain-policy purposes,
@@ -212,9 +226,115 @@ test("full-engine active-tab continuation: cross-host popup adopted deterministi
       "expected the n8n reporting-row module to pass the popup's now-CONFIRMED row through unfiltered",
     );
 
+    // Destination-load evidence: full-engine-overview.html's own page-load dataLayer push and
+    // GA4 beacon fire before this popup is ever adopted/instrumented (relevance scoring already
+    // read its title/headings by the time adoption completes), so they necessarily predate the
+    // real-time observer attach -- still retained via the existing per-step full-snapshot path,
+    // never silently dropped just because they arrived before instrumentation was possible.
+    const landingPushRetained =
+      (response.captures?.data_layer_evidence ?? []).some((c) => c.raw.some((r) => r.event === "promo_page_viewed")) ||
+      ctaClicks.some((c) => c.actionAnalytics?.dataLayerDelta?.newEntries.some((r) => r.event === "promo_page_viewed"));
+    assert.ok(landingPushRetained, "expected the popup's own page-load dataLayer push to be retained, never silently dropped");
+    const ga4Events = response.captures?.ga4_network_events ?? [];
+    assert.ok(
+      ga4Events.some((e) => e.params?.en === "promo_page_viewed"),
+      "expected the popup's own page-load GA4 beacon to be retained",
+    );
+
     // 16: no repeated-popup/stale-target loop -- exactly one adoption for the whole run.
     const surfaceAdoption = response.diagnostics.surfaceAdoption;
     assert.equal(surfaceAdoption?.attempts.filter((a) => a.event === "adopted").length, 1);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("full-engine nested-popup case: a popup opened FROM an already-adopted popup is itself adopted and instrumented, with its own click reaching CONFIRMED", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  const relevanceAmbiguityCalls: unknown[] = [];
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/full-engine-source.html`,
+      successPattern: `${crossHostBase(baseUrl)}/full-engine-nested-milestone.html`,
+      successCriteria: [
+        {
+          id: "reviewed_overview",
+          type: "semantic_page_match",
+          description: "Review the configuration overview summarizing the vehicle and estimated price.",
+          required: false,
+        },
+        {
+          id: "reviewed_nested_promo",
+          type: "semantic_page_match",
+          description: "Review the nested promotional trade-in bonus offer.",
+          required: false,
+        },
+        {
+          id: "reached_milestone",
+          type: "url_pattern",
+          description: "The nested offer confirmation is reached.",
+          config: { pattern: `${crossHostBase(baseUrl)}/full-engine-nested-milestone.html` },
+        },
+      ],
+    });
+    const reasoning = new ScriptedReasoningProvider([
+      byAccessibleName("Continue to Offer"),
+      byAccessibleName("Open Nested Promo"),
+      byAccessibleName("Confirm Nested"),
+    ]);
+
+    const response = await runTask({
+      page,
+      task,
+      reasoning,
+      relevanceAmbiguityResolver: { resolve: async (ctx) => (relevanceAmbiguityCalls.push(ctx), { relevant: true, rationale: "unused", confidence: 1 }) },
+    });
+
+    assert.equal(relevanceAmbiguityCalls.length, 0, "both nested adoptions must be strong deterministic evidence, never reaching the Claude call");
+    assert.equal(response.status, "success");
+    assert.equal(response.finalUrl, `${crossHostBase(baseUrl)}/full-engine-nested-milestone.html`);
+
+    // Two independent adoptions: the first popup, and a second popup opened from inside it --
+    // proves the listener handoff (and the whole adoption pipeline) applies recursively, not
+    // just to a top-level popup.
+    const surfaceAdoption = response.diagnostics.surfaceAdoption;
+    assert.equal(surfaceAdoption?.attempts.filter((a) => a.event === "adopted").length, 2);
+
+    const nestedClick = (response.captures?.cta_clicks ?? []).find((c) => c.ctaText === "Confirm Nested");
+    assert.ok(nestedClick, "expected a recorded click for the nested popup's own 'Confirm Nested' button");
+    const nestedAnalytics = nestedClick!.actionAnalytics;
+    assert.equal(
+      nestedAnalytics?.captureHealth?.dataLayerPushListenerActive,
+      true,
+      "the nested popup must have its own listeners attached too, not just the first-level popup",
+    );
+    assert.equal(nestedAnalytics?.analyticsCapture?.status, "CAPTURED");
+    assert.ok(nestedAnalytics?.analyticsCapture?.confirmedGa4Events.some((e) => e.params?.en === "nested_offer_confirmed"));
+    assert.ok(nestedAnalytics?.analyticsCapture?.confirmedDataLayerPushes.some((p) => p.raw.some((r) => r.event === "nested_offer_confirmed")));
+
+    // The nested popup's own action row must also survive into the engine-owned
+    // analyticsReportingRows contract and the n8n replacement module, combined chronologically
+    // with the first-level popup's row -- not just the top-level popup case.
+    const nestedRow = response.analyticsReportingRows?.find(
+      (r) => r.stepIndex === nestedClick!.stepIndex && r.ctaText === "Confirm Nested",
+    );
+    assert.ok(nestedRow, "expected the nested popup click's own row in analyticsReportingRows");
+    assert.equal(nestedRow?.analyticsCaptureStatus, "CAPTURED");
+
+    const n8nItems = buildAnalyticsReportingRowsItems([response as unknown as Parameters<typeof buildAnalyticsReportingRowsItems>[0][number]]);
+    const nestedItem = n8nItems.find((item) => item.json.stepIndex === nestedClick!.stepIndex && item.json.ctaText === "Confirm Nested");
+    assert.ok(nestedItem, "expected the n8n reporting-row module to pass the nested popup's row through unfiltered");
+    const journeySequences = n8nItems.map((item) => item.json.journeySequence as number);
+    assert.deepEqual(
+      journeySequences,
+      [...journeySequences].sort((a, b) => a - b),
+      "expected n8n rows in deterministic chronological (journeySequence) order across both popups",
+    );
   } finally {
     await page.close();
     await browser.close();

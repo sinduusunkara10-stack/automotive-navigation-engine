@@ -881,6 +881,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         page: popupOutcome.adoptedPage,
         url: popupOutcome.adoptedUrl,
         ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
+        ...(popupOutcome.adoptedListenerHandles ? { adoptedListenerHandles: popupOutcome.adoptedListenerHandles } : {}),
       };
       return {
         success: true,

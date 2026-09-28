@@ -18,7 +18,7 @@ import { readConsentStorageEvidence } from "../capture-modules/consentEvidence.j
 import { computeCaptureHealth, classifyActionAnalyticsCapture } from "../capture-modules/analyticsCaptureClassification.js";
 import type { ActionTimingOut } from "../actions/click.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
-import { classifyActionFailure, recordDiagnosticError } from "../capture-modules/errors.js";
+import { classifyActionFailure, recordDiagnosticError, attachErrorCapture } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import { attachAdoptedSurfaceListeners } from "../capture-modules/adoptedSurfaceListeners.js";
@@ -1984,7 +1984,7 @@ export async function runStep(params: {
   // Page it was actually called against, so a nested chain is handled by this exact same
   // code path, recursively).
   if (actionResult.surfaceAdopted && surfaceAdoptionRequest?.adopted) {
-    const { page: adoptedPage, url: adoptedUrl, extendedAllowedDomain } = surfaceAdoptionRequest.adopted;
+    const { page: adoptedPage, url: adoptedUrl, extendedAllowedDomain, adoptedListenerHandles } = surfaceAdoptionRequest.adopted;
     const newSurfaceId = state.nextAdoptedSurfaceId();
     state.pushSurface(newSurfaceId, adoptedPage);
     // Adopted-surface listener handoff (surface-adoption corrective pass, follow-up to
@@ -1995,15 +1995,36 @@ export async function runStep(params: {
     // per-step snapshot diff). Dedup via RunState so a Page already attached (e.g. a
     // fingerprint-cached re-adoption) is never double-attached.
     if (!state.hasAttachedListeners(adoptedPage)) {
-      const { detach, dataLayerPushListenerActive } = await attachAdoptedSurfaceListeners(
-        adoptedPage,
-        captures,
-        () => state.stepCount,
-        task.captureModules,
-      );
-      state.markListenersAttached(adoptedPage, detach);
-      if (task.captureModules.includes("data_layer_evidence")) {
-        state.setDataLayerPushListenerActive(adoptedPage, dataLayerPushListenerActive);
+      if (adoptedListenerHandles) {
+        // Destination-load-evidence fix: popupCapture.ts already attached GA4/dataLayer
+        // capture to this exact Page before the adoption decision was even made (so a
+        // head-script push/beacon fired during the popup's own initial load is never lost),
+        // then retagged it in place to the main-surface convention on adoption -- reusing
+        // those handles here, rather than calling attachAdoptedSurfaceListeners, is what
+        // keeps this a single continuous listener with zero risk of a duplicate attach
+        // (Playwright cannot re-register the same exposeBinding name on one Page). Only
+        // error capture was never part of that early path, so it still gets a fresh attach.
+        const detachErrors = task.captureModules.includes("errors")
+          ? attachErrorCapture(adoptedPage, captures, () => state.stepCount)
+          : undefined;
+        state.markListenersAttached(adoptedPage, () => {
+          adoptedListenerHandles.detach();
+          detachErrors?.();
+        });
+        if (task.captureModules.includes("data_layer_evidence")) {
+          state.setDataLayerPushListenerActive(adoptedPage, adoptedListenerHandles.dataLayerPushAttached);
+        }
+      } else {
+        const { detach, dataLayerPushListenerActive } = await attachAdoptedSurfaceListeners(
+          adoptedPage,
+          captures,
+          () => state.stepCount,
+          task.captureModules,
+        );
+        state.markListenersAttached(adoptedPage, detach);
+        if (task.captureModules.includes("data_layer_evidence")) {
+          state.setDataLayerPushListenerActive(adoptedPage, dataLayerPushListenerActive);
+        }
       }
     }
     if (extendedAllowedDomain) {

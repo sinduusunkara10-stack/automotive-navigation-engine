@@ -148,7 +148,13 @@ const injectedDataLayerObserverScript = `(() => {
   try {
     const bindingName = ${JSON.stringify(PUSH_BINDING_NAME)};
     const w = window;
-    let real = [];
+    // Seeded from whatever window.dataLayer already holds, not always a fresh [] -- when this
+    // same script runs via page.evaluate() against a document that has already executed its
+    // own head script (an already-loaded popup's own landing document, see
+    // attachDataLayerPushCapture's own doc comment), those pre-existing entries must survive,
+    // never be silently discarded. A no-op distinction for the addInitScript case (a document
+    // that has not run any of its own scripts yet never has a dataLayer at this point).
+    let real = Array.isArray(w.dataLayer) ? w.dataLayer : [];
     const wrap = (arr) => {
       try {
         Object.defineProperty(arr, "push", {
@@ -262,6 +268,18 @@ export async function attachDataLayerPushCapture(
       initScriptAttached = true;
     })
     .catch(() => {});
+
+  // addInitScript only guarantees coverage for a document that has not started running its
+  // own scripts yet at registration time -- it never retroactively wraps a document already
+  // loaded when this function is called. That is exactly the case for a just-adopted popup's
+  // own landing document (relevance scoring already had to load it before adoption could
+  // decide anything), so without this, a later click dispatched on that same still-current
+  // document (never a fresh navigation) would push through the page's native, unwrapped
+  // Array#push, permanently invisible to this observer. Evaluating the identical wrapping
+  // script immediately, once, covers that current document too -- harmless/idempotent
+  // alongside addInitScript, since the two only ever apply to different points in time (this
+  // document now vs every future document) and never double-wrap the same one.
+  await page.evaluate(injectedDataLayerObserverScript).catch(() => {});
 
   return {
     detach: () => {

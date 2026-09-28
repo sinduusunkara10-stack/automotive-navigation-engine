@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nested Promo Offer</title>
+  </head>
+  <body>
+    <h1>Nested Promo Offer: Review Your Exclusive Trade-In Bonus</h1>
+    <p>A limited-time trade-in bonus opened from within your already-adopted offer tab.</p>
+    <button type="button" id="confirm-nested">Confirm Nested</button>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      document.getElementById("confirm-nested").addEventListener("click", function () {
+        // Same click-vs-navigation race pattern as full-engine-financing.html, but dispatched
+        // inside a popup opened FROM an already-adopted popup -- proves the listener handoff
+        // is applied recursively to every level of nested adoption, not just the first.
+        window.dataLayer.push({ event: "nested_offer_confirmed", cta: "confirm_nested", fictionalId: "FIX-NESTED-001" });
+        var ga4Params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          en: "nested_offer_confirmed",
+          cta: "confirm_nested",
+          dl: location.href,
+        });
+        new Image().src = "/g/collect?" + ga4Params.toString();
+        location.href = "full-engine-nested-milestone.html";
+      });
+    </script>
+  </body>
+</html>
