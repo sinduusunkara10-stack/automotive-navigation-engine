@@ -63,17 +63,27 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
       return void page("W1 target", "<h1>Reached.</h1>");
     }
 
-    // ---- Wing 2: the origin decision point's own content changes between visits, so a
-    // return cannot be verified -- exercises restore_failed. ----
+    // ---- Wing 2: the origin decision point's own content is replaced by something sharing
+    // no vocabulary with the original between visits, so neither an exact fingerprint match
+    // nor a semantic match against the branch's own checkpoint can verify a return -- the
+    // remaining, genuinely-irreconcilable exercise of restore_failed (a page that merely
+    // gains one incidental extra control, or otherwise still shares most of its original
+    // vocabulary, is now expected to verify via bounded live re-observation -- see Task 1,
+    // core/branchReturnRecovery.ts). ----
     if (path === "/w2/start.html") {
       return void page("W2 start", '<a href="/w2/hub.html">Begin</a>');
     }
     if (path === "/w2/hub.html") {
       hubW2RequestCount += 1;
-      const extra = hubW2RequestCount > 1 ? '<a href="/w2/unrelated.html">Unrelated later control</a>' : "";
+      if (hubW2RequestCount > 1) {
+        return void page(
+          "Something else entirely",
+          '<a href="/w2/unrelated.html">Totally different later navigation</a>',
+        );
+      }
       return void page(
         "W2 hub",
-        `<a href="/w2/branch.html">Check option</a><a href="/w2/other.html">Look further</a>${extra}`,
+        '<a href="/w2/branch.html">Check option</a><a href="/w2/other.html">Look further</a>',
       );
     }
     if (path === "/w2/branch.html") {
@@ -198,13 +208,13 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.27.0",
+    schemaVersion: "1.28.0",
     taskId: "branch-exploration",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.28.0",
+    outputSchemaVersion: "1.29.0",
     ...overrides,
   };
 }

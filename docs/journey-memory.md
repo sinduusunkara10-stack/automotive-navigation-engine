@@ -53,6 +53,80 @@ a safe run-completion log independent of the HTTP response, and new additive
 `recoverySegmentsBuilt`, `segmentsWriteAttempted`, `writeFailureReason`, `diagnosticsAttached`,
 `persistenceConfirmed` (see `$defs/journeyMemoryDiagnostics`, version `1.1.0`).
 
+## Branch-return re-observation and checkpoint reconstruction (2026-09-28, 2nd occurrence)
+
+A third production run (`run_fae0519a-ef71-46b9-a053-4ca82bb30000`) reached
+`goBackOutcome: "navigation_committed_restoration_unverified"` (item 1 above, working as
+designed) but still ended in `decision_point_restore_failed` with `reObservationAttempted:
+false`, `fallbackNavigationAttempted: false`, and `recoverySegmentsBuilt: 0` despite 4 forward
+segments being written. Root causes, and the fixes:
+
+1. **The branch-return-hop path in `src/core/loop.ts` never actually re-observed.** Both its
+   top-of-step recheck and its hop-exhausted fallback relied solely on an exact
+   `computeDecisionPointFingerprint` string comparison (URL + sorted `role::accessibleName`
+   list) with no semantic fallback and no bounded candidate rediscovery -- so a page restored
+   in every meaningful sense, but differing by one incidental control or a slow-hydrating
+   region, could never verify. `src/core/branchReturnRecovery.ts` (new) adds
+   `matchesDecisionPoint` (a synchronous check against the step's own already-built
+   observation, so it never bypasses or reorders that step's drawer/consent/panel-evidence
+   preamble) and `reobserveForBranchReturn` (a bounded live re-observation: fresh
+   `buildObservation`, then, only if needed, up to `MAX_BOUNDED_SCROLL_DISCOVERY_ATTEMPTS`
+   rounds of `executeScroll` + `waitForAdaptiveSettle` + re-check -- reusing existing
+   primitives only). Both check the branch's own recorded `decisionPointId` fingerprint first,
+   then fall back to a semantic-vocabulary match (`scoreSemanticPageMatch`) against the
+   branch's `DecisionPointCheckpoint`. A URL change alone is never treated as verification.
+   `loop.ts`'s hop-exhausted branch, and its failed-go_back-dispatch branch, both now run this
+   bounded re-observation (and, if still unverified, checkpoint reconstruction -- next item)
+   before `decision_point_restore_failed` can fire, with rich diagnostics either way
+   (`reObservationAttempted`, `reObservationOutcome`, `finalLiveVerificationOutcome`, etc. on
+   `RouteAttemptDiagnostic`, version `1.2.0`).
+2. **Checkpoint reconstruction, PR #68's own explicitly-deferred piece, is now wired in.**
+   `attemptCheckpointReconstruction` (same file) is the last-resort fallback, invoked only once
+   bounded re-observation above still cannot verify restoration: it navigates (via the ordinary
+   `navigate` action's own `executeNavigate` mechanics, not a new navigation path) to the
+   checkpoint's already-sanitized URL only (`registrableDomain` + `normalizedPath` -- never a
+   raw/query-bearing URL), restores at most a bounded scroll position where the checkpoint
+   recorded one, then re-verifies through the same `reobserveForBranchReturn`. The checkpoint
+   itself never verifies anything -- only that live re-observation does.
+   `RunState.reconstructionAttemptedFingerprints` guards against ever reconstructing to the
+   same checkpoint fingerprint twice in one run. New diagnostics:
+   `fallbackNavigationAttempted`, `fallbackNavigationUsed`, `checkpointMatched`,
+   `reconstructionOutcome`.
+3. **A semantic-match false positive was found and closed while building the above.** Scoring
+   the checkpoint's full `candidateMeanings` (every visible interactive element captured at
+   branch entry, including persistent/background/filler controls) against a live page's own
+   interactive-element signal let two genuinely different pages that merely share the same
+   background chrome score a near-perfect token-overlap match. The restoration-specific
+   comparison now uses only the `title`/`headings` signal groups (never
+   `interactiveElements`), drops `candidateMeanings` from the checkpoint's own anchor text, and
+   additionally skips semantic matching altogether when the anchor text tokenizes to fewer than
+   4 distinct words (a checkpoint with no semantic milestones at all can otherwise collapse to
+   just the origin page's own short title, which is trivially a substring of an unrelated
+   page's longer title). Below that floor, only the exact fingerprint check counts.
+4. **`recoverySegmentsBuilt: 0` despite a genuine restore-failure incident.** Root cause:
+   `pushRouteAttemptDiagnostic`/`pushAlternativeCandidateDiagnostic` in `loop.ts` silently
+   no-op'd for any branch whose `entryReason` was `"ambiguity"` (an early guard checked
+   `entryReason !== "milestone_recovery"`) -- but the branch-return-hop path that throws
+   `decision_point_restore_failed` runs for *every* closed branch regardless of entry reason,
+   so an ordinary ambiguity-entered branch's restore-failure was never recorded as a
+   `RouteAttemptDiagnostic`/`AlternativeCandidateDiagnostic` at all, and `buildRecoverySegments`
+   had nothing to build from. The guard is now `if (!branch.result) return;` with
+   `anchorCriterionId` falling back to `branch.decisionPointId` when
+   `recoveryAnchorCriterionId` is absent (the ambiguity-entry case). New, additive
+   `journeyMemoryDiagnostics` fields expose the full eligibility accounting rather than a
+   silent zero: `recoveryCandidatesBuilt`, `recoveryCandidatesRejected`,
+   `recoveryRejectionReasons` (computed by `computeRecoveryEligibilityDiagnostics`,
+   `src/core/journeyMemory/segmentBuilder.ts`, using the exact same eligibility rules as
+   `buildRecoverySegments` itself). A failed/unverified restoration is still never stored as a
+   verified success, and never overwrites/outranks one.
+
+Schema/version impact: additive only. `RouteAttemptDiagnostic` -> `1.2.0`,
+`JourneyMemoryDiagnostics` -> `1.2.0`, top-level `schemaVersion`/`outputSchemaVersion` bumped
+accordingly (see `schemas/task-response.schema.json` / `schemas/task-request.schema.json`
+changelog descriptions). No new action types, no new waiting/readiness framework, no second
+memory system, zero extra Claude calls on a normal run, `JOURNEY_MEMORY_*` flags unchanged
+(still default off).
+
 ## Design summary
 
 - **Storage**: Redis, keyspace `nav-engine:journey-memory:*` (separate from the existing

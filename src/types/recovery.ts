@@ -152,6 +152,28 @@ export interface RouteAttemptDiagnostic {
   consentInterruptionsHandled: number;
   /** Present on a terminal transition (route_succeeded, candidate_exhausted). */
   terminationReason?: string;
+  /**
+   * Re-observation/reconstruction gap fix (production incident
+   * run_fae0519a-ef71-46b9-a053-4ca82bb30000, closing PR #68's own deferred piece -- see
+   * core/branchReturnRecovery.ts): present on a terminal transition (anchor_restored,
+   * candidate_exhausted) reached via the branch-return-hop path, distinguishing "the engine
+   * genuinely attempted live, bounded verification before deciding" from the pre-existing
+   * next-step-only fingerprint recheck. Never present for a transition where no restoration
+   * attempt was in progress at all (route_active, route_progressing, etc.).
+   */
+  reObservationAttempted?: boolean;
+  /** Present only when reObservationAttempted is true: which evidence, if any, verified restoration. */
+  reObservationOutcome?: "verified_by_fingerprint" | "verified_by_semantic_match" | "not_verified";
+  /** True once a last-resort checkpoint-reconstruction navigation (Task 2) was actually dispatched for this restore episode. */
+  fallbackNavigationAttempted?: boolean;
+  /** True only when that reconstruction navigation both succeeded and its resulting page was live-verified as restored. */
+  fallbackNavigationUsed?: boolean;
+  /** True when a decision-point checkpoint (core/decisionPointCheckpoint.ts) was found and used to attempt reconstruction/semantic matching -- never itself proof of restoration. */
+  checkpointMatched?: boolean;
+  /** Outcome of the checkpoint-reconstruction attempt, when one was made -- see branchReturnRecovery.ts's CheckpointReconstructionOutcome. */
+  reconstructionOutcome?: "not_attempted" | "verified" | "unverified" | "skipped_fingerprint_guard" | "skipped_no_checkpoint";
+  /** The final, live-evidence-only verdict this restore episode reached, after every bounded recovery step available was attempted. */
+  finalLiveVerificationOutcome?: "restored" | "unverified" | "restore_failed";
 }
 
 /**
@@ -198,7 +220,7 @@ export interface ConsentSurfaceDiagnostic {
  * recovery". Present only when at least one recovery-anchor restore was attempted this run.
  */
 export interface RecoveryDiagnostics {
-  version: "1.1.0";
+  version: "1.2.0";
   anchorsRecorded: number;
   attempts: RecoveryAttemptDiagnostic[];
   /** Full route-lifecycle transition trace -- see RouteAttemptDiagnostic above. */

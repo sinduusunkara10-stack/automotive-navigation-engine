@@ -1350,7 +1350,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.28.0";
+  schemaVersion: "1.29.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

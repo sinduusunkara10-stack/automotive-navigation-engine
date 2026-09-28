@@ -137,7 +137,7 @@ export interface JourneyMemoryRecoveryCallDiagnostic {
 
 /** Mirrors schemas/task-response.schema.json's additive diagnostics.journeyMemory $def. Built once at run end from the accumulated JourneyMemoryContext + writeback outcome. */
 export interface JourneyMemoryDiagnostics {
-  version: "1.1.0";
+  version: "1.2.0";
   enabled: boolean;
   readEnabled: boolean;
   writeEnabled: boolean;
@@ -164,6 +164,17 @@ export interface JourneyMemoryDiagnostics {
   forwardSegmentsBuilt?: number;
   /** Journey Memory recovery-segment-gap fix: recovery segments built from all three diagnostic sources, after cross-source dedup, before write-back. */
   recoverySegmentsBuilt?: number;
+  /**
+   * Recovery-segment eligibility visibility fix (production incident
+   * run_fae0519a-ef71-46b9-a053-4ca82bb30000): candidate recovery inputs actually considered
+   * from the three diagnostic sources, before eligibility filtering/dedup -- lets a caller
+   * distinguish "genuinely nothing to build from" from "candidates existed but were rejected".
+   */
+  recoveryCandidatesBuilt?: number;
+  /** Same fix: how many of those candidates were rejected as ineligible (never silently dropped without a reason -- see recoveryRejectionReasons). */
+  recoveryCandidatesRejected?: number;
+  /** Same fix: short, generic reason categories for rejected candidates, with counts -- never raw page content. */
+  recoveryRejectionReasons?: { reason: string; count: number }[];
   /** Observability fix: count of segments a write was actually attempted for (writeEnabled + storage available + >=1 eligible segment). */
   segmentsWriteAttempted?: number;
   segmentsWritten: number;
