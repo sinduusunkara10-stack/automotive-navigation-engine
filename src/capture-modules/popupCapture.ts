@@ -43,15 +43,18 @@ export interface SurfaceAdoptionRequest {
   adoptedSurfaceCount: number;
   maxAdoptedSurfacesPerRun: number | undefined;
   /**
-   * Surface-relevance assessment (PR 3): free text (task objective + success-criteria
-   * descriptions + journeyType + the triggering CTA's own accessible name, all folded
-   * together by core/loop.ts before this request is built) the candidate's own page signals
-   * are scored against -- see core/surfaceRelevance.ts. Optional and additive: absent or
-   * empty means the relevance gate is skipped entirely and adoption falls through to the
-   * pre-existing domain/budget-only decision, so every test fixture and call site built
-   * before PR 3 keeps its exact prior behaviour without needing to set this.
+   * Surface-relevance assessment (PR 3): the task objective, each success-criterion
+   * description, the journeyType, and the triggering CTA's own accessible name (built by
+   * core/loop.ts before this request is built), kept as separate anchors -- never joined
+   * into one string -- so core/surfaceRelevance.ts can score the candidate against each
+   * independently and take the best match; see that module's own doc comment for why
+   * blending them would dilute a genuinely relevant later-milestone destination's score.
+   * Optional and additive: absent or empty means the relevance gate is skipped entirely and
+   * adoption falls through to the pre-existing domain/budget-only decision, so every test
+   * fixture and call site built before PR 3 keeps its exact prior behaviour without needing
+   * to set this.
    */
-  relevanceObjectiveText?: string;
+  relevanceObjectiveTexts?: string[];
   /** See core/surfaceRelevance.ts's own doc comment -- absent by default, same convention as safety/consentClassifier.ts's ConsentAmbiguityResolver. */
   relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
   /**
@@ -83,7 +86,7 @@ export interface AdoptOrCapturePopupResult extends AdoptPopupForCaptureResult {
   /** Mirrors AdoptionDecision.extendedAllowedDomain -- see core/surfaceAdoption.ts. */
   extendedAllowedDomain?: string;
   /**
-   * Present only when the relevance gate actually ran (surfaceAdoption.relevanceObjectiveText
+   * Present only when the relevance gate actually ran (surfaceAdoption.relevanceObjectiveTexts
    * was non-empty) -- full detail for diagnostics (PR 6 wires this into
    * TaskResponse.diagnostics; not yet wire-exposed as of PR 3, same treatment as
    * adoptionRejectedReason's own new "relevance_rejected" value).
@@ -142,12 +145,12 @@ export interface ConsentOnlyCandidateOutcome {
  */
 export async function attemptConsentOnlyCandidateResolution(params: {
   popup: Page;
-  objectiveText: string;
+  objectiveTexts: string[];
   settleCeilingMs?: number;
   ambiguityResolver?: SurfaceRelevanceAmbiguityResolver;
   consentInteractionPolicy?: ConsentInteractionPolicy;
 }): Promise<ConsentOnlyCandidateOutcome> {
-  const { popup, objectiveText, settleCeilingMs, ambiguityResolver, consentInteractionPolicy } = params;
+  const { popup, objectiveTexts, settleCeilingMs, ambiguityResolver, consentInteractionPolicy } = params;
 
   let consentSurfaceDetected = false;
   let acceptAllElementId: string | undefined;
@@ -179,7 +182,7 @@ export async function attemptConsentOnlyCandidateResolution(params: {
   const ceilingMs = Math.min(settleCeilingMs ?? DEFAULT_SETTLE_CEILING_MS, MAX_SETTLE_CEILING_MS);
   await waitForAdaptiveSettle(popup, { ceilingMs }).catch(() => ({ elapsedMs: 0, reason: "ceiling_reached" as const }));
 
-  const reassessment = await assessSurfaceRelevance({ page: popup, objectiveText, settleCeilingMs, ambiguityResolver });
+  const reassessment = await assessSurfaceRelevance({ page: popup, objectiveTexts, settleCeilingMs, ambiguityResolver });
   return { consentSurfaceDetected: true, actionAttempted: true, actionSucceeded: true, reassessment };
 }
 
@@ -330,10 +333,10 @@ export async function adoptOrCapturePopup(params: {
   // (that only ever happens via core/loop.ts's RunState.pushSurface on a genuine adoption),
   // satisfying "relevance-rejected surfaces must not consume maxAdoptedSurfacesPerRun" by
   // construction. Skipped entirely (byte-for-byte prior behaviour) when the caller never set
-  // relevanceObjectiveText -- see SurfaceAdoptionRequest's own doc comment.
+  // relevanceObjectiveTexts -- see SurfaceAdoptionRequest's own doc comment.
   let relevanceAssessment: SurfaceRelevanceAssessment | undefined;
   let consentOnlyCandidateHandling: ConsentOnlyCandidateOutcome | undefined;
-  if (surfaceAdoption.relevanceObjectiveText) {
+  if (surfaceAdoption.relevanceObjectiveTexts && surfaceAdoption.relevanceObjectiveTexts.length > 0) {
     const budget = surfaceAdoption.maxAdoptedSurfacesPerRun ?? DEFAULT_MAX_ADOPTED_SURFACES_PER_RUN;
     const budgetExhausted = surfaceAdoption.adoptedSurfaceCount >= budget;
     if (!budgetExhausted) {
@@ -351,7 +354,7 @@ export async function adoptOrCapturePopup(params: {
       try {
         relevanceAssessment = await assessSurfaceRelevance({
           page: popup,
-          objectiveText: surfaceAdoption.relevanceObjectiveText,
+          objectiveTexts: surfaceAdoption.relevanceObjectiveTexts,
           settleCeilingMs,
           ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
         });
@@ -374,7 +377,7 @@ export async function adoptOrCapturePopup(params: {
         if (!relevanceAssessment.relevant) {
           consentOnlyCandidateHandling = await attemptConsentOnlyCandidateResolution({
             popup,
-            objectiveText: surfaceAdoption.relevanceObjectiveText,
+            objectiveTexts: surfaceAdoption.relevanceObjectiveTexts,
             settleCeilingMs,
             ambiguityResolver: surfaceAdoption.relevanceAmbiguityResolver,
             consentInteractionPolicy: surfaceAdoption.consentInteractionPolicy,

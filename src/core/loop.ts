@@ -1831,28 +1831,32 @@ export async function runStep(params: {
   // task) reproduces actions/click.ts's pre-PR-3 capture-only-and-close popup handling
   // exactly -- see adoptOrCapturePopup's own doc comment.
   // Surface-relevance assessment (PR 3, see CLAUDE.md and docs/architecture.md "Surface
-  // adoption"): the free text src/core/surfaceRelevance.ts scores a just-opened candidate's
-  // own page signals against, built once per click dispatch rather than threading a separate
+  // adoption"): the anchors src/core/surfaceRelevance.ts scores a just-opened candidate's own
+  // page signals against, built once per click dispatch rather than threading a separate
   // CTA-name field further down through popupCapture.ts/click.ts -- the objective, this
   // task's own success-criteria wording, the journeyType hint, and (when available) the
   // clicked CTA's own accessible name, exactly the evidence the approved design doc's own
-  // "triggering CTA's accessible name/context" requirement calls for. Only built for a click
-  // (the one action type a popup/new-tab can ever originate from); every other action type
-  // leaves surfaceAdoptionRequest undefined entirely, unchanged from before this PR.
+  // "triggering CTA's accessible name/context" requirement calls for. Kept as separate array
+  // entries rather than one joined string: a multi-step objective's later milestones (e.g. a
+  // Summary/basket page) typically share almost no vocabulary with earlier ones, and
+  // surfaceRelevance.ts's coverage score divides by an anchor's own token count, so blending
+  // every criterion into one string before scoring lets each additional, unrelated milestone
+  // dilute the one that actually matches -- see surfaceRelevance.ts's own doc comment. Only
+  // built for a click (the one action type a popup/new-tab can ever originate from); every
+  // other action type leaves surfaceAdoptionRequest undefined entirely, unchanged from before
+  // this PR.
   const clickedCtaAccessibleName =
     isClick && effectiveAction.target
       ? observation.interactiveElements.find((el) => el.id === effectiveAction.target)?.accessibleName
       : undefined;
-  const relevanceObjectiveText = isClick
+  const relevanceObjectiveTexts = isClick
     ? [
         task.objective,
         ...task.successCriteria.map((criterion) => criterion.description),
         task.journeyType,
         clickedCtaAccessibleName,
-      ]
-        .filter((part): part is string => Boolean(part && part.trim().length > 0))
-        .join(" ")
-    : "";
+      ].filter((part): part is string => Boolean(part && part.trim().length > 0))
+    : [];
 
   const surfaceAdoptionRequest: SurfaceAdoptionRequest | undefined = isClick
     ? {
@@ -1861,7 +1865,7 @@ export async function runStep(params: {
         allowedDomains: effectiveAllowedDomains,
         adoptedSurfaceCount: state.adoptedSurfaceCount,
         maxAdoptedSurfacesPerRun: task.safety.maxAdoptedSurfacesPerRun,
-        ...(relevanceObjectiveText ? { relevanceObjectiveText } : {}),
+        ...(relevanceObjectiveTexts.length > 0 ? { relevanceObjectiveTexts } : {}),
         ...(relevanceAmbiguityResolver ? { relevanceAmbiguityResolver } : {}),
         ...(task.safety.consentInteractionPolicy ? { consentInteractionPolicy: task.safety.consentInteractionPolicy } : {}),
       }

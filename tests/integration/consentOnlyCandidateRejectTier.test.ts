@@ -29,7 +29,7 @@ test("reproduction: a realistic, non-vehicle-worded consent banner classifies as
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/surface-relevance-consent-reject-tier.html`);
-    const assessment = await assessSurfaceRelevance({ page, objectiveText: OBJECTIVE });
+    const assessment = await assessSurfaceRelevance({ page, objectiveTexts: [OBJECTIVE] });
     assert.equal(assessment.score, 0);
     assert.equal(assessment.tier, "reject");
     assert.equal(assessment.uncertain, false);
@@ -62,7 +62,7 @@ test("corrected behaviour: a new tab opens with a generic title and only a conse
         allowedDomains: ["127.0.0.1"],
         adoptedSurfaceCount: 0,
         maxAdoptedSurfacesPerRun: 5,
-        relevanceObjectiveText: OBJECTIVE,
+        relevanceObjectiveTexts: [OBJECTIVE],
         consentInteractionPolicy: "accept_optional",
       },
     });
@@ -105,7 +105,7 @@ test("safety preserved: an irrelevant popup that also carries a genuine consent 
         allowedDomains: ["127.0.0.1"],
         adoptedSurfaceCount: 0,
         maxAdoptedSurfacesPerRun: 5,
-        relevanceObjectiveText: OBJECTIVE,
+        relevanceObjectiveTexts: [OBJECTIVE],
         consentInteractionPolicy: "accept_optional",
       },
     });

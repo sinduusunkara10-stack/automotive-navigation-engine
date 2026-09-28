@@ -26,7 +26,7 @@ test("accept_optional + a genuine consent-only candidate: exactly one accept act
     await page.goto(`${baseUrl}/surface-relevance-consent-only.html`);
     const outcome = await attemptConsentOnlyCandidateResolution({
       popup: page,
-      objectiveText: OBJECTIVE,
+      objectiveTexts: [OBJECTIVE],
       consentInteractionPolicy: "accept_optional",
     });
     assert.equal(outcome.consentSurfaceDetected, true);
@@ -55,7 +55,7 @@ test("any policy other than accept_optional: zero interaction attempted, banner 
     await page.goto(`${baseUrl}/surface-relevance-consent-only.html`);
     const outcome = await attemptConsentOnlyCandidateResolution({
       popup: page,
-      objectiveText: OBJECTIVE,
+      objectiveTexts: [OBJECTIVE],
       consentInteractionPolicy: "reject_optional",
     });
     assert.equal(outcome.consentSurfaceDetected, true);
@@ -78,7 +78,7 @@ test("undefined consentInteractionPolicy (task never opted in): zero interaction
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/surface-relevance-consent-only.html`);
-    const outcome = await attemptConsentOnlyCandidateResolution({ popup: page, objectiveText: OBJECTIVE });
+    const outcome = await attemptConsentOnlyCandidateResolution({ popup: page, objectiveTexts: [OBJECTIVE] });
     assert.equal(outcome.actionAttempted, false);
     assert.equal(outcome.actionSucceeded, false);
   } finally {
@@ -96,7 +96,7 @@ test("no genuine consent surface present: never invoked for an ordinary (non-con
     await page.goto(`${baseUrl}/surface-relevance-ambiguous.html`);
     const outcome = await attemptConsentOnlyCandidateResolution({
       popup: page,
-      objectiveText: OBJECTIVE,
+      objectiveTexts: [OBJECTIVE],
       consentInteractionPolicy: "accept_optional",
     });
     assert.equal(outcome.consentSurfaceDetected, false);

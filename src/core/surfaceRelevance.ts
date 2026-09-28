@@ -143,16 +143,37 @@ export interface SurfaceRelevanceAssessment {
  */
 export async function assessSurfaceRelevance(params: {
   page: Page;
-  objectiveText: string;
+  /**
+   * Scored independently, never concatenated into one shared-denominator string: the
+   * objective, each individual success-criterion description, the journeyType hint, and the
+   * triggering CTA's own accessible name are each their own anchor here (mirrors
+   * core/successEvaluator.ts's own `[objective, criterion.description]` per-criterion
+   * anchorText -- see its doc comment "done against *this specific criterion's* own
+   * anchorText -- not the blended one"). A multi-step objective's later milestones (e.g. a
+   * Summary/basket page) routinely share almost no vocabulary with earlier ones (selecting a
+   * model, entering a configurator); objectiveTokenCoverage divides by the anchor's own
+   * distinct-token count, so folding every criterion into one blob before scoring makes the
+   * denominator grow with every *unrelated* milestone and can drive a correct, highly relevant
+   * destination's score to near zero even though one of its anchors matches strongly. Scoring
+   * each anchor against the candidate's signals and taking the max (the same "one strong
+   * signal is enough" principle scoreSemanticPageMatch already applies across signal groups)
+   * fixes this without weakening the reject side: an anchor list of pure noise still scores 0.
+   */
+  objectiveTexts: string[];
   settleCeilingMs?: number;
   ambiguityResolver?: SurfaceRelevanceAmbiguityResolver;
 }): Promise<SurfaceRelevanceAssessment> {
-  const { page, objectiveText, settleCeilingMs, ambiguityResolver } = params;
+  const { page, objectiveTexts, settleCeilingMs, ambiguityResolver } = params;
+  const anchors = objectiveTexts.filter((text) => text.trim().length > 0);
+  const combinedObjectiveText = anchors.join(" ");
 
   const evaluateOnce = async (): Promise<{ signals: SemanticPageSignals; score: number; usable: boolean }> => {
     const signals = await gatherSemanticPageSignals(page);
     const usable = await hasUsableDocument(page);
-    const score = scoreSemanticPageMatch(objectiveText, signals, ALL_SEMANTIC_SIGNALS).overall;
+    const score =
+      anchors.length === 0
+        ? 0
+        : Math.max(...anchors.map((anchor) => scoreSemanticPageMatch(anchor, signals, ALL_SEMANTIC_SIGNALS).overall));
     return { signals, score, usable };
   };
 
@@ -203,7 +224,7 @@ export async function assessSurfaceRelevance(params: {
   const resolved = ambiguityResolver
     ? await resolveAmbiguousSurfaceRelevance(
         {
-          objectiveText,
+          objectiveText: combinedObjectiveText,
           title: attempt.signals.title,
           headings: attempt.signals.headings,
           interactiveText: attempt.signals.interactiveText,
