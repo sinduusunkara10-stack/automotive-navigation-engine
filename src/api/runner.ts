@@ -167,6 +167,7 @@ export async function executeTaskAsync(
         semanticVerifier,
         relevanceAmbiguityResolver,
         isMemoryThresholdBreached: memoryBreakerEnabled ? () => containerMemoryBreached : undefined,
+        describeRoutedPage: routing?.describePage,
       });
     } finally {
       // Routing must be detached while the page is still open; page.close() is

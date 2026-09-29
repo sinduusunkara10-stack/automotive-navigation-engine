@@ -7,6 +7,8 @@ import type { TaskRequest } from "../../src/types/task-request.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 import { ScriptedReasoningProvider, byAccessibleName } from "../helpers/scriptedReasoningProvider.js";
 import { buildAnalyticsReportingRowsItems } from "../../n8n/buildAnalyticsReportingRows.js";
+import { attachLowMemoryResourceRouting } from "../../src/api/browserResourceRouting.js";
+import { validateAgainstTaskResponseSchema } from "../helpers/validateTaskResponseSchema.js";
 
 /**
  * Full-engine active-tab continuation (owner-mandated corrective pass, follow-up to PR #71):
@@ -62,7 +64,7 @@ function crossHostBase(baseUrl: string): string {
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.28.0",
+    schemaVersion: "1.29.0",
     taskId: "full-engine-popup-continuation-test",
     objective: "Review the configuration overview, complete the finance application, and reach the submission confirmation.",
     startUrl,
@@ -88,7 +90,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
       allowSurfaceAdoption: true,
       surfaceAdoptionDomainPolicy: "require_allowed_domain",
     },
-    outputSchemaVersion: "1.30.0",
+    outputSchemaVersion: "1.31.0",
     ...rest,
   };
 }
@@ -424,6 +426,189 @@ test("full-engine recovery case: closing the adopted popup safely restores the o
       "the opener must keep capturing correctly after the popup closes, with exactly one entry for its own post-return click -- never zero and never duplicated",
     );
     assert.equal(returnClick!.actionAnalytics?.captureHealth?.dataLayerPushListenerActive, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("full-engine low-memory resource routing: original page, an adopted popup, and a popup opened from that popup are all protected, with heavy resources blocked and functional/analytics evidence preserved throughout", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  const routing = attachLowMemoryResourceRouting(page);
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/full-engine-source.html`,
+      successPattern: `${crossHostBase(baseUrl)}/full-engine-nested-milestone.html`,
+      captureModules: ["page_visits", "cta_clicks", "data_layer_evidence", "ga4_network_events", "errors"],
+      successCriteria: [
+        {
+          id: "reviewed_overview",
+          type: "semantic_page_match",
+          description: "Review the configuration overview summarizing the vehicle and estimated price.",
+          required: false,
+        },
+        {
+          id: "reviewed_nested_promo",
+          type: "semantic_page_match",
+          description: "Review the nested promotional trade-in bonus offer.",
+          required: false,
+        },
+        {
+          id: "reached_milestone",
+          type: "url_pattern",
+          description: "The nested offer confirmation is reached.",
+          config: { pattern: `${crossHostBase(baseUrl)}/full-engine-nested-milestone.html` },
+        },
+      ],
+    });
+    const reasoning = new ScriptedReasoningProvider([
+      byAccessibleName("Continue to Offer"),
+      byAccessibleName("Open Nested Promo"),
+      byAccessibleName("Confirm Nested"),
+    ]);
+
+    const response = await runTask({
+      page,
+      task,
+      reasoning,
+      describeRoutedPage: routing.describePage,
+      relevanceAmbiguityResolver: { resolve: async () => ({ relevant: true, rationale: "unused", confidence: 1 }) },
+    });
+    const resourceRouting = routing.diagnostics();
+    await routing.detach();
+
+    // 1-4: the whole three-page chain (original, adopted popup, nested popup) reaches the
+    // milestone successfully, with routing active on all of them throughout.
+    assert.equal(response.status, "success");
+    assert.equal(resourceRouting.mode, "low_memory");
+    assert.equal(resourceRouting.byPage.length, 3, "expected exactly one routing entry each for the original page, the adopted popup, and the nested popup");
+
+    const original = resourceRouting.byPage.find((p) => p.role === "original");
+    const adopted = resourceRouting.byPage.find((p) => p.role === "adopted_popup");
+    const nested = resourceRouting.byPage.find((p) => p.role === "nested_popup");
+    assert.ok(original && adopted && nested, "expected one page of each role: original, adopted_popup, nested_popup");
+    assert.equal(adopted?.contextId, "main");
+    assert.equal(nested?.contextId, "main");
+    assert.ok(adopted?.surfaceId && nested?.surfaceId && adopted.surfaceId !== nested.surfaceId);
+
+    // 5-7: heavy image/font resources are blocked on every one of the three pages -- the
+    // original page's own hero photo/font, the adopted popup's own configuration photo/font,
+    // and the nested popup's own trade-in-bonus photo/font (see the <img>/<link preload>
+    // tags added to full-engine-source.html/full-engine-overview.html/full-engine-nested-
+    // promo.html specifically for this test).
+    for (const [label, entry] of [
+      ["original", original],
+      ["adopted popup", adopted],
+      ["nested popup", nested],
+    ] as const) {
+      const image = entry?.byResourceType.find((e) => e.resourceType === "image");
+      assert.ok((image?.blockedCount ?? 0) >= 1, `expected the ${label} page's own heavy image to be blocked`);
+      const font = entry?.byResourceType.find((e) => e.resourceType === "font");
+      assert.ok((font?.blockedCount ?? 0) >= 1, `expected the ${label} page's own preloaded font to be blocked`);
+    }
+
+    // 8: functional/document resources remain allowed -- the run could not have navigated
+    // through all three pages otherwise. Checked at the run level rather than strictly per
+    // page: a brand-new popup's own very first navigation request can hit a narrow Playwright
+    // timing case where the initiating frame isn't attributable yet (see routeHandler's own
+    // comment on unattributedTallies) -- blocking is unaffected either way ("document" is
+    // never blocked), only which bucket the count lands in.
+    const runDocumentAllowed = resourceRouting.byResourceType.find((e) => e.resourceType === "document")?.allowedCount ?? 0;
+    assert.ok(runDocumentAllowed >= 3, "expected at least one allowed document request per page (original + adopted popup + nested popup)");
+
+    // 9-10: GA4 and data-layer evidence from both the adopted popup's own landing (promo_page_
+    // viewed) and the nested popup's own click (nested_offer_confirmed) are still fully
+    // captured, even though their own GA4 beacons are themselves image-type requests and so
+    // are blocked at the network layer by the same policy -- capture (page.on("request"))
+    // fires regardless of how routing later resolves the request, exactly as it already does
+    // for the original page (see lowMemoryBrowserMode.test.ts).
+    const ga4Events = response.captures?.ga4_network_events ?? [];
+    assert.ok(ga4Events.some((e) => e.params?.en === "promo_page_viewed"), "expected the adopted popup's own landing GA4 beacon to still be captured");
+    assert.ok(ga4Events.some((e) => e.params?.en === "nested_offer_confirmed"), "expected the nested popup's own click GA4 beacon to still be captured");
+    const dataLayerEvents = (response.captures?.data_layer_evidence ?? []).flatMap((c) => c.raw);
+    assert.ok(dataLayerEvents.some((r) => r.event === "nested_offer_confirmed"), "expected the nested popup's own dataLayer push to still be captured");
+
+    // 11: no duplicate registration/route-handler noise -- exactly one entry per page, each
+    // registered exactly once.
+    for (const entry of [original, adopted, nested]) {
+      assert.equal(entry?.duplicateRegistrationPrevented, false);
+      assert.equal(entry?.registrationCompleted, true);
+    }
+
+    // 12: blocking is fulfilled, never aborted -- no network_request_failed noise attributable
+    // to the intentionally-blocked heavy resources specifically (a click handler that fires a
+    // beacon and then immediately navigates the very same page, as full-engine-nested-promo.
+    // html's own "Confirm Nested" handler does, can independently race a net::ERR_ABORTED from
+    // Chromium's own navigation teardown -- a pre-existing property of that pattern, unrelated
+    // to whether low-memory routing blocked anything).
+    const blockedResourceErrors = (response.captures?.errors ?? []).filter(
+      (e) => e.category === "network_request_failed" && (e.message.includes("heavy-photo.jpg") || e.message.includes("heavy-font.woff2")),
+    );
+    assert.equal(blockedResourceErrors.length, 0);
+
+    // 13: run-level totals equal the sum of the three pages' own totals.
+    const runImageBlocked = resourceRouting.byResourceType.find((e) => e.resourceType === "image")?.blockedCount ?? 0;
+    const perPageImageBlocked = [original, adopted, nested].reduce(
+      (sum, e) => sum + (e?.byResourceType.find((t) => t.resourceType === "image")?.blockedCount ?? 0),
+      0,
+    );
+    assert.equal(runImageBlocked, perPageImageBlocked);
+
+    // 14: neither popup was ever closed during this journey (the milestone is reached via an
+    // ordinary same-page navigation inside the nested popup, not a window.close()) -- their
+    // routing state is released instead by detach() above, exactly as it is for the original
+    // page (see the "detach() ... preserves still-open pages' diagnostics" unit test);
+    // popup-close release is covered separately (the "rejected popup" test below, and the
+    // existing recovery-case test's own listener-handoff closure assertions).
+    assert.equal(adopted?.registrationCompleted, true);
+    assert.equal(nested?.registrationCompleted, true);
+
+    // 15: the response actually returned to a caller -- with diagnostics.resourceRouting
+    // populated exactly as src/api/runner.ts populates it -- validates against the real
+    // task-response.schema.json, byPage included.
+    const validation = await validateAgainstTaskResponseSchema({ ...response, diagnostics: { ...response.diagnostics, resourceRouting } });
+    assert.ok(validation.valid, validation.errorsText);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("full-engine low-memory resource routing: an unrelated rejected popup is still protected while observed, and releases its routing state when closed", async () => {
+  const { baseUrl, close } = await startStaticServer(new URL("../fixtures", import.meta.url).pathname);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  const routing = attachLowMemoryResourceRouting(page);
+
+  try {
+    const task = baseTask({
+      startUrl: `${baseUrl}/full-engine-source-unrelated.html`,
+      successPattern: `${crossHostBase(baseUrl)}/full-engine-milestone.html`,
+      captureModules: ["page_visits", "cta_clicks", "data_layer_evidence", "ga4_network_events", "errors"],
+    });
+    const reasoning = new ScriptedReasoningProvider([byAccessibleName("Continue to Offer")]);
+    const relevanceAmbiguityCalls: unknown[] = [];
+
+    await runTask({
+      page,
+      task,
+      reasoning,
+      relevanceAmbiguityResolver: { resolve: async (ctx) => (relevanceAmbiguityCalls.push(ctx), { relevant: true, rationale: "unused", confidence: 1 }) },
+      describeRoutedPage: routing.describePage,
+    });
+    const resourceRouting = routing.diagnostics();
+    await routing.detach();
+
+    assert.equal(relevanceAmbiguityCalls.length, 0, "expected the unrelated popup to be deterministically rejected, never reaching the Claude call");
+    const rejectedPopup = resourceRouting.byPage.find((p) => p.role === "popup");
+    assert.ok(rejectedPopup, "expected the rejected popup to still have its own routing diagnostics entry, never discarded");
+    assert.equal(rejectedPopup?.registrationCompleted, true);
+    assert.equal(rejectedPopup?.routingReleasedOnClose, true, "expected its routing state to be released once it was closed unadopted");
   } finally {
     await page.close();
     await browser.close();

@@ -22,6 +22,7 @@ import { classifyActionFailure, recordDiagnosticError, attachErrorCapture } from
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import { attachAdoptedSurfaceListeners } from "../capture-modules/adoptedSurfaceListeners.js";
+import type { ResourceRoutingPageRole } from "../types/task-response.js";
 import { computeCandidateIdentity, computeDecisionPointFingerprint } from "./routeMemory.js";
 import { captureDecisionPointCheckpoint } from "./decisionPointCheckpoint.js";
 import { attemptCheckpointReconstruction, matchesDecisionPoint, reobserveForBranchReturn } from "./branchReturnRecovery.js";
@@ -221,6 +222,18 @@ export interface LoopStepOutcome {
   finishReason?: string;
 }
 
+/**
+ * Labels an already-routed Page's role once a surface-adoption decision is known (see
+ * src/api/browserResourceRouting.ts's describePage) -- purely a diagnostics label, since
+ * low-memory resource routing itself is already active on every page in the run's browser
+ * context from the moment Playwright creates it, adopted or not.
+ */
+export type RoutedPageDescriber = (
+  page: Page,
+  role: Extract<ResourceRoutingPageRole, "adopted_popup" | "nested_popup">,
+  meta: { surfaceId: string },
+) => void;
+
 export async function runStep(params: {
   page: Page;
   task: ResolvedTaskRequest;
@@ -235,6 +248,8 @@ export async function runStep(params: {
   relevanceAmbiguityResolver?: SurfaceRelevanceAmbiguityResolver;
   /** See runTask's own param of the same name (src/core/engine.ts). */
   isMemoryThresholdBreached?: () => boolean;
+  /** See runTask's own param of the same name (src/core/engine.ts). */
+  describeRoutedPage?: RoutedPageDescriber;
 }): Promise<LoopStepOutcome> {
   const {
     task,
@@ -246,6 +261,7 @@ export async function runStep(params: {
     consentAmbiguityResolver,
     relevanceAmbiguityResolver,
     isMemoryThresholdBreached,
+    describeRoutedPage,
   } = params;
   // Return-to-parent recovery (Phase 3 PR 4, see CLAUDE.md and docs/architecture.md
   // "Return-to-parent recovery"): unexpected-closure detection -- the site itself may have
@@ -1985,8 +2001,20 @@ export async function runStep(params: {
   // code path, recursively).
   if (actionResult.surfaceAdopted && surfaceAdoptionRequest?.adopted) {
     const { page: adoptedPage, url: adoptedUrl, extendedAllowedDomain, adoptedListenerHandles } = surfaceAdoptionRequest.adopted;
+    // Captured before pushSurface below changes it: a "nested" adoption is one whose
+    // opener was itself an already-adopted surface, not the original page -- the same
+    // recursive chain the comment above describes, just for the resource-routing label
+    // rather than for listener attachment.
+    const previousActiveSurface = state.activeSurface;
     const newSurfaceId = state.nextAdoptedSurfaceId();
     state.pushSurface(newSurfaceId, adoptedPage);
+    // Low-memory resource routing (if enabled) is already active on adoptedPage from the
+    // instant Playwright created it -- context-level routing, see
+    // src/api/browserResourceRouting.ts's own doc comment -- so this only labels its role
+    // for the diagnostics report, never affecting blocking behaviour.
+    describeRoutedPage?.(adoptedPage, previousActiveSurface === MAIN_SURFACE_ID ? "adopted_popup" : "nested_popup", {
+      surfaceId: newSurfaceId,
+    });
     // Adopted-surface listener handoff (surface-adoption corrective pass, follow-up to
     // PR #71): the same real-time GA4/dataLayer-push/error observers engine.ts attached
     // once to the originally-tracked Page at run start must also be attached here, the
