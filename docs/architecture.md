@@ -3665,3 +3665,38 @@ Additive only. `$defs/routeAttemptDiagnostic` gains optional `reObservationAttem
 renamed, or had its unconditional meaning changed. No new action type, no new
 waiting/readiness framework, no second memory system, zero extra Claude calls on a normal run,
 `JOURNEY_MEMORY_*` flags unchanged (still default off).
+
+### Surface-adoption three-tier corrective work (schemaVersion 1.29.0 -> 1.30.0)
+
+Additive only, wiring the Tier-3 Claude ambiguity resolver (reasoning/
+claudeSurfaceRelevanceAmbiguityResolver.ts) and popup fingerprinting/retry protection (core/
+surfaceFingerprint.ts) onto the wire. `ActionResult` and `$defs/surfaceAdoptionAttemptDiagnostic`
+each gain optional `candidateSurfaceFingerprint`, `fingerprintPreviouslySeen`,
+`popupReconsiderationReason`. No existing field removed, renamed, or had its unconditional
+meaning changed; `relevanceScore`/`relevanceTier`/`consentActionTaken`/`extendedAllowedDomain`
+are reused as-is rather than duplicated under new names. `relevanceAmbiguityResolver` is now
+wired to a real, Claude-backed implementation in `src/api/runner.ts` (previously always
+undefined in production, so the ambiguous relevance band always failed closed) -- no schema
+change, since the resolver itself was already part of the internal (non-wire) surface.
+
+### Low-memory resource routing extended to the full popup/new-tab chain (schemaVersion 1.30.0 -> 1.31.0)
+
+Low-memory browser mode's resource routing (`src/api/browserResourceRouting.ts`) previously
+attached only to the run's originally-tracked page (`page.route(...)`), so an adopted popup or
+new tab -- which can load another full website, images, fonts and all -- was never protected,
+risking the same container-memory pressure the mode exists to prevent. `attachLowMemoryResourceRouting`
+now registers on the page's whole `BrowserContext` (`context.route(...)`), which Playwright
+applies to every page already in that context and every page created in it afterwards --
+a popup, a new tab, a popup opened from that popup, recursively -- from the instant each Page
+is created, before its own destination document requests a single resource. No per-popup
+attach call was added anywhere in `capture-modules/popupCapture.ts` or `core/loop.ts` for the
+blocking itself; `core/loop.ts`'s surface-adoption handling only calls the new `describePage`
+to label an already-protected Page's role (`adopted_popup`/`nested_popup`) for diagnostics.
+
+`$defs/resourceRoutingDiagnostics` gains a new required `byPage` array (`$defs/resourceRoutingPageDiagnostics`,
+new): per-page role, contextId/surfaceId once adopted, registration/navigation/closure
+diagnostics, and its own `byResourceType` breakdown -- alongside the existing `byResourceType`,
+now a true run-level total across every page. `schemaVersion`/`outputSchemaVersion` moved
+`1.30.0` -> `1.31.0`. No existing field removed, renamed, or had its meaning changed; no second
+routing framework, no brand/site-specific logic, and blocking behaviour itself is unchanged
+(still only image/media/font, still fulfilled rather than aborted).

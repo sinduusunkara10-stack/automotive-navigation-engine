@@ -881,6 +881,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         page: popupOutcome.adoptedPage,
         url: popupOutcome.adoptedUrl,
         ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
+        ...(popupOutcome.adoptedListenerHandles ? { adoptedListenerHandles: popupOutcome.adoptedListenerHandles } : {}),
       };
       return {
         success: true,
@@ -899,6 +900,13 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
           : {}),
         ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
         ...(popupOutcome.extendedAllowedDomain ? { extendedAllowedDomain: popupOutcome.extendedAllowedDomain } : {}),
+        ...(popupOutcome.candidateSurfaceFingerprint
+          ? { candidateSurfaceFingerprint: popupOutcome.candidateSurfaceFingerprint }
+          : {}),
+        ...(popupOutcome.fingerprintPreviouslySeen ? { fingerprintPreviouslySeen: true } : {}),
+        ...(popupOutcome.popupReconsiderationReason
+          ? { popupReconsiderationReason: popupOutcome.popupReconsiderationReason }
+          : {}),
       };
     }
     const observedNewContext = popupOutcome.observed;
@@ -944,6 +952,13 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         ? { relevanceScore: popupOutcome.relevanceAssessment.score, relevanceTier: popupOutcome.relevanceAssessment.tier }
         : {}),
       ...(popupOutcome.consentOnlyCandidateHandling?.actionSucceeded ? { consentActionTaken: true } : {}),
+      ...(popupOutcome.candidateSurfaceFingerprint
+        ? { candidateSurfaceFingerprint: popupOutcome.candidateSurfaceFingerprint }
+        : {}),
+      ...(popupOutcome.fingerprintPreviouslySeen ? { fingerprintPreviouslySeen: true } : {}),
+      ...(popupOutcome.popupReconsiderationReason
+        ? { popupReconsiderationReason: popupOutcome.popupReconsiderationReason }
+        : {}),
     };
   }
 

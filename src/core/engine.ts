@@ -14,7 +14,7 @@ import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVe
 import type { ConsentAmbiguityResolver } from "../safety/consentClassifier.js";
 import type { SurfaceRelevanceAmbiguityResolver } from "./surfaceRelevance.js";
 import { RunState } from "./state.js";
-import { runStep, type TerminalStatus } from "./loop.js";
+import { runStep, type TerminalStatus, type RoutedPageDescriber } from "./loop.js";
 import { getMissingRequiredCriteriaIds } from "./successEvaluator.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
@@ -159,8 +159,25 @@ export async function runTask(params: {
    * store createJourneyMemoryStore itself would have produced.
    */
   journeyMemoryStore?: JourneyMemoryStore;
+  /**
+   * Opt-in, set only by src/api/runner.ts when LOW_MEMORY_BROWSER_MODE is enabled -- labels
+   * an adopted/nested popup's resource-routing diagnostics role once core/loop.ts's own
+   * surface-adoption decision is known (see src/api/browserResourceRouting.ts). Absent for
+   * every existing caller/test that doesn't pass it, identical to every other opt-in param
+   * above: resource routing itself (the actual blocking) is unaffected either way, since
+   * it's already active context-wide from page creation, independent of this label.
+   */
+  describeRoutedPage?: RoutedPageDescriber;
 }): Promise<TaskResponse> {
-  const { page, task, semanticVerifier, consentAmbiguityResolver, relevanceAmbiguityResolver, isMemoryThresholdBreached } = params;
+  const {
+    page,
+    task,
+    semanticVerifier,
+    consentAmbiguityResolver,
+    relevanceAmbiguityResolver,
+    isMemoryThresholdBreached,
+    describeRoutedPage,
+  } = params;
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -262,7 +279,7 @@ export async function runTask(params: {
     : undefined;
   const detachDataLayerPushCapture = dataLayerPushCapture?.detach;
   if (dataLayerPushCapture) {
-    state.mainDataLayerPushListenerActive = dataLayerPushCapture.attached;
+    state.setDataLayerPushListenerActive(page, dataLayerPushCapture.attached);
   }
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
@@ -394,6 +411,7 @@ export async function runTask(params: {
         consentAmbiguityResolver,
         relevanceAmbiguityResolver,
         isMemoryThresholdBreached,
+        describeRoutedPage,
       });
       // Bounded for storage only, after everything that needs the step's *live*,
       // unbounded observation (decision validation, journey_path capture) has already run
@@ -542,6 +560,7 @@ export async function runTask(params: {
     detachGa4Capture?.();
     detachDataLayerPushCapture?.();
     detachErrorCapture?.();
+    state.detachAllAdoptedSurfaceListeners();
   }
 }
 
@@ -622,7 +641,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.29.0",
+    schemaVersion: "1.31.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -635,7 +654,7 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.29.0",
+      schemaVersion: "1.31.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
     }),

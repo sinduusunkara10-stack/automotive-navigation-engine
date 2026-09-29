@@ -335,6 +335,12 @@ export interface ActionResult {
    * attempted but failed, or no consent surface was ever detected on the candidate.
    */
   consentActionTaken?: boolean;
+  /** Popup fingerprinting and retry protection (surface-adoption corrective work, schemaVersion 1.30.0): see core/surfaceFingerprint.ts. Present whenever the relevance gate ran and the triggering click's stable identity was resolvable. */
+  candidateSurfaceFingerprint?: string;
+  /** True when candidateSurfaceFingerprint already had a recorded outcome from an earlier encounter this run. */
+  fingerprintPreviouslySeen?: boolean;
+  /** Present only when fingerprintPreviouslySeen is true -- see capture-modules/popupCapture.ts's FINGERPRINT_RECONSIDERATION_INTERVAL. */
+  popupReconsiderationReason?: "cached_no_new_evidence" | "bounded_reconsideration";
   /**
    * Surface adoption (Phase 3 PR 3, wired onto the wire in PR 6): present only when this
    * candidate was actually adopted (surfaceAdopted true) under
@@ -1089,13 +1095,53 @@ export interface ResourceRoutingEntry {
 }
 
 /**
+ * One browser Page's own resource-routing coverage under low-memory browser mode -- see
+ * ResourceRoutingDiagnostics.byPage. Present for the run's originally-tracked page and for
+ * every popup/new-tab Playwright ever created in that page's browser context, whether or
+ * not it was ever adopted (a rejected or closed popup keeps its own entry, never discarded
+ * -- see src/api/browserResourceRouting.ts). `role` is "original" for the one page the run
+ * started on, "adopted_popup"/"nested_popup" once the engine's own surface-adoption
+ * decision labelled it (nested meaning its opener was itself an already-adopted surface,
+ * not the original page), and "popup" for any other popup/new-tab (observed-only, rejected,
+ * or not yet classified). `contextId`/`surfaceId` mirror the same values the analytics
+ * capture modules use for this Page once known (see capture-modules/captureContext.ts) --
+ * absent until an adoption decision has labelled this page.
+ */
+export type ResourceRoutingPageRole = "original" | "adopted_popup" | "nested_popup" | "popup";
+
+export interface ResourceRoutingPageDiagnostics {
+  pageId: string;
+  role: ResourceRoutingPageRole;
+  contextId?: string;
+  surfaceId?: string;
+  registrationAttempted: boolean;
+  registrationCompleted: boolean;
+  /** True if a later attempt to register routing for this same Page was made and safely no-op'd -- proof no duplicate route handler was ever added. */
+  duplicateRegistrationPrevented: boolean;
+  registeredAt: string;
+  /** Absent while the page is still open. */
+  closedAt?: string;
+  /** Main-frame navigations observed on this page while routing was active. */
+  navigationCount: number;
+  byResourceType: ResourceRoutingEntry[];
+  /** Bounded (see MAX_ROUTING_ERRORS_PER_PAGE) list of route.fulfill/continue failures for this page -- normally empty. */
+  routingErrors: string[];
+  /** True once this page closed and its routing state/listeners were released. */
+  routingReleasedOnClose: boolean;
+}
+
+/**
  * Present only when LOW_MEMORY_BROWSER_MODE was enabled for this run (src/config/
- * lowMemoryBrowserConfig.ts). One entry per resource type actually seen -- inherently
- * bounded by Playwright's own small, fixed resourceType vocabulary, never per-request.
+ * lowMemoryBrowserConfig.ts). `byResourceType` is the run-level total across every page
+ * (original, every adopted/nested popup, every observed-only popup) -- one entry per
+ * resource type actually seen, inherently bounded by Playwright's own small, fixed
+ * resourceType vocabulary, never per-request. `byPage` breaks the same evidence down per
+ * browser Page -- see ResourceRoutingPageDiagnostics.
  */
 export interface ResourceRoutingDiagnostics {
   mode: "low_memory";
   byResourceType: ResourceRoutingEntry[];
+  byPage: ResourceRoutingPageDiagnostics[];
 }
 
 /**
@@ -1350,7 +1396,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.29.0";
+  schemaVersion: "1.31.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

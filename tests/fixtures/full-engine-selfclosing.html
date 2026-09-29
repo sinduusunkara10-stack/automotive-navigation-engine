@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Configuration Overview</title>
+    <script>
+      // Simulates a legitimate partner site that closes its own tab once its flow finishes --
+      // never a go_back this engine dispatched, so the run must recover via unexpected-closure
+      // detection (core/loop.ts's detectClosedAdoptedSurfaces), not returnToParentSurface.
+      setTimeout(() => window.close(), 10);
+    </script>
+  </head>
+  <body>
+    <h1>Configuration Overview: Review Your Vehicle and Estimated Price</h1>
+    <p>Review your Electric SUV configuration and estimated price before proceeding to financing.</p>
+  </body>
+</html>

@@ -34,7 +34,7 @@ test("extend_trust_from_landing: a relevant candidate outside allowedDomains is 
         allowedDomains: ["example-not-this-host.test"],
         adoptedSurfaceCount: 0,
         maxAdoptedSurfacesPerRun: 5,
-        relevanceObjectiveText: OBJECTIVE,
+        relevanceObjectiveTexts: [OBJECTIVE],
       },
     });
     assert.ok(result.adoptedPage, "expected the relevant candidate to be adopted");
@@ -63,7 +63,7 @@ test("extend_trust_from_landing: a relevance-rejected candidate never gets exten
         allowedDomains: ["example-not-this-host.test"],
         adoptedSurfaceCount: 0,
         maxAdoptedSurfacesPerRun: 5,
-        relevanceObjectiveText: OBJECTIVE,
+        relevanceObjectiveTexts: [OBJECTIVE],
       },
     });
     assert.equal(result.adoptedPage, undefined, "an irrelevant candidate must never be adopted, regardless of domain policy");
@@ -93,7 +93,7 @@ test("require_allowed_domain: a relevant candidate on an untrusted domain is sti
         allowedDomains: ["example-not-this-host.test"],
         adoptedSurfaceCount: 0,
         maxAdoptedSurfacesPerRun: 5,
-        relevanceObjectiveText: OBJECTIVE,
+        relevanceObjectiveTexts: [OBJECTIVE],
       },
     });
     assert.equal(result.adoptedPage, undefined);

@@ -48,12 +48,35 @@ async function hasUsableDocument(page: Page): Promise<boolean> {
   }
 }
 
+/** A single success criterion's stable id and description -- the minimum a Tier-3 resolver needs to say *which* milestone(s) a candidate matches, without sending the whole TaskRequest. */
+export interface SurfaceRelevanceMilestoneRef {
+  id: string;
+  description: string;
+}
+
 export interface SurfaceRelevanceAmbiguityContext {
   objectiveText: string;
   title: string;
   headings: string[];
   interactiveText: string[];
   deterministicScore: number;
+  /**
+   * Three-tier surface-adoption corrective work (Tier 3, see this module's own doc comment
+   * and reasoning/claudeSurfaceRelevanceAmbiguityResolver.ts): optional, additive compact
+   * evidence for a real Claude-backed resolver -- absent for every caller that predates this
+   * (e.g. tests/unit/surfaceRelevance.test.ts's own resolver stubs), which keep working
+   * unchanged. Never includes cookies, credentials, tokens, unrestricted query strings,
+   * personal data, or raw page HTML -- only already-sanitized concepts the engine already
+   * computed elsewhere (task.successCriteria descriptions, journeyType, the triggering CTA's
+   * own accessible name, the domain-policy verdict already reached before this candidate ever
+   * reached relevance scoring -- see popupCapture.ts's own domain-first ordering).
+   */
+  unfinishedMilestones?: SurfaceRelevanceMilestoneRef[];
+  completedMilestones?: SurfaceRelevanceMilestoneRef[];
+  journeyType?: string;
+  triggeringCtaAccessibleName?: string;
+  /** Always true when this context is built at all -- assessSurfaceRelevance's own domain-first ordering (popupCapture.ts) means a domain-rejected candidate never reaches this far. Kept explicit (never inferred) so the resolver's own prompt can state it as a given rather than needing to reason about safety at all. */
+  domainPolicyApproved?: boolean;
 }
 
 export interface SurfaceRelevanceAmbiguityResolution {
@@ -143,16 +166,45 @@ export interface SurfaceRelevanceAssessment {
  */
 export async function assessSurfaceRelevance(params: {
   page: Page;
-  objectiveText: string;
+  /**
+   * Scored independently, never concatenated into one shared-denominator string: the
+   * objective, each individual success-criterion description, the journeyType hint, and the
+   * triggering CTA's own accessible name are each their own anchor here (mirrors
+   * core/successEvaluator.ts's own `[objective, criterion.description]` per-criterion
+   * anchorText -- see its doc comment "done against *this specific criterion's* own
+   * anchorText -- not the blended one"). A multi-step objective's later milestones (e.g. a
+   * Summary/basket page) routinely share almost no vocabulary with earlier ones (selecting a
+   * model, entering a configurator); objectiveTokenCoverage divides by the anchor's own
+   * distinct-token count, so folding every criterion into one blob before scoring makes the
+   * denominator grow with every *unrelated* milestone and can drive a correct, highly relevant
+   * destination's score to near zero even though one of its anchors matches strongly. Scoring
+   * each anchor against the candidate's signals and taking the max (the same "one strong
+   * signal is enough" principle scoreSemanticPageMatch already applies across signal groups)
+   * fixes this without weakening the reject side: an anchor list of pure noise still scores 0.
+   */
+  objectiveTexts: string[];
   settleCeilingMs?: number;
   ambiguityResolver?: SurfaceRelevanceAmbiguityResolver;
+  /** See SurfaceRelevanceAmbiguityContext's own doc comment -- optional, additive, forwarded verbatim into the resolver's context when the ambiguous band is actually reached. Never affects the deterministic score/tier computed below. */
+  ambiguityEvidence?: {
+    unfinishedMilestones?: SurfaceRelevanceMilestoneRef[];
+    completedMilestones?: SurfaceRelevanceMilestoneRef[];
+    journeyType?: string;
+    triggeringCtaAccessibleName?: string;
+    domainPolicyApproved?: boolean;
+  };
 }): Promise<SurfaceRelevanceAssessment> {
-  const { page, objectiveText, settleCeilingMs, ambiguityResolver } = params;
+  const { page, objectiveTexts, settleCeilingMs, ambiguityResolver, ambiguityEvidence } = params;
+  const anchors = objectiveTexts.filter((text) => text.trim().length > 0);
+  const combinedObjectiveText = anchors.join(" ");
 
   const evaluateOnce = async (): Promise<{ signals: SemanticPageSignals; score: number; usable: boolean }> => {
     const signals = await gatherSemanticPageSignals(page);
     const usable = await hasUsableDocument(page);
-    const score = scoreSemanticPageMatch(objectiveText, signals, ALL_SEMANTIC_SIGNALS).overall;
+    const score =
+      anchors.length === 0
+        ? 0
+        : Math.max(...anchors.map((anchor) => scoreSemanticPageMatch(anchor, signals, ALL_SEMANTIC_SIGNALS).overall));
     return { signals, score, usable };
   };
 
@@ -203,11 +255,12 @@ export async function assessSurfaceRelevance(params: {
   const resolved = ambiguityResolver
     ? await resolveAmbiguousSurfaceRelevance(
         {
-          objectiveText,
+          objectiveText: combinedObjectiveText,
           title: attempt.signals.title,
           headings: attempt.signals.headings,
           interactiveText: attempt.signals.interactiveText,
           deterministicScore: attempt.score,
+          ...ambiguityEvidence,
         },
         ambiguityResolver,
       )

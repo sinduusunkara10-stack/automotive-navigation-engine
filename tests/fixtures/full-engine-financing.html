@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Finance Application</title>
+  </head>
+  <body>
+    <h1>Complete Your Finance Application</h1>
+    <p>Submit your details to request a finance quote for the configured vehicle.</p>
+    <button type="button" id="submit-application">Submit Application</button>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      document.getElementById("submit-application").addEventListener("click", function () {
+        // Click-vs-navigation race, dispatched *inside the adopted popup* -- proves the
+        // listener-handoff fix (adoptedSurfaceListeners.ts) by mirroring the exact same
+        // in-handler push-then-beacon-then-navigate pattern analytics-race-start.html already
+        // proves for the main tracked page. cta:"submit_application" is a CTA_IDENTIFIER_KEYS
+        // field (analyticsCaptureClassification.ts), so both the push and the beacon classify
+        // as a genuine CLICK_EVENT, not a bare page-load/ambient event.
+        window.dataLayer.push({ event: "quote_form_submitted", cta: "submit_application", vehicle_model: "Electric SUV", fictionalId: "FIX-POPUP-001" });
+        var ga4Params = new URLSearchParams({
+          v: "2",
+          tid: "G-FICTIONALTEST1",
+          en: "quote_form_submitted",
+          cta: "submit_application",
+          dl: location.href,
+        });
+        new Image().src = "/g/collect?" + ga4Params.toString();
+        location.href = "full-engine-milestone.html";
+      });
+    </script>
+  </body>
+</html>

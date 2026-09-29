@@ -4,6 +4,8 @@ import { createReasoningProvider } from "../reasoning/providerFactory.js";
 import { readClaudeReasoningConfig } from "../reasoning/config.js";
 import { ClaudeSemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
 import type { SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
+import { ClaudeSurfaceRelevanceAmbiguityResolver } from "../reasoning/claudeSurfaceRelevanceAmbiguityResolver.js";
+import type { SurfaceRelevanceAmbiguityResolver } from "../core/surfaceRelevance.js";
 import type { TaskRequest } from "../types/task-request.js";
 import type { TaskStore } from "./taskStore.js";
 import { recordMemorySample } from "../core/memoryDiagnostics.js";
@@ -64,6 +66,18 @@ function createSemanticVerifier(env: NodeJS.ProcessEnv): SemanticCriterionVerifi
     return undefined;
   }
   return new ClaudeSemanticCriterionVerifier({ config: readClaudeReasoningConfig(env) });
+}
+
+// Three-tier surface-adoption corrective work (Tier 3): without this, every genuinely
+// ambiguous popup/tab relevance assessment fails closed (never adopted) in production, since
+// runTask's own relevanceAmbiguityResolver parameter is opt-in and was never wired here --
+// see core/surfaceRelevance.ts's own doc comment on the three tiers. Same REASONING_PROVIDER
+// gate and config as createSemanticVerifier above; no separate provider architecture.
+function createRelevanceAmbiguityResolver(env: NodeJS.ProcessEnv): SurfaceRelevanceAmbiguityResolver | undefined {
+  if (env.REASONING_PROVIDER?.trim() !== "claude") {
+    return undefined;
+  }
+  return new ClaudeSurfaceRelevanceAmbiguityResolver({ config: readClaudeReasoningConfig(env) });
 }
 
 /** The minimal browser surface this module actually uses -- a real Playwright Browser
@@ -134,6 +148,7 @@ export async function executeTaskAsync(
   try {
     const reasoning = createReasoningProvider();
     const semanticVerifier = createSemanticVerifier(process.env);
+    const relevanceAmbiguityResolver = createRelevanceAmbiguityResolver(process.env);
     // Opt-in, off by default -- see docs/architecture.md "Low-memory browser mode". Blocks
     // image/media/font requests and disallows service worker registration; never touches
     // document/script/stylesheet/xhr/fetch, and never disables JavaScript.
@@ -150,7 +165,9 @@ export async function executeTaskAsync(
         initialNavigationTimeoutMs,
         actionNavigationTimeoutMs,
         semanticVerifier,
+        relevanceAmbiguityResolver,
         isMemoryThresholdBreached: memoryBreakerEnabled ? () => containerMemoryBreached : undefined,
+        describeRoutedPage: routing?.describePage,
       });
     } finally {
       // Routing must be detached while the page is still open; page.close() is

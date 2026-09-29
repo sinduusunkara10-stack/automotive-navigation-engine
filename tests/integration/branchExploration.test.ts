@@ -208,13 +208,13 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "objective" | "successCriteria">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.28.0",
+    schemaVersion: "1.29.0",
     taskId: "branch-exploration",
     allowedDomains: ["127.0.0.1"],
     captureModules: ["errors", "cta_clicks"],
     limits: { maxSteps: 25, maxBacktracks: 12, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "navigate", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.29.0",
+    outputSchemaVersion: "1.31.0",
     ...overrides,
   };
 }
