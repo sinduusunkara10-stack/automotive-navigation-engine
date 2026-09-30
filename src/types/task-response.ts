@@ -1396,7 +1396,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.31.0";
+  schemaVersion: "1.32.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

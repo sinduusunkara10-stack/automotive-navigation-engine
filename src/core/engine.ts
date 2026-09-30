@@ -369,6 +369,20 @@ export async function runTask(params: {
     const allowedDomainsUsed = discovery.trustedDomains.map((entry) => entry.hostname);
     const effectiveTask: ResolvedTaskRequest = { ...task, allowedDomains: allowedDomainsUsed };
 
+    // Start-page analytics window (fix for missing stepIndex 0 analyticsReportingRows):
+    // the GA4/dataLayer listeners above are attached before this run's very first
+    // navigation, and runDomainDiscovery's own initial navigation already waits through the
+    // same adaptive settle every other navigation point in the engine uses -- so by the time
+    // control reaches here, every event that will ever belong to the start page has already
+    // landed in captures.ga4_network_events/data_layer_evidence. Snapshotting the *lengths*
+    // here (rather than slicing now) is what keeps the first action's own window -- which
+    // starts counting only from whatever length these arrays have reached when that action
+    // begins, see loop.ts's ga4WindowStartIndex/dataLayerPushWindowStartIndex -- from ever
+    // re-emitting the same events: it only ever sees entries appended after this point.
+    const startWindowGa4EndIndex = captures.ga4_network_events?.length ?? 0;
+    const startWindowDataLayerEndIndex = captures.data_layer_evidence?.length ?? 0;
+    const startPageTitle = await page.title().catch(() => undefined);
+
     // Persistent Cross-Run Journey Memory (see src/core/journeyMemory): deterministic,
     // zero-Claude-call pre-run retrieval, before the first navigation decision. Entirely
     // inert (unavailableReason: "disabled") unless JOURNEY_MEMORY_ENABLED is set -- see
@@ -555,6 +569,10 @@ export async function runTask(params: {
       journeyMemoryDiagnostics,
       domainDiscovery: discovery,
       memorySamples,
+      startPageUrl: navigation.url,
+      startPageTitle,
+      startWindowGa4EndIndex,
+      startWindowDataLayerEndIndex,
     });
   } finally {
     detachGa4Capture?.();
@@ -578,6 +596,11 @@ function buildTerminalResponse(params: {
   semanticVerifier?: SemanticCriterionVerifier;
   memorySamples: MemorySample[];
   journeyMemoryDiagnostics?: JourneyMemoryDiagnostics;
+  /** See engine.ts's own start-page analytics window comment above, near where these are computed. Absent on every early-return terminal response (blocked/failed before the initial navigation ever completed) -- analyticsReportingRows then simply carries no start-window evidence, same as before this fix. */
+  startPageUrl?: string;
+  startPageTitle?: string;
+  startWindowGa4EndIndex?: number;
+  startWindowDataLayerEndIndex?: number;
 }): TaskResponse {
   const {
     task,
@@ -593,6 +616,10 @@ function buildTerminalResponse(params: {
     semanticVerifier,
     memorySamples,
     journeyMemoryDiagnostics,
+    startPageUrl,
+    startPageTitle,
+    startWindowGa4EndIndex,
+    startWindowDataLayerEndIndex,
   } = params;
   const lastStep = steps[steps.length - 1];
   // Independently verified, never derived from status alone: objectiveAchieved must
@@ -641,7 +668,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -654,9 +681,15 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.31.0",
+      schemaVersion: "1.32.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
+      startPageUrl,
+      startPageTitle,
+      ga4NetworkEvents: captures.ga4_network_events,
+      dataLayerEvidence: captures.data_layer_evidence,
+      startWindowGa4EndIndex,
+      startWindowDataLayerEndIndex,
     }),
     diagnostics: {
       stepCount: state.stepCount,

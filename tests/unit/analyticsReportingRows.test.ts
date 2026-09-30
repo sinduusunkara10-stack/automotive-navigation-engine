@@ -132,7 +132,7 @@ test("TEST1 [fixture label: Vauxhall-style bundled configurator push]: a genuine
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -172,7 +172,7 @@ test("TEST2 [fixture label: Nissan-style duplicate virtual-page capture]: raw:[e
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -199,7 +199,7 @@ test("TEST3: two click candidates with genuinely different destinations leave th
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -234,7 +234,7 @@ test("TEST4: exactly one confirmed click candidate is merged into the CTA_CLICK 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -266,7 +266,7 @@ test("TEST5: a confirmed GA4 page_view with rich metadata preserves its fields o
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -303,7 +303,7 @@ test("TEST6: a confirmed click and an unrelated CORRELATION_UNRESOLVED event in 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -337,7 +337,7 @@ test("TEST7: equivalent objects with different (including nested) key order prod
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -360,7 +360,7 @@ test("TEST8: same timestamp but different payloads produce different eventIds, b
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -385,7 +385,7 @@ test("TEST9: raw:[event] and raw:event produce identical eventIds for the same l
     return buildAnalyticsReportingRows({
       taskId: "task-1",
       startUrl: "https://example.com/source",
-      schemaVersion: "1.31.0",
+      schemaVersion: "1.32.0",
       pageVisits: [],
       ctaClicks: [ctaClick({ actionAnalytics: action })],
     });
@@ -419,7 +419,7 @@ test("TEST10: a genuine 3-event dataLayer array expands into three distinct rows
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -443,7 +443,7 @@ test("TEST11: no observed analytics evidence produces WEBSITE_NO_OBSERVED_TAG, n
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action, actionSucceeded: true })],
   });
@@ -466,7 +466,7 @@ test("TEST12: exactly one START_PAGE row is built from the actual journey start,
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits,
     ctaClicks: [],
   });
@@ -499,7 +499,7 @@ test("TEST13 [fixture label: Stellantis-style GA4 CTA fixture]: a rich GA4 click
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ ctaText: "DÉCOUVREZ-LA", actionAnalytics: action })],
   });
@@ -570,7 +570,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
     taskId: "task-1",
     journeyType: "configurator_completion",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits,
     ctaClicks,
   });
@@ -594,7 +594,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
   assert.equal(secondActionRows[2]!.eventRole, "CLICK_CANDIDATE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -649,7 +649,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     pageVisits: [],
     ctaClicks: [
       ctaClick({
@@ -697,7 +697,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   assert.equal(new Set(allEventIds).size, allEventIds.length);
 
   const response: TaskResponse = {
-    schemaVersion: "1.31.0",
+    schemaVersion: "1.32.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -723,4 +723,138 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   const serialisedClickCandidates = serialisedRows.filter((row) => row.eventRole === "CLICK_CANDIDATE");
   assert.equal(serialisedClickCandidates.length, 2);
   assert.ok(serialisedClickCandidates.every((row) => typeof row.eventId === "string" && row.eventId.length > 0));
+});
+
+// TEST16-18: start-page analytics window (production gap fix -- see engine.ts's own
+// start-window comment): GA4/dataLayer evidence fired during the initial page load, before the
+// navigation loop's first action, was captured with stepIndex 0 but never turned into an
+// analyticsReportingRow at all, and the START_PAGE row itself had no pageUrl/pageTitle unless a
+// task happened to request an explicit page_visits capture on stepIndex 0.
+
+// TEST16: a start page that fires a GA4 page_view on load produces a stepIndex 0
+// ANALYTICS_EVENT row (ASSOCIATED_RESULT/PHYSICAL_PAGE_CHANGE) with eventName page_view and
+// page_name populated, and the START_PAGE row's own pageUrl/pageTitle are populated purely
+// from startPageUrl/startPageTitle -- no page_visits capture requested at all.
+test("TEST16: a start-page page_view produces a stepIndex 0 ANALYTICS_EVENT row, and START_PAGE gets its url/title without a page_visits capture", () => {
+  const startPageView = ga4Event({
+    stepIndex: 0,
+    timestamp: "2026-01-01T00:00:00.100Z",
+    params: {
+      en: "page_view",
+      dl: "https://example.com/start",
+      dt: "Start Page",
+      tid: "G-START",
+    },
+  });
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/start",
+    schemaVersion: "1.32.0",
+    pageVisits: [],
+    ctaClicks: [],
+    startPageUrl: "https://example.com/start",
+    startPageTitle: "Start Page",
+    ga4NetworkEvents: [startPageView],
+    startWindowGa4EndIndex: 1,
+  });
+
+  const startRow = rows.find((row) => row.recordType === "START_PAGE")!;
+  assert.equal(startRow.sourcePageUrl, "https://example.com/start");
+  assert.equal(startRow.destinationPageTitle, "Start Page");
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 1);
+  assert.equal(eventRows[0]!.stepIndex, 0);
+  assert.equal(eventRows[0]!.eventRole, "ASSOCIATED_RESULT");
+  assert.equal(eventRows[0]!.eventClassification, "PHYSICAL_PAGE_CHANGE");
+  assert.equal(eventRows[0]!.eventName, "page_view");
+  assert.equal(eventRows[0]!.correlationStatus, "CONFIRMED");
+});
+
+// TEST17: action 1's own evidence window never re-emits the same events the start window
+// already reported -- buildAnalyticsReportingRows only ever sees the pre-sliced start-window
+// arrays and each action's own ga4RequestsObservedDuringActionWindow/
+// dataLayerPushesObservedDuringActionWindow, so this is really proving the two never overlap
+// even when both are built from the same underlying captures array.
+test("TEST17: action 1's rows contain no duplicate of a stepIndex 0 start-window event", () => {
+  const startPageView = ga4Event({
+    stepIndex: 0,
+    timestamp: "2026-01-01T00:00:00.100Z",
+    params: { en: "page_view", dl: "https://example.com/start", tid: "G-START" },
+  });
+  // Simulates the full captures.ga4_network_events array: the start-page event at index 0,
+  // then an action-1-attributed event appended once action 1 begins -- exactly what engine.ts's
+  // startWindowGa4EndIndex snapshot (taken before the loop starts) and loop.ts's own
+  // ga4WindowStartIndex (taken when action 1 begins) each slice from.
+  const resultingPageView = ga4Event({
+    stepIndex: 1,
+    timestamp: "2026-01-01T00:00:05.000Z",
+    params: { en: "page_view", dl: "https://example.com/destination", tid: "G-START" },
+  });
+  const allGa4Events = [startPageView, resultingPageView];
+
+  const action = buildAction({ ctaElementDestinationUrl: "https://example.com/destination", ga4Events: [resultingPageView] });
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/start",
+    schemaVersion: "1.32.0",
+    pageVisits: [],
+    ctaClicks: [
+      ctaClick({ actionAnalytics: action, destinationUrl: "https://example.com/destination", resultingUrl: "https://example.com/destination" }),
+    ],
+    startPageUrl: "https://example.com/start",
+    ga4NetworkEvents: allGa4Events,
+    startWindowGa4EndIndex: 1,
+  });
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  const stepZeroRows = eventRows.filter((row) => row.stepIndex === 0);
+  const stepOneRows = eventRows.filter((row) => row.stepIndex === 1);
+  assert.equal(stepZeroRows.length, 1);
+  assert.equal(stepOneRows.length, 1);
+  assert.notEqual(stepZeroRows[0]!.eventId, stepOneRows[0]!.eventId);
+  assert.equal(
+    new Set(eventRows.map((row) => row.eventId)).size,
+    eventRows.length,
+    "no eventId should be shared between the start window and action 1",
+  );
+});
+
+// TEST18: with no GA4/dataLayer evidence captured before the first action, no start-window
+// ANALYTICS_EVENT rows are fabricated -- only the START_PAGE row itself, exactly as before this
+// fix, and the whole contract still validates against the response schema.
+test("TEST18: no start-window evidence produces no start-window rows, and the contract stays schema-valid", async () => {
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/start",
+    schemaVersion: "1.32.0",
+    pageVisits: [],
+    ctaClicks: [],
+    startPageUrl: "https://example.com/start",
+    startPageTitle: "Start Page",
+    ga4NetworkEvents: [],
+    dataLayerEvidence: [],
+    startWindowGa4EndIndex: 0,
+    startWindowDataLayerEndIndex: 0,
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.recordType, "START_PAGE");
+
+  const response: TaskResponse = {
+    schemaVersion: "1.32.0",
+    taskId: "task-1",
+    status: "success",
+    statusReason: "stop_success_action",
+    startUrl: "https://example.com/start",
+    finalUrl: "https://example.com/start",
+    steps: [],
+    captures: {},
+    engineAssessment: { objectiveAchieved: true, confidence: 1, summary: "done" },
+    diagnostics: { stepCount: 0, backtrackCount: 0, totalDurationMs: 100, finishReason: "stop_success_action" },
+    analyticsReportingRows: rows,
+  };
+  const validated = await validateAgainstTaskResponseSchema(response);
+  assert.ok(validated.valid, validated.errorsText);
 });
