@@ -88,7 +88,7 @@ function isSatisfied(context: ReasoningContext): boolean {
 
 function runATask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.30.0",
+    schemaVersion: "1.31.0",
     taskId: "journey-memory-full-engine-run-a",
     allowedDomains: ["127.0.0.1"],
     startUrl,
@@ -101,13 +101,13 @@ function runATask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 10, maxBacktracks: 4, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.32.0",
+    outputSchemaVersion: "1.33.0",
   };
 }
 
 function runBTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.30.0",
+    schemaVersion: "1.31.0",
     taskId: "journey-memory-full-engine-run-b",
     allowedDomains: ["127.0.0.1"],
     startUrl,
@@ -120,7 +120,7 @@ function runBTask(startUrl: string): TaskRequest {
     captureModules: ["errors"],
     limits: { maxSteps: 10, maxBacktracks: 4, maxRepeatedActions: 6 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.32.0",
+    outputSchemaVersion: "1.33.0",
   };
 }
 

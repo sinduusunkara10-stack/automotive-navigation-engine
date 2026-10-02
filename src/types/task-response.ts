@@ -416,6 +416,22 @@ export interface ActionResult {
       | "blank_or_unusable_page"
       | "restoration_failed";
   };
+  /** Lead-form filling (Phase 1, see docs/architecture.md "Lead-form filling"): present only on a `fill_form` action's result. */
+  formFillOutcome?: "submitted" | "form_validation_failed" | "blocked_captcha";
+  /** Generic field keys this fill_form action wrote a value into -- never the raw value itself. */
+  formFieldsFilled?: string[];
+  /** Number of validation-triggered re-fill-and-resubmit cycles performed, bounded at 2. */
+  formRetriesUsed?: number;
+  /** Present only when formFillOutcome is "submitted". */
+  formSuccessDetection?: "url_change" | "on_screen_message";
+  /** Present only when formFillOutcome is "form_validation_failed". */
+  formValidationMissingFields?: string[];
+  /** The market code whose fixed postcode/phone test data this action used. */
+  formMarketDetected?: string;
+  /** The page language used to select the title value and localized matching. */
+  formLanguageDetected?: string;
+  /** True only when the one optional, bounded Claude call for unmapped required fields was made. */
+  formClaudeCallUsed?: boolean;
 }
 
 export interface Progress {
@@ -1396,7 +1412,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.32.0";
+  schemaVersion: "1.33.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

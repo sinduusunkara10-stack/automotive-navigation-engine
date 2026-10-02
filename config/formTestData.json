@@ -1,0 +1,97 @@
+{
+  "fixedFields": {
+    "firstName": "Test",
+    "lastName": "Test",
+    "email": "test@test.com",
+    "genericRequiredText": "Test"
+  },
+  "titleByLanguage": {
+    "en": "Ms",
+    "fr": "Mme",
+    "de": "Frau",
+    "nl": "Mevr.",
+    "it": "Sig.ra",
+    "es": "Sra.",
+    "pl": "Pani",
+    "pt": "Sra."
+  },
+  "marketData": {
+    "UK": {
+      "postcode": "SW1A 1AA",
+      "landlineNational": "020 7946 0123",
+      "landlineInternational": "+44 20 7946 0123",
+      "mobileNational": "07700 900123",
+      "mobileInternational": "+44 7700 900123"
+    },
+    "FR": {
+      "postcode": "75001",
+      "landlineNational": "01 99 00 12 34",
+      "landlineInternational": "+33 1 99 00 12 34",
+      "mobileNational": "06 39 98 12 34",
+      "mobileInternational": "+33 6 39 98 12 34"
+    },
+    "DE": {
+      "postcode": "10115",
+      "landlineNational": "030 23125 123",
+      "landlineInternational": "+49 30 23125 123",
+      "mobileNational": "0171 3920012",
+      "mobileInternational": "+49 171 3920012"
+    },
+    "AT": {
+      "postcode": "1010",
+      "landlineNational": "01 234 5678",
+      "landlineInternational": "+43 1 2345678",
+      "mobileNational": "0664 1234567",
+      "mobileInternational": "+43 664 1234567"
+    },
+    "BE": {
+      "postcode": "1000",
+      "landlineNational": "02 123 45 67",
+      "landlineInternational": "+32 2 123 45 67",
+      "mobileNational": "0470 12 34 56",
+      "mobileInternational": "+32 470 12 34 56"
+    },
+    "LU": {
+      "postcode": "1009",
+      "landlineNational": "27 12 34 56",
+      "landlineInternational": "+352 27 12 34 56",
+      "mobileNational": "621 123 456",
+      "mobileInternational": "+352 621 123 456"
+    },
+    "IT": {
+      "postcode": "00184",
+      "landlineNational": "02 1234 5678",
+      "landlineInternational": "+39 02 12345678",
+      "mobileNational": "320 123 4567",
+      "mobileInternational": "+39 320 1234567"
+    },
+    "NL": {
+      "postcode": "1012 AB",
+      "landlineNational": "020 123 4567",
+      "landlineInternational": "+31 20 123 4567",
+      "mobileNational": "06 12345678",
+      "mobileInternational": "+31 6 12345678"
+    },
+    "PL": {
+      "postcode": "00-001",
+      "landlineNational": "22 123 45 67",
+      "landlineInternational": "+48 22 123 45 67",
+      "mobileNational": "512 345 678",
+      "mobileInternational": "+48 512 345 678"
+    },
+    "PT": {
+      "postcode": "1100-148",
+      "landlineNational": "21 123 4567",
+      "landlineInternational": "+351 21 123 4567",
+      "mobileNational": "912 345 678",
+      "mobileInternational": "+351 912 345 678"
+    },
+    "ES": {
+      "postcode": "28001",
+      "landlineNational": "91 123 45 67",
+      "landlineInternational": "+34 91 123 45 67",
+      "mobileNational": "612 34 56 78",
+      "mobileInternational": "+34 612 34 56 78"
+    }
+  }
+}
