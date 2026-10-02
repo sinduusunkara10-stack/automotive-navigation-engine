@@ -16,6 +16,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY config ./config
 
 RUN npx tsc
 
@@ -37,6 +38,11 @@ RUN npm ci --omit=dev && npm cache clean --force
 # to its own compiled location.
 COPY --from=builder /app/dist/src ./dist/src
 COPY schemas ./dist/schemas
+# src/forms/testData.ts imports config/formTestData.json (lead-form filling Phase 1) at the
+# same "../../config/formTestData.json" relative path tsc preserves into dist/config -- copy
+# it directly here (same pattern as schemas above) rather than relying on tsc's own JSON
+# emission to have landed in a path this runtime COPY happens to include.
+COPY config ./dist/config
 
 EXPOSE 3000
 

@@ -13,6 +13,8 @@ import { executeCapture } from "./capture.js";
 import { executeStopSuccess } from "./stopSuccess.js";
 import { executeStopBlocked } from "./stopBlocked.js";
 import { executeStopFailure } from "./stopFailure.js";
+import { executeFillForm } from "./fillForm.js";
+import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 
 export interface DispatchParams {
   page: Page;
@@ -31,6 +33,8 @@ export interface DispatchParams {
   surfaceAdoption?: SurfaceAdoptionRequest;
   /** Only meaningful for a `click` action -- see ExecuteClickParams.timingOut in actions/click.ts. */
   timingOut?: ActionTimingOut;
+  /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
+  unmappedFieldResolver?: UnmappedFieldResolver;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
@@ -47,6 +51,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     settleCeilingMs,
     surfaceAdoption,
     timingOut,
+    unmappedFieldResolver,
   } = params;
   switch (action.type) {
     case "click":
@@ -83,6 +88,8 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
       });
     case "capture":
       return executeCapture(page, captures, stepIndex, captureModules);
+    case "fill_form":
+      return executeFillForm({ page, action, captures, stepIndex, captureModules, unmappedFieldResolver });
     case "stop_success":
       return executeStopSuccess();
     case "stop_blocked":

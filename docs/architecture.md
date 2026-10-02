@@ -73,6 +73,10 @@ executor:
 - `go_back` — browser back navigation (counts against `maxBacktracks`)
 - `navigate` — go to an explicit URL (must pass the allowed-domain check)
 - `capture` — invoke the task's active capture modules against the current page
+- `fill_form` — deterministically fill and submit a single-page lead-capture form using fixed
+  test data (see "Lead-form filling"); the only action able to write a value into a form
+  field, and only when `safety.allowFormSubmission` and `safety.allowPersonalDataEntry` are
+  both explicitly `true`
 - `stop_success` — end the run, success criteria considered met
 - `stop_blocked` — end the run, a safety constraint prevented progress
 - `stop_failure` — end the run, the objective could not be reached
@@ -3700,3 +3704,62 @@ now a true run-level total across every page. `schemaVersion`/`outputSchemaVersi
 `1.30.0` -> `1.31.0`. No existing field removed, renamed, or had its meaning changed; no second
 routing framework, no brand/site-specific logic, and blocking behaviour itself is unchanged
 (still only image/media/font, still fulfilled rather than aborted).
+
+### Lead-form filling Phase 1 (schemaVersion 1.32.0 -> 1.33.0)
+
+A new, deliberate action-vocabulary addition (see §4): `fill_form`, the engine's only action
+capable of writing a value into a form field. Previously `safety.allowPersonalDataEntry` was
+hard-locked to `const: false` with no vocabulary member able to fill anything at all (see
+`tests/integration/noPersonalDataEntry.test.ts`'s original structural proof); this phase
+relaxes that lock to an explicit, per-task boolean opt-in, exactly matching the existing
+`allowFormSubmission` pattern, and gates `fill_form` behind both flags together
+(`src/safety/index.ts`'s `validateDecision`) so a task can never fill personal data merely by
+listing the action. `allowPaymentOrPurchase` keeps its unconditional `const: false` lock
+unchanged -- this relaxation never extends to payment/purchase flows, and every task that
+omits or sets either flag false keeps the original guarantee that no field can ever be filled.
+
+Scope is deliberately Phase 1 only: **single-page** lead-capture forms (on-page, in a
+dialog/side panel, or in a same-document iframe is covered since `fill_form` operates on
+whatever `<form>` Playwright can locate in the document; a genuinely cross-origin iframe is
+out of scope, as is any multi-step/wizard form, address-lookup autocomplete, a date picker,
+or hour-slot selection with next-date fallback -- all explicitly backlogged, not silently
+dropped).
+
+- **Test data**: `config/formTestData.json`, loaded by `src/forms/testData.ts` -- fixed,
+  approved values only, never generated. Per-market postcode/landline/mobile (national and
+  international), and a title keyed by page language.
+- **Field mapping** (`src/forms/fieldKeywords.ts`, `fieldMapper.ts`): deterministic,
+  per-language (en/fr/de/nl/it/es/pl/pt) keyword matching against a field's label/name/
+  placeholder/autocomplete -- generic vocabulary only, never a brand- or market-specific
+  phrase (CLAUDE.md's non-negotiable design rule). Distinguishes landline vs. mobile vs. a
+  generic phone fallback.
+- **Fill rules** (`src/forms/fillPlan.ts`, pure and unit-tested independent of Playwright):
+  never touches a pre-filled/pre-selected field; never fills a hidden/invisible field
+  (honeypot protection); fills required fields only; a dropdown with no clear "No"/negative
+  option takes its first valid (non-placeholder) option; a yes/no dropdown or marketing-
+  consent select with no explicit value defaults to its localized negative option; a
+  marketing-consent checkbox is ticked only when required to submit.
+- **The one optional Claude call** (`src/forms/unmappedFieldResolver.ts`): an injectable
+  interface, called at most once per form, only for required fields the deterministic mapper
+  could not classify. No resolver configured (the default) simply leaves such a field
+  unfilled, surfaced through the normal validation-retry path below.
+- **Executor** (`src/actions/fillForm.ts`): locates the form, checks for a CAPTCHA first
+  (`src/forms/captcha.ts` -- detected, never solved or bypassed; stops with
+  `formFillOutcome: "blocked_captcha"` before filling anything), fills per the plan above,
+  submits, and retries up to twice by re-filling only the fields a native
+  `checkValidity()`/`aria-invalid` scan reports missing/invalid before giving up with
+  `formFillOutcome: "form_validation_failed"`. Success is confirmed by either a URL change or
+  an on-screen confirmation-text match with no URL change (`formSuccessDetection`).
+- **Analytics**: the submit click and the confirmation state are captured as two separate,
+  `stepIndex`-tagged entries in the existing, generic `captures.data_layer_evidence`/
+  `captures.ga4_network_events` capture modules (`attachGa4NetworkCapture`/`captureDataLayer`,
+  reused as-is) -- deliberately simpler than `core/loop.ts`'s full per-click
+  attribution/correlation pipeline for CTA clicks; folding `fill_form`'s submit/confirmation
+  evidence into `analyticsReportingRows`' classification is a reasonable follow-on, not done
+  in this phase.
+
+`ActionResult` gains `formFillOutcome`/`formFieldsFilled`/`formRetriesUsed`/
+`formSuccessDetection`/`formValidationMissingFields`/`formMarketDetected`/
+`formLanguageDetected`/`formClaudeCallUsed`, present only on a `fill_form` action's result.
+`schemaVersion`/`outputSchemaVersion` moved `1.32.0` -> `1.33.0`. No existing field removed,
+renamed, or had its meaning changed.

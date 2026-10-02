@@ -6,7 +6,8 @@ import { chromium } from "playwright";
 
 import { runTask } from "../../src/core/engine.js";
 import { ACTION_TYPES } from "../../src/types/actions.js";
-import type { TaskRequest } from "../../src/types/task-request.js";
+import { validateDecision } from "../../src/safety/index.js";
+import type { TaskRequest, Limits } from "../../src/types/task-request.js";
 import type { Decision, ReasoningContext, ReasoningProvider } from "../../src/reasoning/reasoningProvider.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 
@@ -17,18 +18,67 @@ const fixturesDir = join(__dirname, "..", "fixtures");
  * Structural proof (not per-journey special-casing) that a Test Drive-style lead-capture
  * journey -- the second, non-configurator journey CLAUDE.md requires the same generic
  * mechanisms to handle unmodified -- can never result in personal-data entry, regardless
- * of what any reasoning provider (real or fake) proposes. This is not a runtime guardrail
- * that could have a gap: the engine's entire action vocabulary (src/types/actions.ts) has
- * no action capable of typing/filling a value into any element at all, so no code path
- * anywhere in this engine can write a value into a form field.
+ * of what any reasoning provider (real or fake) proposes, UNLESS a task explicitly opts in
+ * to both safety.allowFormSubmission and safety.allowPersonalDataEntry (Lead-form filling
+ * Phase 1, see docs/architecture.md "Lead-form filling"). This is no longer a vocabulary-
+ * level guarantee (fill_form is now the one action capable of writing a value into a form
+ * field) -- it is enforced by src/safety/index.ts's validateDecision, which rejects any
+ * fill_form decision unless both flags are true, exactly like allowedActions/domain
+ * enforcement. Every other action/journey, and any task that omits or sets either flag
+ * false, is unaffected: no code path can write a value into a form field for it.
  */
 
-test("the engine's action vocabulary contains no action capable of entering data into a form field", () => {
+test("the engine's action vocabulary has exactly one action capable of entering data into a form field (fill_form)", () => {
   assert.deepEqual(
     [...ACTION_TYPES].sort(),
-    ["capture", "click", "go_back", "navigate", "scroll", "stop_blocked", "stop_failure", "stop_success", "wait"].sort(),
-    "the fixed action vocabulary (CLAUDE.md) has no fill/type/input action of any kind",
+    ["capture", "click", "fill_form", "go_back", "navigate", "scroll", "stop_blocked", "stop_failure", "stop_success", "wait"].sort(),
+    "the fixed action vocabulary (CLAUDE.md) has exactly the fill_form action able to fill/type/input, gated behind explicit opt-in",
   );
+});
+
+test("the safety layer rejects fill_form unless both allowFormSubmission and allowPersonalDataEntry are explicitly true", () => {
+  const limits: Limits = { maxSteps: 10, maxBacktracks: 2 };
+  const state = {
+    limits: { stepCount: 1, backtrackCount: 0, startedAtMs: Date.now() },
+    actionHistory: [],
+    visitedUrls: ["https://example-fictional-oem.test/start.html"],
+  };
+  const cases: [boolean, boolean][] = [
+    [false, false],
+    [true, false],
+    [false, true],
+  ];
+  for (const [allowFormSubmission, allowPersonalDataEntry] of cases) {
+    const result = validateDecision({
+      action: { type: "fill_form", target: "form-1" },
+      safety: {
+        allowedActions: ["fill_form", "stop_success", "stop_blocked", "stop_failure"],
+        allowFormSubmission,
+        allowPaymentOrPurchase: false,
+        allowPersonalDataEntry,
+      },
+      limits,
+      allowedDomains: ["example-fictional-oem.test"],
+      state,
+    });
+    assert.equal(result.allowed, false, `allowFormSubmission=${allowFormSubmission} allowPersonalDataEntry=${allowPersonalDataEntry}`);
+    assert.ok(result.flags.includes("lead_form_entry_not_allowed"));
+  }
+
+  const allowed = validateDecision({
+    action: { type: "fill_form", target: "form-1" },
+    safety: {
+      allowedActions: ["fill_form", "stop_success", "stop_blocked", "stop_failure"],
+      allowFormSubmission: true,
+      allowPaymentOrPurchase: false,
+      allowPersonalDataEntry: true,
+    },
+    limits,
+    allowedDomains: ["example-fictional-oem.test"],
+    state,
+  });
+  assert.equal(allowed.allowed, true);
+  assert.ok(!allowed.flags.includes("lead_form_entry_not_allowed"));
 });
 
 /**
@@ -50,7 +100,7 @@ class ClickSubmitProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.30.0",
+    schemaVersion: "1.31.0",
     taskId: "no-personal-data-entry-test-drive",
     objective:
       "Reach the test drive booking form. Do not enter any personal information -- only reaching the form matters.",
@@ -65,7 +115,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.32.0",
+    outputSchemaVersion: "1.33.0",
     ...overrides,
   };
 }
