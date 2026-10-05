@@ -459,9 +459,76 @@ test("fill_form: dealer search triggers via a nearby button, waits for results, 
       dealerResultsDetected: true,
       dealerSelected: true,
       dealerSelectionVerified: true,
+      dealerResultsDetectedOutsideForm: false,
     });
     assert.equal(result.formPostSubmitDiagnostics?.submitCanceled, false);
     assert.equal(result.formRetriesUsed, 0);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a postcode field labelled with no dealer-specific wording is still routed through dealer_search when the form structurally has a search trigger and an accessible result widget", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-widget-generic-postcode-label.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDiscoveryDiagnostics?.dealerSearchWidgetDetected, true);
+    // Never counted among the plain fill_text fields -- it went through dealer_search instead.
+    assert.equal(result.formFieldsFilled?.includes("postcode"), false);
+    assert.deepEqual(result.formDealerSearchDiagnostics, {
+      postcodeSearchTriggered: true,
+      dealerResultsDetected: true,
+      dealerSelected: true,
+      dealerSelectionVerified: true,
+      dealerResultsDetectedOutsideForm: false,
+    });
+    assert.equal(result.formRetriesUsed, 0);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a plain postcode field with no dealer-search widget on the page is filled as plain text, and formDealerSearchDiagnostics is still always present with false defaults", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-url-success.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+    assert.equal(result.formDiscoveryDiagnostics?.dealerSearchWidgetDetected, false);
+    assert.equal(result.formFieldsFilled?.includes("postcode"), true);
+    // Promised fields must appear even when the dealer_search decision never ran at all --
+    // never silently omitted, which previously made "the flow never activated" indistinguishable
+    // from "it activated and every step came back false".
+    assert.deepEqual(result.formDealerSearchDiagnostics, {
+      postcodeSearchTriggered: false,
+      dealerResultsDetected: false,
+      dealerSelected: false,
+      dealerSelectionVerified: false,
+      dealerResultsDetectedOutsideForm: false,
+    });
   } finally {
     await page.close();
     await browser.close();

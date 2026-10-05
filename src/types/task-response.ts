@@ -444,6 +444,8 @@ export interface ActionResult {
     fieldsDiscovered: number;
     requiredFieldsDetected: number;
     requiredFieldsFilled: number;
+    /** Structural, generic detection (a search-trigger control plus an accessible selectable-result container) of a dealer-locator widget on the selected form -- independent of whether any field's own label mentions "dealer"/"concessionnaire" etc. See forms/fillPlan.ts's hasDealerSearchWidget. */
+    dealerSearchWidgetDetected: boolean;
     unmappedRequiredFieldIds: string[];
     skippedFieldReasons: { id: string; reason: string }[];
     /** How well the selected form's own text matches the objective/active-milestone/previous-CTA anchors and generic request-a-quote/offer/test-drive/contact vocabulary -- see forms/formRelevance.ts. */
@@ -473,16 +475,20 @@ export interface ActionResult {
   };
   /**
    * Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a
-   * `dealer_search` decision drives -- present only when the selected form had a field mapped
-   * to the `dealerSearch` purpose. Filling requiredFieldsFilled fields is never, by itself,
-   * proof this dynamic widget's dependent selection is complete -- dealerSelectionVerified is
-   * the only field that confirms the widget's own JS committed the selection.
+   * `dealer_search` decision drives -- present (with explicit false defaults) whenever a
+   * submit was attempted, even if no field was ever mapped to the `dealerSearch` decision, so
+   * "the dealer flow never activated" is never indistinguishable from "it activated and every
+   * step came back false". Filling requiredFieldsFilled fields is never, by itself, proof this
+   * dynamic widget's dependent selection is complete -- dealerSelectionVerified is the only
+   * field that confirms the widget's own JS committed the selection.
    */
   formDealerSearchDiagnostics?: {
     postcodeSearchTriggered: boolean;
     dealerResultsDetected: boolean;
     dealerSelected: boolean;
     dealerSelectionVerified: boolean;
+    /** Diagnostic only, checked only when dealerResultsDetected is false -- distinguishes "no results anywhere" from "results exist but render outside the <form> boundary, where the search is scoped". Never used to select or click. */
+    dealerResultsDetectedOutsideForm: boolean;
   };
   /**
    * Live validation evidence read immediately after each submit attempt (re-tagged first, so a
@@ -1481,7 +1487,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.37.0";
+  schemaVersion: "1.38.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

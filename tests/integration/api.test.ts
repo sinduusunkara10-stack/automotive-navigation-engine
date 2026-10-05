@@ -44,7 +44,7 @@ async function startApiServer(env?: NodeJS.ProcessEnv) {
 
 function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules: string[] = ["page_visits"]) {
   return {
-    schemaVersion: "1.35.0",
+    schemaVersion: "1.36.0",
     taskId,
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl: `${fixturesBaseUrl}/start.html`,
@@ -65,7 +65,7 @@ function buildValidTask(fixturesBaseUrl: string, taskId: string, captureModules:
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.37.0",
+    outputSchemaVersion: "1.38.0",
   };
 }
 
