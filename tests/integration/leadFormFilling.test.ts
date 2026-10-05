@@ -436,3 +436,119 @@ test("fill_form: zero actionable fields never triggers Submit and reports form_d
     await close();
   }
 });
+
+test("fill_form: dealer search triggers via a nearby button, waits for results, selects and verifies the first dealer, then submits", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-search-success.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formSuccessDetection, "on_screen_message");
+    assert.deepEqual(result.formDealerSearchDiagnostics, {
+      postcodeSearchTriggered: true,
+      dealerResultsDetected: true,
+      dealerSelected: true,
+      dealerSelectionVerified: true,
+    });
+    assert.equal(result.formPostSubmitDiagnostics?.submitCanceled, false);
+    assert.equal(result.formRetriesUsed, 0);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: no dealer results found never fabricates a selection, retries the search, and reports form_validation_failed with the site's own error text", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-no-results.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formDealerSearchDiagnostics?.postcodeSearchTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, false);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, false);
+    assert.equal(result.formPostSubmitDiagnostics?.submitCanceled, true);
+    assert.ok(result.formPostSubmitDiagnostics?.postSubmitValidationMessages.some((m) => m.includes("No dealer selected")));
+    assert.equal(result.formRetriesUsed, 2);
+    assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /dealer search/);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a clicked dealer result the widget never visibly commits is reported unverified, not treated as a successful selection", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-selection-uncommitted.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelectionVerified, false);
+    assert.equal(result.formRetriesUsed, 2);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a required field the page only reveals after a cancelled submit is caught by re-reading live validation state and recovered on retry", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-late-required-field.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formSuccessDetection, "url_change");
+    assert.equal(result.formRetriesUsed, 1);
+    assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /re-read live validation state/);
+    assert.ok(result.resultingUrl?.includes("extraPostcode="));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

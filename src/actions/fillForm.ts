@@ -49,6 +49,24 @@ const SUCCESS_TEXT_MARKERS = [
 
 const SUBMIT_TEXT_MARKERS = ["submit", "send", "soumettre", "envoyer", "senden", "versturen", "invia", "inviare", "enviar", "wyslij", "wyślij"];
 
+/** Generic, language-agnostic vocabulary for the trigger that runs a postcode/dealer search -- never a brand-specific selector. */
+const SEARCH_TEXT_MARKERS = ["search", "go", "find", "ok", "zoeken", "suchen", "rechercher", "cercar", "buscar", "szukaj", "pesquisar"];
+
+/** Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a `dealer_search` decision drives. See docs/architecture.md. */
+export interface DealerSearchDiagnostics {
+  postcodeSearchTriggered: boolean;
+  dealerResultsDetected: boolean;
+  dealerSelected: boolean;
+  dealerSelectionVerified: boolean;
+}
+
+/** Post-submit validation evidence, read fresh (after re-tagging) so a field revealed only after a dynamic widget interaction is never invisible to it. */
+export interface PostSubmitDiagnostics {
+  invalidFieldIds: string[];
+  nativeValidationMessages: Record<string, string>;
+  postSubmitValidationMessages: string[];
+}
+
 export interface ExecuteFillFormParams {
   page: Page;
   action: SelectedAction;
@@ -306,39 +324,90 @@ async function fieldByIndex(form: Locator, index: string): Promise<Locator> {
   return form.locator(`[${FIELD_INDEX_ATTR}="${index}"]`);
 }
 
-async function applyDecision(form: Locator, plannedField: PlannedField, hasCountryCodeSelector: boolean): Promise<string | undefined> {
+/** Generic, accessibility-based dealer-result candidates -- never a brand-specific selector. */
+const DEALER_RESULT_SELECTOR = '[role="radio"], input[type="radio"], [role="option"]';
+
+async function findSearchTrigger(form: Locator): Promise<Locator | null> {
+  for (const marker of SEARCH_TEXT_MARKERS) {
+    const byRole = form.getByRole("button", { name: new RegExp(marker, "i") }).first();
+    if ((await byRole.count()) > 0) return byRole;
+  }
+  return null;
+}
+
+async function waitForDealerResult(form: Locator): Promise<Locator | null> {
+  const results = form.locator(DEALER_RESULT_SELECTOR);
+  try {
+    await results.first().waitFor({ state: "visible", timeout: 3000 });
+  } catch {
+    return null;
+  }
+  return (await results.count()) > 0 ? results.first() : null;
+}
+
+/** Clicking a result doesn't by itself prove the widget's own JS committed the selection (e.g. a hidden "selected dealer id" field it still has to write) -- check the result's own selected/checked state after a short settle, generic to any radio/option-role widget. */
+async function verifyDealerSelectionCommitted(page: Page, option: Locator): Promise<boolean> {
+  await page.waitForTimeout(150);
+  return option
+    .evaluate((el: Element) => (el as HTMLInputElement).checked === true || el.getAttribute("aria-selected") === "true")
+    .catch(() => false);
+}
+
+async function applyDecision(
+  page: Page,
+  form: Locator,
+  plannedField: PlannedField,
+  hasCountryCodeSelector: boolean,
+): Promise<{ key?: string; dealerSearch?: DealerSearchDiagnostics }> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
   switch (plannedField.decision.kind) {
     case "fill_text":
       await field.fill(plannedField.decision.value);
-      return plannedField.decision.field;
+      return { key: plannedField.decision.field };
     case "select_option": {
       await field.selectOption({ value: plannedField.decision.value });
-      return plannedField.matchedField;
+      return { key: plannedField.matchedField };
     }
     case "choose_first_valid_option": {
       const options = plannedField.descriptor.options ?? [];
       const first = options.find((o) => o.value.trim().length > 0);
       if (first) await field.selectOption({ value: first.value });
-      return plannedField.matchedField;
+      return { key: plannedField.matchedField };
     }
     case "select_negative_option": {
       const options = plannedField.descriptor.options ?? [];
       if (options.length > 0 && plannedField.descriptor.tagName === "select") {
         await field.selectOption({ value: options[options.length - 1]!.value });
       }
-      return plannedField.matchedField;
+      return { key: plannedField.matchedField };
     }
     case "tick_checkbox":
       await field.check();
-      return plannedField.matchedField;
+      return { key: plannedField.matchedField };
     case "dealer_search": {
       await field.fill(plannedField.decision.postcode);
-      await field.press("Enter");
-      return "dealerSearch";
+      const trigger = await findSearchTrigger(form);
+      if (trigger) {
+        await trigger.click();
+      } else {
+        await field.press("Enter");
+      }
+      const dealerOption = await waitForDealerResult(form);
+      const dealerResultsDetected = dealerOption !== null;
+      let dealerSelected = false;
+      let dealerSelectionVerified = false;
+      if (dealerOption) {
+        await dealerOption.click();
+        dealerSelected = true;
+        dealerSelectionVerified = await verifyDealerSelectionCommitted(page, dealerOption);
+      }
+      return {
+        key: "dealerSearch",
+        dealerSearch: { postcodeSearchTriggered: true, dealerResultsDetected, dealerSelected, dealerSelectionVerified },
+      };
     }
     default:
-      return undefined;
+      return {};
   }
 }
 
@@ -365,6 +434,36 @@ async function findInvalidFieldIds(form: Locator): Promise<string[]> {
     });
     return invalid.map((el) => el.getAttribute(attr) ?? "");
   }, FIELD_INDEX_ATTR);
+}
+
+/**
+ * Post-submit evidence, read fresh right after a submit click -- re-tagging (tagAndReadFields)
+ * immediately before this is called is what lets a field a dynamic widget only revealed after
+ * the submit attempt (e.g. a dealer-selection widget's own hidden "committed" field) be seen at
+ * all; without that re-tag, findInvalidFieldIds can only ever see fields that already existed
+ * at the start of the run, and silently reports zero invalid fields even though the site
+ * cancelled the submit.
+ */
+async function collectPostSubmitDiagnostics(form: Locator): Promise<PostSubmitDiagnostics> {
+  await tagAndReadFields(form).catch(() => []);
+  const invalidFieldIds = await findInvalidFieldIds(form).catch(() => []);
+  const nativeValidationMessages = await form
+    .evaluate((formEl: HTMLFormElement, attr: string) => {
+      const messages: Record<string, string> = {};
+      Array.from(formEl.querySelectorAll(`[${attr}]`)).forEach((el) => {
+        const message = (el as HTMLInputElement).validationMessage;
+        if (message) messages[el.getAttribute(attr) ?? ""] = message;
+      });
+      return messages;
+    }, FIELD_INDEX_ATTR)
+    .catch(() => ({}));
+  const postSubmitValidationMessages = await form
+    .evaluate((formEl: HTMLFormElement) => {
+      const nodes = Array.from(formEl.querySelectorAll('[role="alert"], [aria-live], .error, .error-message, .invalid-feedback'));
+      return nodes.map((n) => n.textContent?.trim() ?? "").filter((t) => t.length > 0);
+    })
+    .catch(() => []);
+  return { invalidFieldIds, nativeValidationMessages, postSubmitValidationMessages };
 }
 
 async function detectCaptchaOnPage(page: Page): Promise<boolean> {
@@ -532,6 +631,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
   let retries = 0;
+  let dealerSearchDiagnostics: DealerSearchDiagnostics | undefined;
 
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const raw = await tagAndReadFields(form);
@@ -561,9 +661,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         }
         continue;
       }
-      const key = await applyDecision(form, plannedField, hasCountryCodeSelector);
-      if (key) {
-        fieldsFilled.add(key);
+      const outcome = await applyDecision(page, form, plannedField, hasCountryCodeSelector);
+      if (outcome.dealerSearch) dealerSearchDiagnostics = outcome.dealerSearch;
+      if (outcome.key) {
+        fieldsFilled.add(outcome.key);
         filledIds.add(plannedField.descriptor.id);
       }
     }
@@ -625,54 +726,88 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     };
   }
 
-  const submit = await findSubmitControl(form);
-  if (!submit) {
+  const submitControl = await findSubmitControl(form);
+  if (!submitControl) {
     return { success: false, error: "no_submit_control_found", formDiscoveryDiagnostics };
   }
+  const submit: Locator = submitControl;
 
   const beforeUrl = page.url();
-  await submit.click();
-  await waitForAdaptiveSettle(page);
-  await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
 
-  let invalidIds = await findInvalidFieldIds(form).catch(() => []);
-  while (invalidIds.length > 0 && retries < MAX_RETRIES) {
-    retries += 1;
-    await fillAllRequired(new Set(invalidIds));
+  async function rerunDealerSearch(): Promise<void> {
+    const raw = await tagAndReadFields(form);
+    const descriptors = raw.map(toDescriptor);
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
+    const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
+    if (!dealerField) return;
+    const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector);
+    if (outcome.dealerSearch) dealerSearchDiagnostics = outcome.dealerSearch;
+  }
+
+  async function attemptSubmit(): Promise<{ postSubmit: PostSubmitDiagnostics; succeeded: boolean; afterUrl: string }> {
     await submit.click();
     await waitForAdaptiveSettle(page);
-    invalidIds = await findInvalidFieldIds(form).catch(() => []);
+    const postSubmit = await collectPostSubmitDiagnostics(form);
+    const afterUrl = page.url();
+    const urlChanged = afterUrl !== beforeUrl;
+    const hasConfirmationText = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await detectConfirmationText(page));
+    const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || hasConfirmationText);
+    return { postSubmit, succeeded, afterUrl };
   }
 
-  if (invalidIds.length > 0) {
+  let attempt = await attemptSubmit();
+  await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
+
+  let retryDecision = "not needed: the first submit succeeded";
+
+  // Never treat requiredFieldsFilled/initial fill success as proof a dynamic widget's
+  // dependent selection (e.g. a dealer-results list) is complete -- only a verified,
+  // re-read post-submit state decides whether a retry has a real corrective action
+  // available: an unverified dealer selection, or at least one invalid field to re-read and
+  // re-fill. With neither, a retry would just resubmit the exact same state, so it's refused
+  // rather than burning the bounded retry budget pretending to fix something.
+  while (!attempt.succeeded && retries < MAX_RETRIES) {
+    const dealerUncommitted = dealerSearchDiagnostics !== undefined && !dealerSearchDiagnostics.dealerSelectionVerified;
+    const correctiveActionAvailable = dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0;
+
+    if (!correctiveActionAvailable) {
+      retryDecision = "not retried: the submit was cancelled but no invalid field or uncommitted dealer selection was found to correct";
+      break;
+    }
+
+    retries += 1;
+    if (dealerUncommitted) {
+      await rerunDealerSearch();
+      retryDecision = `retried ${retries}/${MAX_RETRIES}: re-ran the dealer search/select/verify flow after an uncommitted selection`;
+    } else {
+      await fillAllRequired(new Set(attempt.postSubmit.invalidFieldIds));
+      retryDecision = `retried ${retries}/${MAX_RETRIES}: re-read live validation state and re-filled ${attempt.postSubmit.invalidFieldIds.join(", ")}`;
+    }
+    attempt = await attemptSubmit();
+  }
+
+  const formDealerSearchDiagnostics = dealerSearchDiagnostics;
+  const formPostSubmitDiagnostics = {
+    submitCanceled: !attempt.succeeded,
+    invalidFieldIds: attempt.postSubmit.invalidFieldIds,
+    nativeValidationMessages: attempt.postSubmit.nativeValidationMessages,
+    postSubmitValidationMessages: attempt.postSubmit.postSubmitValidationMessages,
+    retryDecision,
+  };
+
+  if (!attempt.succeeded) {
     return {
       success: false,
       formFillOutcome: "form_validation_failed",
       formRetriesUsed: retries,
-      formValidationMissingFields: invalidIds,
+      formValidationMissingFields: attempt.postSubmit.invalidFieldIds,
       formFieldsFilled: [...fieldsFilled],
       formMarketDetected: market,
       formLanguageDetected: language,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
-    };
-  }
-
-  const afterUrl = page.url();
-  const urlChanged = afterUrl !== beforeUrl;
-  const hasConfirmationText = !urlChanged && (await detectConfirmationText(page));
-
-  if (!urlChanged && !hasConfirmationText) {
-    return {
-      success: false,
-      formFillOutcome: "form_validation_failed",
-      formRetriesUsed: retries,
-      formValidationMissingFields: [],
-      formFieldsFilled: [...fieldsFilled],
-      formMarketDetected: market,
-      formLanguageDetected: language,
-      formClaudeCallUsed: claudeCallUsed,
-      formDiscoveryDiagnostics,
+      formDealerSearchDiagnostics,
+      formPostSubmitDiagnostics,
     };
   }
 
@@ -680,14 +815,16 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   return {
     success: true,
-    resultingUrl: afterUrl,
+    resultingUrl: attempt.afterUrl,
     formFillOutcome: "submitted",
-    formSuccessDetection: urlChanged ? "url_change" : "on_screen_message",
+    formSuccessDetection: attempt.afterUrl !== beforeUrl ? "url_change" : "on_screen_message",
     formRetriesUsed: retries,
     formFieldsFilled: [...fieldsFilled],
     formMarketDetected: market,
     formLanguageDetected: language,
     formClaudeCallUsed: claudeCallUsed,
     formDiscoveryDiagnostics,
+    formDealerSearchDiagnostics,
+    formPostSubmitDiagnostics,
   };
 }

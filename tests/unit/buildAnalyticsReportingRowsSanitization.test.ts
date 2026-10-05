@@ -89,7 +89,7 @@ function row(overrides: Record<string, unknown>) {
   return {
     runId: "run-1",
     taskId: "task-1",
-    schemaVersion: "1.36.0",
+    schemaVersion: "1.37.0",
     journeySequence: 1,
     recordType: "START_PAGE",
     stepIndex: 0,

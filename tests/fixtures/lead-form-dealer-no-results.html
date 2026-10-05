@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Find a dealer</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-search-btn">Search</button>
+      <!-- No results container exists at all -- the search always comes back empty for this fixture's postcode. -->
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="dealer-error" class="error-message" role="alert" hidden>No dealer selected.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!document.getElementById("dealer-committed").value) {
+          event.preventDefault();
+          document.getElementById("dealer-error").hidden = false;
+        }
+      });
+    </script>
+  </body>
+</html>

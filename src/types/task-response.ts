@@ -471,6 +471,36 @@ export interface ActionResult {
       filled: boolean;
     }[];
   };
+  /**
+   * Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a
+   * `dealer_search` decision drives -- present only when the selected form had a field mapped
+   * to the `dealerSearch` purpose. Filling requiredFieldsFilled fields is never, by itself,
+   * proof this dynamic widget's dependent selection is complete -- dealerSelectionVerified is
+   * the only field that confirms the widget's own JS committed the selection.
+   */
+  formDealerSearchDiagnostics?: {
+    postcodeSearchTriggered: boolean;
+    dealerResultsDetected: boolean;
+    dealerSelected: boolean;
+    dealerSelectionVerified: boolean;
+  };
+  /**
+   * Live validation evidence read immediately after each submit attempt (re-tagged first, so a
+   * field a dynamic widget only reveals after the submit attempt is never invisible to it).
+   * Present whenever a submit control was found and clicked.
+   */
+  formPostSubmitDiagnostics?: {
+    /** True whenever the submit did not result in a URL change or an on-screen confirmation, after any retries. */
+    submitCanceled: boolean;
+    /** Field ids still failing native constraint validation or carrying aria-invalid="true" after the last submit attempt. */
+    invalidFieldIds: string[];
+    /** Each invalid field's own native `validationMessage`, by field id. */
+    nativeValidationMessages: Record<string, string>;
+    /** Visible validation/error text found in the form (role="alert", aria-live, or a generic error/invalid-feedback class) after the last submit attempt. */
+    postSubmitValidationMessages: string[];
+    /** Human-readable explanation of whether a retry was attempted and why (or why not). */
+    retryDecision: string;
+  };
 }
 
 export interface Progress {
@@ -1451,7 +1481,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.36.0";
+  schemaVersion: "1.37.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
