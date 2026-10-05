@@ -469,6 +469,31 @@ test("fill_form: dealer search triggers via a nearby button, waits for results, 
   }
 });
 
+test("fill_form: a role=\"radio\" dealer widget that commits via aria-checked (not aria-selected or .checked) is recognized as verified", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-aria-checked.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelectionVerified, true);
+    assert.equal(result.formRetriesUsed, 0);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
 test("fill_form: no dealer results found never fabricates a selection, retries the search, and reports form_validation_failed with the site's own error text", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();

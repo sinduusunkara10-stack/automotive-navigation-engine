@@ -345,11 +345,20 @@ async function waitForDealerResult(form: Locator): Promise<Locator | null> {
   return (await results.count()) > 0 ? results.first() : null;
 }
 
-/** Clicking a result doesn't by itself prove the widget's own JS committed the selection (e.g. a hidden "selected dealer id" field it still has to write) -- check the result's own selected/checked state after a short settle, generic to any radio/option-role widget. */
+/**
+ * Clicking a result doesn't by itself prove the widget's own JS committed the selection (e.g.
+ * a hidden "selected dealer id" field it still has to write) -- check the result's own
+ * selected/checked state after a short settle. `aria-checked` is the correct ARIA state for a
+ * `role="radio"` widget, `aria-selected` for `role="option"`; both are checked generically
+ * since the result could be either.
+ */
 async function verifyDealerSelectionCommitted(page: Page, option: Locator): Promise<boolean> {
   await page.waitForTimeout(150);
   return option
-    .evaluate((el: Element) => (el as HTMLInputElement).checked === true || el.getAttribute("aria-selected") === "true")
+    .evaluate(
+      (el: Element) =>
+        (el as HTMLInputElement).checked === true || el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
+    )
     .catch(() => false);
 }
 

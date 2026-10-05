@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Find a dealer</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-search-btn">Search</button>
+      <div id="dealer-results" hidden>
+        <!-- A role="radio" widget (not a native <input type="radio">) that commits via
+             aria-checked, the correct ARIA state for this role -- never aria-selected or
+             .checked, which don't apply here. -->
+        <div role="radiogroup">
+          <div role="radio" id="dealer-opt-1" tabindex="0" aria-checked="false">Dealer One</div>
+          <div role="radio" id="dealer-opt-2" tabindex="0" aria-checked="false">Dealer Two</div>
+        </div>
+      </div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <div id="dealer-error" class="error-message" role="alert" hidden>Please select a dealer before submitting.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      document.getElementById("dealer-search-btn").addEventListener("click", () => {
+        document.getElementById("dealer-results").hidden = false;
+      });
+      document.querySelectorAll('[role="radio"]').forEach((radio) => {
+        radio.addEventListener("click", () => {
+          document.querySelectorAll('[role="radio"]').forEach((r) => r.setAttribute("aria-checked", "false"));
+          radio.setAttribute("aria-checked", "true");
+          document.getElementById("dealer-committed").value = radio.id;
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!document.getElementById("dealer-committed").value) {
+          event.preventDefault();
+          document.getElementById("dealer-error").hidden = false;
+          return;
+        }
+        event.preventDefault();
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>
