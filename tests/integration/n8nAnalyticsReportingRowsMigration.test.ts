@@ -16,7 +16,7 @@ function row(overrides: Record<string, unknown>) {
   return {
     runId: "run-1",
     taskId: "task-1",
-    schemaVersion: "1.33.0",
+    schemaVersion: "1.35.0",
     journeySequence: 1,
     recordType: "START_PAGE",
     stepIndex: 0,

@@ -11,6 +11,17 @@ import { detectPageLanguage } from "../forms/fieldMapper.js";
 import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
 import { resolveMarket, type SupportedLanguage } from "../forms/testData.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
+import {
+  computeFormScore,
+  resolveAmbiguousFormSelection,
+  selectBestForm,
+  type FormCandidate,
+  type FormJourneyContext,
+  type FormSelectionAmbiguityResolver,
+  type FormTextSignals,
+  type FormVisibilityProminenceSignals,
+} from "../forms/formRelevance.js";
+import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 const MAX_RETRIES = 2;
@@ -46,6 +57,10 @@ export interface ExecuteFillFormParams {
   captureModules: CaptureModuleName[];
   /** Optional, injected once per run -- see unmappedFieldResolver.ts. Never required: an unresolved required field simply stays empty and surfaces via the validation-retry path. */
   unmappedFieldResolver?: UnmappedFieldResolver;
+  /** Objective/active-milestone/previous-CTA evidence for multi-form journey-relevance selection -- see forms/formRelevance.ts. Absent (treated as empty) scores every candidate on visibility/prominence and field actionability alone. */
+  journeyContext?: FormJourneyContext;
+  /** Optional, injected once per run -- see forms/formRelevance.ts's FormSelectionAmbiguityResolver. No caller configures one yet; its absence just means the ambiguous band fails closed. */
+  selectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
 }
 
 interface RawFieldDescriptor {
@@ -115,6 +130,94 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
       };
     });
   }, FIELD_INDEX_ATTR);
+}
+
+interface RawFormSignals {
+  visible: boolean;
+  inChrome: boolean;
+  areaRatio: number;
+  hasNearbyHeading: boolean;
+  hasVisibleSubmitButton: boolean;
+  nearestHeadingText: string;
+  submitButtonText: string;
+  formAttributesText: string;
+}
+
+/**
+ * Visual-prominence and local-text evidence for one candidate <form> -- see
+ * forms/formRelevance.ts's FormVisibilityProminenceSignals/FormTextSignals. Everything stays
+ * inline in one anonymous callback (no nested named helper), same reason as tagAndReadFields
+ * above.
+ */
+async function gatherFormSignals(form: Locator): Promise<RawFormSignals> {
+  return form.evaluate((formEl: HTMLFormElement) => {
+    const rect = formEl.getBoundingClientRect();
+    const style = window.getComputedStyle(formEl);
+    const onScreen = rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && onScreen;
+    const inChrome =
+      formEl.closest('nav, header, footer, [role="navigation"], [role="banner"], [role="contentinfo"], [role="menu"], [role="menubar"]') !== null;
+    const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
+    const areaRatio = Math.min(1, (rect.width * rect.height) / viewportArea);
+
+    const headingSelector = "h1, h2, h3, h4";
+    let nearestHeadingText = "";
+    const ownHeading = formEl.querySelector(headingSelector);
+    if (ownHeading) {
+      nearestHeadingText = ownHeading.textContent?.trim() ?? "";
+    } else {
+      let sibling: Element | null = formEl.previousElementSibling;
+      let siblingSteps = 0;
+      while (sibling && siblingSteps < 6 && !nearestHeadingText) {
+        if (sibling.matches(headingSelector)) {
+          nearestHeadingText = sibling.textContent?.trim() ?? "";
+        }
+        sibling = sibling.previousElementSibling;
+        siblingSteps += 1;
+      }
+      let ancestor: Element | null = formEl.parentElement;
+      let ancestorSteps = 0;
+      while (ancestor && ancestorSteps < 4 && !nearestHeadingText) {
+        const heading = ancestor.querySelector(headingSelector);
+        if (heading) {
+          nearestHeadingText = heading.textContent?.trim() ?? "";
+        }
+        ancestor = ancestor.parentElement;
+        ancestorSteps += 1;
+      }
+    }
+    const hasNearbyHeading = nearestHeadingText.length > 0;
+
+    const submitEls = Array.from(formEl.querySelectorAll<HTMLElement>('button[type="submit"], input[type="submit"]'));
+    let submitButtonText = "";
+    let hasVisibleSubmitButton = false;
+    for (const el of submitEls) {
+      const elRect = el.getBoundingClientRect();
+      const elStyle = window.getComputedStyle(el);
+      const elVisible = elRect.width > 0 && elRect.height > 0 && elStyle.visibility !== "hidden" && elStyle.display !== "none";
+      if (elVisible) {
+        hasVisibleSubmitButton = true;
+        submitButtonText = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || (el as HTMLInputElement).value || "";
+        break;
+      }
+    }
+    if (!hasVisibleSubmitButton && submitEls.length === 0) {
+      const genericButtons = Array.from(formEl.querySelectorAll<HTMLElement>("button"));
+      const lastButton = genericButtons[genericButtons.length - 1];
+      if (lastButton) {
+        submitButtonText = lastButton.getAttribute("aria-label")?.trim() || lastButton.textContent?.trim() || "";
+      }
+    }
+
+    const formAttributesText = [
+      formEl.getAttribute("aria-label") ?? "",
+      formEl.getAttribute("name") ?? "",
+      formEl.id ?? "",
+      formEl.getAttribute("action") ?? "",
+    ].join(" ");
+
+    return { visible, inChrome, areaRatio, hasNearbyHeading, hasVisibleSubmitButton, nearestHeadingText, submitButtonText, formAttributesText };
+  });
 }
 
 function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
@@ -225,11 +328,17 @@ async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: 
   }
 }
 
-export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionResult> {
-  const { page, captures, stepIndex, captureModules, unmappedFieldResolver } = params;
+function scorePlan(plan: PlannedField[]): number {
+  return plan.filter((p) => p.decision.kind !== "skip").length;
+}
 
-  const form = page.locator("form").first();
-  if ((await form.count()) === 0) {
+export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionResult> {
+  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver } = params;
+  const journeyContext: FormJourneyContext = params.journeyContext ?? {};
+
+  const forms = page.locator("form");
+  const formsOnPage = await forms.count();
+  if (formsOnPage === 0) {
     return { success: false, error: "no_form_found" };
   }
 
@@ -241,17 +350,124 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const actionMarketParam = typeof params.action?.params?.market === "string" ? (params.action.params.market as string) : undefined;
   const language: SupportedLanguage = detectPageLanguage(htmlLang);
   const market = resolveMarket(language, actionMarketParam);
-  const hasCountryCodeSelector = (await form.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
+
+  /**
+   * A page can have several <form> elements (search, newsletter, cookie/consent, the actual
+   * lead form) in any document order. Field count alone is not a reliable signal -- a
+   * newsletter signup can easily have more fillable fields than the correct request-a-quote
+   * form (the production bug this scoring replaced). Every candidate is scored on journey
+   * relevance (does its own text match the objective/active-milestone/previous-CTA anchors,
+   * and generic request-a-quote/offer/test-drive/contact vocabulary, never newsletter/search/
+   * login vocabulary), visual prominence (visible, in the main content area, a reasonably
+   * large area, a nearby heading, a visible submit control), and field actionability as
+   * supporting evidence only -- see forms/formRelevance.ts.
+   */
+  const pageSignals = await gatherSemanticPageSignals(page);
+  const candidateEvidence: { index: number; hasCountryCodeSelector: boolean; textSignals: FormTextSignals; score: ReturnType<typeof computeFormScore> }[] =
+    [];
+  for (let i = 0; i < formsOnPage; i += 1) {
+    const candidate = forms.nth(i);
+    const hasCountryCodeSelectorCandidate = (await candidate.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
+    const raw = await tagAndReadFields(candidate);
+    const descriptors = raw.map(toDescriptor);
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
+    const actionableFieldCount = scorePlan(plan);
+    const formSignals = await gatherFormSignals(candidate);
+
+    const textSignals: FormTextSignals = {
+      pageTitle: pageSignals.title,
+      pageHeadings: pageSignals.headings,
+      nearestHeadingText: formSignals.nearestHeadingText,
+      submitButtonText: formSignals.submitButtonText,
+      formAttributesText: formSignals.formAttributesText,
+    };
+    const visibilitySignals: FormVisibilityProminenceSignals = {
+      visible: formSignals.visible,
+      inChrome: formSignals.inChrome,
+      areaRatio: formSignals.areaRatio,
+      hasNearbyHeading: formSignals.hasNearbyHeading,
+      hasVisibleSubmitButton: formSignals.hasVisibleSubmitButton,
+    };
+
+    candidateEvidence.push({
+      index: i,
+      hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
+      textSignals,
+      score: computeFormScore({
+        journeyContext,
+        textSignals,
+        visibilitySignals,
+        fieldsDiscovered: descriptors.length,
+        actionableFieldCount,
+      }),
+    });
+  }
+
+  const candidates: FormCandidate[] = candidateEvidence.map((c) => ({ index: c.index, score: c.score }));
+  let selection = selectBestForm(candidates);
+
+  if (selection.ambiguous && selectionAmbiguityResolver) {
+    const resolved = await resolveAmbiguousFormSelection(
+      { candidates: candidateEvidence.map((c) => ({ index: c.index, textSignals: c.textSignals, score: c.score })), journeyContext },
+      selectionAmbiguityResolver,
+    );
+    if (resolved) {
+      selection = {
+        ...selection,
+        chosenIndex: resolved.chosenIndex,
+        ambiguous: false,
+        selectedFormReason: `Claude-assisted tiebreak (independently verified): ${resolved.rationale}`,
+      };
+    }
+  }
+
+  const chosenEvidence = candidateEvidence.find((c) => c.index === selection.chosenIndex)!;
+  const formSelectionDiagnostics = {
+    journeyRelevanceScore: chosenEvidence.score.journeyRelevanceScore,
+    visibilityProminenceScore: chosenEvidence.score.visibilityProminenceScore,
+    fieldActionabilityScore: chosenEvidence.score.fieldActionabilityScore,
+    totalFormScore: chosenEvidence.score.totalFormScore,
+    selectedFormReason: selection.selectedFormReason,
+    rejectedFormsAndReasons: selection.rejectedFormsAndReasons,
+  };
+
+  // Safety: an ambiguous selection the resolver couldn't (or wasn't asked to) resolve is
+  // never guessed away, and a selection below the confidence threshold is never filled or
+  // submitted at all -- "do not submit when confidence is below a defined threshold".
+  if (selection.belowConfidenceThreshold || selection.ambiguous) {
+    return {
+      success: false,
+      formFillOutcome: "form_discovery_failed",
+      formMarketDetected: market,
+      formLanguageDetected: language,
+      formDiscoveryDiagnostics: {
+        formsOnPage,
+        selectedFormIndex: selection.chosenIndex,
+        fieldsDiscovered: 0,
+        requiredFieldsDetected: 0,
+        requiredFieldsFilled: 0,
+        unmappedRequiredFieldIds: [],
+        skippedFieldReasons: [],
+        ...formSelectionDiagnostics,
+        selectedFormReason: selection.ambiguous
+          ? `ambiguous: ${selection.selectedFormReason} (no verified tiebreak available)`
+          : selection.selectedFormReason,
+      },
+    };
+  }
+
+  const form = forms.nth(selection.chosenIndex);
+  const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
   let retries = 0;
-  let beforeUrl = page.url();
 
-  async function fillAllRequired(onlyIndices?: Set<string>): Promise<void> {
+  async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const raw = await tagAndReadFields(form);
     const descriptors = raw.map(toDescriptor).filter((d) => !onlyIndices || onlyIndices.has(d.id));
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
+    const filledIds = new Set<string>();
 
     const needingClaude = plan.filter((p) => p.decision.kind === "needs_claude");
     let resolved: Map<string, string> | undefined;
@@ -271,22 +487,53 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           const field = await fieldByIndex(form, plannedField.descriptor.id);
           await field.fill(value);
           fieldsFilled.add("claude_resolved");
+          filledIds.add(plannedField.descriptor.id);
         }
         continue;
       }
       const key = await applyDecision(form, plannedField, hasCountryCodeSelector);
-      if (key) fieldsFilled.add(key);
+      if (key) {
+        fieldsFilled.add(key);
+        filledIds.add(plannedField.descriptor.id);
+      }
     }
+    return { plan, filledIds };
   }
 
-  await fillAllRequired();
+  const { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
+
+  const requiredFields = initialPlan.filter((p) => p.descriptor.required && p.descriptor.visible);
+  const requiredFieldsFilled = requiredFields.filter((p) => initialFilledIds.has(p.descriptor.id)).length;
+  const formDiscoveryDiagnostics = {
+    formsOnPage,
+    selectedFormIndex: selection.chosenIndex,
+    fieldsDiscovered: initialPlan.length,
+    requiredFieldsDetected: requiredFields.length,
+    requiredFieldsFilled,
+    unmappedRequiredFieldIds: requiredFields.filter((p) => !initialFilledIds.has(p.descriptor.id)).map((p) => p.descriptor.id),
+    skippedFieldReasons: initialPlan
+      .filter((p): p is PlannedField & { decision: { kind: "skip"; reason: string } } => p.decision.kind === "skip")
+      .map((p) => ({ id: p.descriptor.id, reason: p.decision.reason })),
+    ...formSelectionDiagnostics,
+  };
+
+  if (requiredFields.length > 0 && requiredFieldsFilled === 0) {
+    return {
+      success: false,
+      formFillOutcome: "form_discovery_failed",
+      formMarketDetected: market,
+      formLanguageDetected: language,
+      formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
+    };
+  }
 
   const submit = await findSubmitControl(form);
   if (!submit) {
-    return { success: false, error: "no_submit_control_found" };
+    return { success: false, error: "no_submit_control_found", formDiscoveryDiagnostics };
   }
 
-  beforeUrl = page.url();
+  const beforeUrl = page.url();
   await submit.click();
   await waitForAdaptiveSettle(page);
   await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
@@ -310,6 +557,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formMarketDetected: market,
       formLanguageDetected: language,
       formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
     };
   }
 
@@ -327,6 +575,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formMarketDetected: market,
       formLanguageDetected: language,
       formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
     };
   }
 
@@ -342,5 +591,6 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formMarketDetected: market,
     formLanguageDetected: language,
     formClaudeCallUsed: claudeCallUsed,
+    formDiscoveryDiagnostics,
   };
 }

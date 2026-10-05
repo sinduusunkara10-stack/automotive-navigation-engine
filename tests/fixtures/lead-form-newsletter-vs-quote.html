@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Offers</title>
+  </head>
+  <body>
+    <h2>Newsletter</h2>
+    <form id="newsletter-form" method="get" action="/newsletter-thank-you.html">
+      <label for="news-first-name">First name</label>
+      <input type="text" id="news-first-name" name="firstName" required />
+      <label for="news-last-name">Last name</label>
+      <input type="text" id="news-last-name" name="lastName" required />
+      <label for="news-email">Email</label>
+      <input type="email" id="news-email" name="email" required />
+      <label for="news-postcode">Postcode</label>
+      <input type="text" id="news-postcode" name="postcode" required />
+      <button type="submit">Subscribe to our newsletter</button>
+    </form>
+    <h1>Request a quote</h1>
+    <form id="quote-form" method="get" action="/quote-thank-you.html">
+      <label for="quote-first-name">First name</label>
+      <input type="text" id="quote-first-name" name="firstName" required />
+      <label for="quote-email">Email</label>
+      <input type="email" id="quote-email" name="email" required />
+      <button type="submit">Request a quote</button>
+    </form>
+  </body>
+</html>
