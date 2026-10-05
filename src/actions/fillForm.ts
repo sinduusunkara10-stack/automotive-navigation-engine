@@ -63,6 +63,9 @@ export interface ExecuteFillFormParams {
   selectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
 }
 
+/** Where a field's `required: true` came from -- see RawFieldDescriptor.requiredEvidence below. */
+export type RequiredEvidence = "attribute" | "marker" | "none";
+
 interface RawFieldDescriptor {
   index: number;
   tagName: string;
@@ -72,8 +75,12 @@ interface RawFieldDescriptor {
   autocomplete?: string;
   label?: string;
   required: boolean;
+  /** How `required` was decided -- never submitted as fact without evidence (see fillForm.ts's field-level diagnostics). */
+  requiredEvidence: RequiredEvidence;
   visible: boolean;
   currentValue: string;
+  /** True when `currentValue` only mirrors this field's own label/placeholder text (a site rendering its placeholder into the live value instead of the `placeholder` attribute) -- never real prefilled data, so fillPlan.ts must not skip the field as "prefilled" because of it. */
+  isPlaceholderMimicry: boolean;
   isPreselected?: boolean;
   options?: { value: string; label: string }[];
 }
@@ -105,14 +112,68 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
         currentValue = (el as HTMLInputElement | HTMLTextAreaElement).value;
       }
 
-      const id = el.getAttribute("id");
-      const byForLabel = id ? formEl.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
-      const closestLabel = el.closest("label");
-      const label = byForLabel?.textContent?.trim() || closestLabel?.textContent?.trim() || el.getAttribute("aria-label") || "";
-
       const rect = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
       const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+
+      const id = el.getAttribute("id");
+      const byForLabel = id ? formEl.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+      const closestLabel = el.closest("label");
+      let labelEl: Element | null = byForLabel ?? closestLabel;
+      if (!labelEl && visible) {
+        // Generic fallback for a visible control whose id doesn't match any label's `for`
+        // (a custom-widget-generated id, or a label pointing at a hidden duplicate backing
+        // input) and that isn't wrapped in a <label> either: walk a few preceding siblings
+        // of the control itself, then of its parent, looking for the first element carrying
+        // its own short text -- the same bounded sibling/ancestor-walk shape
+        // forms/formRelevance.ts's gatherFormSignals already uses for nearestHeadingText.
+        // Never climbs past the form's own boundary -- a hidden field never needs this (it is
+        // always skipped regardless of its label) and a visible field's real label is always
+        // inside the form that contains it.
+        let node: Element | null = el;
+        let steps = 0;
+        while (node && node !== formEl && steps < 6 && !labelEl) {
+          let sibling: Element | null = node.previousElementSibling;
+          let siblingSteps = 0;
+          while (sibling && siblingSteps < 4 && !labelEl) {
+            const text = sibling.textContent?.trim() ?? "";
+            if (text.length > 0 && text.length < 80 && sibling.querySelector("input, select, textarea") === null) {
+              labelEl = sibling;
+            }
+            sibling = sibling.previousElementSibling;
+            siblingSteps += 1;
+          }
+          node = node.parentElement;
+          steps += 1;
+        }
+      }
+      const labelText = labelEl?.textContent?.trim() || el.getAttribute("aria-label") || "";
+
+      // Generic visible required-marker detection: a bare "*" is a near-universal,
+      // language-agnostic convention for "this field is required" that many sites express
+      // only visually (a sibling/decorator element, or appended to the label text) without
+      // ever setting the HTML `required` attribute or `aria-required`. Never brand-specific --
+      // just the literal asterisk symbol, wherever it appears near this field's own label.
+      const hasAttributeRequired = el.hasAttribute("required") || el.getAttribute("aria-required") === "true";
+      let hasRequiredMarker = /\*\s*$/.test(labelText);
+      if (!hasRequiredMarker && labelEl) {
+        const markerCandidates = [labelEl.nextElementSibling, labelEl.parentElement?.querySelector(".required, .mandatory") ?? null];
+        hasRequiredMarker = markerCandidates.some((candidate) => (candidate?.textContent?.trim() ?? "") === "*");
+      }
+      if (!hasRequiredMarker) {
+        const ownMarkerSibling = el.nextElementSibling;
+        hasRequiredMarker = (ownMarkerSibling?.textContent?.trim() ?? "") === "*";
+      }
+      const required = hasAttributeRequired || hasRequiredMarker;
+      const requiredEvidence: "attribute" | "marker" | "none" = hasAttributeRequired ? "attribute" : hasRequiredMarker ? "marker" : "none";
+
+      const normalizedValue = currentValue.trim().toLowerCase();
+      const normalizedLabel = labelText.trim().toLowerCase();
+      const normalizedPlaceholder = (el.getAttribute("placeholder") ?? "").trim().toLowerCase();
+      const isPlaceholderMimicry =
+        normalizedValue.length > 0 && (normalizedValue === normalizedLabel || normalizedValue === normalizedPlaceholder);
+
+      el.setAttribute(`${attr}-required`, String(required));
 
       return {
         index,
@@ -121,10 +182,12 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
         name: el.getAttribute("name") ?? undefined,
         placeholder: el.getAttribute("placeholder") ?? undefined,
         autocomplete: el.getAttribute("autocomplete") ?? undefined,
-        label,
-        required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
+        label: labelText,
+        required,
+        requiredEvidence,
         visible,
         currentValue,
+        isPlaceholderMimicry,
         isPreselected,
         options,
       };
@@ -230,8 +293,10 @@ function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
     autocomplete: raw.autocomplete,
     label: raw.label,
     required: raw.required,
+    requiredEvidence: raw.requiredEvidence,
     visible: raw.visible,
     currentValue: raw.currentValue,
+    isPlaceholderMimicry: raw.isPlaceholderMimicry,
     isPreselected: raw.isPreselected,
     options: raw.options,
   };
@@ -292,7 +357,11 @@ async function findInvalidFieldIds(form: Locator): Promise<string[]> {
   return form.evaluate((formEl: HTMLFormElement, attr: string) => {
     const invalid = Array.from(formEl.querySelectorAll(`[${attr}]`)).filter((el) => {
       const input = el as HTMLInputElement;
-      return input.hasAttribute("required") && (!input.checkValidity?.() || el.getAttribute("aria-invalid") === "true");
+      // Reuses the same requiredness tagAndReadFields already computed (attribute or visible
+      // marker) rather than recomputing `hasAttribute("required")` alone, which would miss a
+      // field required only by a visible "*" marker.
+      const isRequired = el.getAttribute(`${attr}-required`) === "true";
+      return isRequired && (!input.checkValidity?.() || el.getAttribute("aria-invalid") === "true");
     });
     return invalid.map((el) => el.getAttribute(attr) ?? "");
   }, FIELD_INDEX_ATTR);
@@ -448,6 +517,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         requiredFieldsFilled: 0,
         unmappedRequiredFieldIds: [],
         skippedFieldReasons: [],
+        fieldDiagnostics: [],
         ...formSelectionDiagnostics,
         selectedFormReason: selection.ambiguous
           ? `ambiguous: ${selection.selectedFormReason} (no verified tiebreak available)`
@@ -504,6 +574,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const requiredFields = initialPlan.filter((p) => p.descriptor.required && p.descriptor.visible);
   const requiredFieldsFilled = requiredFields.filter((p) => initialFilledIds.has(p.descriptor.id)).length;
+  const actionableFields = initialPlan.filter((p) => p.decision.kind !== "skip");
   const formDiscoveryDiagnostics = {
     formsOnPage,
     selectedFormIndex: selection.chosenIndex,
@@ -514,10 +585,36 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     skippedFieldReasons: initialPlan
       .filter((p): p is PlannedField & { decision: { kind: "skip"; reason: string } } => p.decision.kind === "skip")
       .map((p) => ({ id: p.descriptor.id, reason: p.decision.reason })),
+    fieldDiagnostics: initialPlan.map((p) => ({
+      id: p.descriptor.id,
+      label: p.descriptor.label ?? "",
+      type: p.descriptor.tagName === "input" ? p.descriptor.type ?? "text" : p.descriptor.tagName,
+      visible: p.descriptor.visible,
+      requiredEvidence: p.descriptor.requiredEvidence ?? "none",
+      valueState: (p.descriptor.isPlaceholderMimicry
+        ? "placeholder_mimicry"
+        : p.descriptor.currentValue.trim().length > 0
+          ? "has_value"
+          : "empty") as "empty" | "has_value" | "placeholder_mimicry",
+      matchedField: p.matchedField,
+      decision: p.decision.kind,
+      filled: initialFilledIds.has(p.descriptor.id),
+    })),
     ...formSelectionDiagnostics,
   };
 
-  if (requiredFields.length > 0 && requiredFieldsFilled === 0) {
+  // Safety: never submit having filled nothing. The chosen form's fieldActionabilityScore
+  // (computed at selection time, before any fill attempt) and the actual post-fill-attempt
+  // outcome are checked independently -- either one alone catching zero fillable/filled
+  // fields is enough to stop here, rather than only the narrower "detected >=1 required
+  // field but filled none" case, which a required-detection gap (or any other discovery
+  // miss) can silently defeat by making requiredFields.length itself 0.
+  if (
+    formSelectionDiagnostics.fieldActionabilityScore === 0 ||
+    actionableFields.length === 0 ||
+    initialFilledIds.size === 0 ||
+    (requiredFields.length > 0 && requiredFieldsFilled === 0)
+  ) {
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",

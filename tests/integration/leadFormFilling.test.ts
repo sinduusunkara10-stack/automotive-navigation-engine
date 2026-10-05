@@ -324,3 +324,115 @@ test("fill_form: an unresolvable required field triggers retries up to the bound
     await close();
   }
 });
+
+test("fill_form: a required field marked only by a visible '*' marker (no required/aria-required attribute) is detected, filled, and submitted", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-marker-required.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDiscoveryDiagnostics?.requiredFieldsDetected, 4);
+    assert.equal(result.formDiscoveryDiagnostics?.requiredFieldsFilled, 4);
+    assert.ok(result.formDiscoveryDiagnostics?.fieldDiagnostics?.every((f) => f.requiredEvidence === "marker"));
+    assert.ok(result.resultingUrl?.includes("lead-form-thank-you.html"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a visible control's hidden same-purpose backing duplicate is never filled or relied on; only the visible control is", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-hidden-backing-duplicate.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+
+    const hiddenFields = result.formDiscoveryDiagnostics?.fieldDiagnostics?.filter((f) => !f.visible) ?? [];
+    assert.equal(hiddenFields.length, 2);
+    assert.ok(hiddenFields.every((f) => f.filled === false));
+
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("firstName_display"), "Test");
+    assert.equal(url.searchParams.get("email_display"), "test@test.com");
+    assert.equal(url.searchParams.get("firstName"), "stale-backing-value");
+    assert.equal(url.searchParams.get("email"), "stale@example.com");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: an empty visible field whose value only echoes its own label/placeholder is never treated as prefilled", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-placeholder-mimicry.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    const emailDiagnostic = result.formDiscoveryDiagnostics?.fieldDiagnostics?.find((f) => f.matchedField === "email");
+    assert.equal(emailDiagnostic?.valueState, "placeholder_mimicry");
+    assert.equal(emailDiagnostic?.filled, true);
+    assert.ok(result.formFieldsFilled?.includes("email"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: zero actionable fields never triggers Submit and reports form_discovery_failed", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-zero-actionable.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_discovery_failed");
+    assert.equal(result.formDiscoveryDiagnostics?.fieldActionabilityScore, 0);
+
+    const submitClicked = await page.evaluate(() => (window as unknown as { __submitClicked?: boolean }).__submitClicked ?? false);
+    assert.equal(submitClicked, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

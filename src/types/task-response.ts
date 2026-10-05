@@ -458,6 +458,18 @@ export interface ActionResult {
     selectedFormReason: string;
     /** Every other candidate form considered, with its own score and why it was not selected. */
     rejectedFormsAndReasons: { index: number; totalFormScore: number; reason: string }[];
+    /** Per-field evidence for the selected form, independent of whether discovery/mapping/fill succeeded -- label, control type, visibility, where `required` came from, current-value state, the matched field purpose (if any), the fill-plan decision, and whether it actually got filled. Lets a discovery/mapping failure be diagnosed field-by-field from the response alone. */
+    fieldDiagnostics: {
+      id: string;
+      label: string;
+      type: string;
+      visible: boolean;
+      requiredEvidence: "attribute" | "marker" | "none";
+      valueState: "empty" | "has_value" | "placeholder_mimicry";
+      matchedField?: string;
+      decision: string;
+      filled: boolean;
+    }[];
   };
 }
 
@@ -1439,7 +1451,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.35.0";
+  schemaVersion: "1.36.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

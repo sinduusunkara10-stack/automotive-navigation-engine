@@ -121,7 +121,7 @@ class ClickOnceThenAlwaysStopSuccessProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl" | "successCriteria">): TaskRequest {
   return {
-    schemaVersion: "1.33.0",
+    schemaVersion: "1.34.0",
     taskId: "required-success-criteria-enforcement",
     objective: "Reach the fixture's success page.",
     allowedDomains: ["127.0.0.1"],
@@ -133,7 +133,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.35.0",
+    outputSchemaVersion: "1.36.0",
     ...overrides,
   };
 }
