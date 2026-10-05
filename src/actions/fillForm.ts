@@ -225,11 +225,16 @@ async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: 
   }
 }
 
+function scorePlan(plan: PlannedField[]): number {
+  return plan.filter((p) => p.decision.kind !== "skip").length;
+}
+
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionResult> {
   const { page, captures, stepIndex, captureModules, unmappedFieldResolver } = params;
 
-  const form = page.locator("form").first();
-  if ((await form.count()) === 0) {
+  const forms = page.locator("form");
+  const formsOnPage = await forms.count();
+  if (formsOnPage === 0) {
     return { success: false, error: "no_form_found" };
   }
 
@@ -241,17 +246,43 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const actionMarketParam = typeof params.action?.params?.market === "string" ? (params.action.params.market as string) : undefined;
   const language: SupportedLanguage = detectPageLanguage(htmlLang);
   const market = resolveMarket(language, actionMarketParam);
-  const hasCountryCodeSelector = (await form.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
+
+  /**
+   * A page can have several <form> elements (search, newsletter, cookie/consent, the actual lead
+   * form) in any document order -- always filling the first one silently fills/submits the wrong
+   * form. Score every candidate by how many of its fields the fill plan can actually act on and
+   * keep the highest-scoring one; this is generic (no selector/brand knowledge of which form is
+   * "the" lead form).
+   */
+  let chosenIndex = 0;
+  let chosenScore = -1;
+  let chosenHasCountryCodeSelector = false;
+  for (let i = 0; i < formsOnPage; i += 1) {
+    const candidate = forms.nth(i);
+    const hasCountryCodeSelectorCandidate = (await candidate.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
+    const raw = await tagAndReadFields(candidate);
+    const descriptors = raw.map(toDescriptor);
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
+    const score = scorePlan(plan);
+    if (score > chosenScore) {
+      chosenIndex = i;
+      chosenScore = score;
+      chosenHasCountryCodeSelector = hasCountryCodeSelectorCandidate;
+    }
+  }
+
+  const form = forms.nth(chosenIndex);
+  const hasCountryCodeSelector = chosenHasCountryCodeSelector;
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
   let retries = 0;
-  let beforeUrl = page.url();
 
-  async function fillAllRequired(onlyIndices?: Set<string>): Promise<void> {
+  async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const raw = await tagAndReadFields(form);
     const descriptors = raw.map(toDescriptor).filter((d) => !onlyIndices || onlyIndices.has(d.id));
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
+    const filledIds = new Set<string>();
 
     const needingClaude = plan.filter((p) => p.decision.kind === "needs_claude");
     let resolved: Map<string, string> | undefined;
@@ -271,22 +302,52 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           const field = await fieldByIndex(form, plannedField.descriptor.id);
           await field.fill(value);
           fieldsFilled.add("claude_resolved");
+          filledIds.add(plannedField.descriptor.id);
         }
         continue;
       }
       const key = await applyDecision(form, plannedField, hasCountryCodeSelector);
-      if (key) fieldsFilled.add(key);
+      if (key) {
+        fieldsFilled.add(key);
+        filledIds.add(plannedField.descriptor.id);
+      }
     }
+    return { plan, filledIds };
   }
 
-  await fillAllRequired();
+  const { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
+
+  const requiredFields = initialPlan.filter((p) => p.descriptor.required && p.descriptor.visible);
+  const requiredFieldsFilled = requiredFields.filter((p) => initialFilledIds.has(p.descriptor.id)).length;
+  const formDiscoveryDiagnostics = {
+    formsOnPage,
+    selectedFormIndex: chosenIndex,
+    fieldsDiscovered: initialPlan.length,
+    requiredFieldsDetected: requiredFields.length,
+    requiredFieldsFilled,
+    unmappedRequiredFieldIds: requiredFields.filter((p) => !initialFilledIds.has(p.descriptor.id)).map((p) => p.descriptor.id),
+    skippedFieldReasons: initialPlan
+      .filter((p): p is PlannedField & { decision: { kind: "skip"; reason: string } } => p.decision.kind === "skip")
+      .map((p) => ({ id: p.descriptor.id, reason: p.decision.reason })),
+  };
+
+  if (requiredFields.length > 0 && requiredFieldsFilled === 0) {
+    return {
+      success: false,
+      formFillOutcome: "form_discovery_failed",
+      formMarketDetected: market,
+      formLanguageDetected: language,
+      formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
+    };
+  }
 
   const submit = await findSubmitControl(form);
   if (!submit) {
-    return { success: false, error: "no_submit_control_found" };
+    return { success: false, error: "no_submit_control_found", formDiscoveryDiagnostics };
   }
 
-  beforeUrl = page.url();
+  const beforeUrl = page.url();
   await submit.click();
   await waitForAdaptiveSettle(page);
   await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
@@ -310,6 +371,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formMarketDetected: market,
       formLanguageDetected: language,
       formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
     };
   }
 
@@ -327,6 +389,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formMarketDetected: market,
       formLanguageDetected: language,
       formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
     };
   }
 
@@ -342,5 +405,6 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formMarketDetected: market,
     formLanguageDetected: language,
     formClaudeCallUsed: claudeCallUsed,
+    formDiscoveryDiagnostics,
   };
 }

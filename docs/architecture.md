@@ -3763,3 +3763,37 @@ dropped).
 `formLanguageDetected`/`formClaudeCallUsed`, present only on a `fill_form` action's result.
 `schemaVersion`/`outputSchemaVersion` moved `1.32.0` -> `1.33.0`. No existing field removed,
 renamed, or had its meaning changed.
+
+### Lead-form filling: multi-form discovery/mapping fix (schemaVersion 1.33.0 -> 1.34.0)
+
+Production incident (2026-10-05, Peugeot FR): `fill_form` always located
+`page.locator("form").first()` -- the first `<form>` in document order -- and operated on it
+unconditionally. A real page with more than one `<form>` (a search box, a newsletter signup,
+the actual lead-capture form, etc. in any order) could have its wrong, unrelated form read and
+"filled" (zero matching fields, nothing written), then still clicked that form's own submit
+control; the site's own validation/cancel handling then produced a `gtm.formCanceled` with no
+diagnosable signal at all (`formFieldsFilled: []`, `formValidationMissingFields: []`,
+`formRetriesUsed: 0`, no Claude fallback -- there was nothing unmapped-and-required on the
+*wrong* form to trigger one).
+
+Two generic fixes, neither brand/site-specific:
+
+- `executeFillForm` now scores **every** `<form>` on the page by how many of its fields the
+  existing fill plan (`buildFillPlan`) can actually act on (any decision other than `skip`) and
+  fills the highest-scoring one, instead of always the first in document order.
+- Before ever clicking submit, the engine checks whether it detected at least one visible
+  required field and filled zero of them (deterministically or via the Claude fallback). If so,
+  it never submits at all and reports the new `formFillOutcome` value
+  `"form_discovery_failed"` -- submitting a form the engine never actually filled is worse than
+  not submitting it.
+
+`ActionResult` gains `formDiscoveryDiagnostics` (present whenever `fill_form` found at least
+one `<form>`, independent of outcome): `formsOnPage`, `selectedFormIndex`, `fieldsDiscovered`,
+`requiredFieldsDetected`, `requiredFieldsFilled`, `unmappedRequiredFieldIds`,
+`skippedFieldReasons` (mirrors `fillPlan.ts`'s own `skip` reasons) -- so a discovery/mapping
+failure is diagnosable from the response alone, without reproducing the run.
+`formFillOutcome`'s enum gains `"form_discovery_failed"`. `schemaVersion`/`outputSchemaVersion`
+moved `1.33.0` -> `1.34.0`. All changes are additive except the new submit guard itself: a run
+that would previously have clicked submit having filled zero required fields now reports
+`form_discovery_failed` instead of attempting submission. No existing field removed, renamed,
+or had its meaning changed.

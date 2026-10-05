@@ -103,6 +103,92 @@ test("fill_form: a detected CAPTCHA stops the run without filling or submitting 
   }
 });
 
+test("fill_form: picks the form with actionable fields over the first <form> on the page", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-multiple-forms.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formDiscoveryDiagnostics?.selectedFormIndex, 1);
+    assert.equal(result.formDiscoveryDiagnostics?.formsOnPage, 2);
+    assert.ok(result.resultingUrl?.includes("lead-form-thank-you.html"));
+
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.has("q"), false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a required field with no mapping and no Claude resolver never clicks submit, and reports form_discovery_failed", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-unmappable-required.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_discovery_failed");
+    assert.equal(result.formDiscoveryDiagnostics?.requiredFieldsDetected, 1);
+    assert.equal(result.formDiscoveryDiagnostics?.requiredFieldsFilled, 0);
+    assert.deepEqual(result.formDiscoveryDiagnostics?.unmappedRequiredFieldIds, ["0"]);
+
+    const submitClicked = await page.evaluate(() => (window as unknown as { __submitClicked?: boolean }).__submitClicked ?? false);
+    assert.equal(submitClicked, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a cancelled submission (no URL change, no confirmation) is reported as a failure, never success", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-cancelled-submission.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formRetriesUsed, 0);
+    assert.deepEqual(result.formValidationMissingFields, []);
+    assert.ok(result.formFieldsFilled && result.formFieldsFilled.length > 0);
+
+    const canceled = await page.evaluate(() => (window as unknown as { __formCanceled?: boolean }).__formCanceled ?? false);
+    assert.equal(canceled, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
 test("fill_form: an unresolvable required field triggers retries up to the bound, then reports form_validation_failed", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();

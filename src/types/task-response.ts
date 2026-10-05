@@ -417,7 +417,7 @@ export interface ActionResult {
       | "restoration_failed";
   };
   /** Lead-form filling (Phase 1, see docs/architecture.md "Lead-form filling"): present only on a `fill_form` action's result. */
-  formFillOutcome?: "submitted" | "form_validation_failed" | "blocked_captcha";
+  formFillOutcome?: "submitted" | "form_validation_failed" | "blocked_captcha" | "form_discovery_failed";
   /** Generic field keys this fill_form action wrote a value into -- never the raw value itself. */
   formFieldsFilled?: string[];
   /** Number of validation-triggered re-fill-and-resubmit cycles performed, bounded at 2. */
@@ -432,6 +432,21 @@ export interface ActionResult {
   formLanguageDetected?: string;
   /** True only when the one optional, bounded Claude call for unmapped required fields was made. */
   formClaudeCallUsed?: boolean;
+  /**
+   * Present whenever fill_form found at least one `<form>` on the page -- generic discovery/mapping
+   * diagnostics (which form was chosen among several candidates, how many fields it saw, which
+   * required fields went unmapped and why) so a discovery/mapping failure is diagnosable without
+   * reproducing the run. See formFillOutcome "form_discovery_failed".
+   */
+  formDiscoveryDiagnostics?: {
+    formsOnPage: number;
+    selectedFormIndex: number;
+    fieldsDiscovered: number;
+    requiredFieldsDetected: number;
+    requiredFieldsFilled: number;
+    unmappedRequiredFieldIds: string[];
+    skippedFieldReasons: { id: string; reason: string }[];
+  };
 }
 
 export interface Progress {
@@ -1412,7 +1427,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.33.0";
+  schemaVersion: "1.34.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

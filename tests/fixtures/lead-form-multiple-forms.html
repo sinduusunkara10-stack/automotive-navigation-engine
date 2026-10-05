@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Book a Test Drive</title>
+  </head>
+  <body>
+    <form id="site-search" method="get" action="/search.html">
+      <label for="search-query">Search</label>
+      <input type="text" id="search-query" name="q" />
+      <button type="submit" id="search-submit">Go</button>
+    </form>
+    <h1>Book a Test Drive</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="mobile">Mobile</label>
+      <input type="tel" id="mobile" name="mobile" required />
+      <label for="postcode">Postcode</label>
+      <input type="text" id="postcode" name="postcode" required />
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>
