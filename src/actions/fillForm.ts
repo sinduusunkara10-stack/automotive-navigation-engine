@@ -756,9 +756,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   async function attemptSubmit(): Promise<{ postSubmit: PostSubmitDiagnostics; succeeded: boolean; afterUrl: string }> {
     await submit.click();
     await waitForAdaptiveSettle(page);
-    const postSubmit = await collectPostSubmitDiagnostics(form);
     const afterUrl = page.url();
     const urlChanged = afterUrl !== beforeUrl;
+    // A URL change already proves the submit went through -- `form` now refers to whatever
+    // (if anything) matches the same index on the page we navigated to, not the form that was
+    // submitted, so reading post-submit diagnostics from it here would just be evaluating
+    // against a gone/unrelated element until Playwright's default action timeout gives up.
+    const postSubmit: PostSubmitDiagnostics = urlChanged
+      ? { invalidFieldIds: [], nativeValidationMessages: {}, postSubmitValidationMessages: [] }
+      : await collectPostSubmitDiagnostics(form);
     const hasConfirmationText = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await detectConfirmationText(page));
     const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || hasConfirmationText);
     return { postSubmit, succeeded, afterUrl };
