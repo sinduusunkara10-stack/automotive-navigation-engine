@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { planField, type FormFieldDescriptor, type FillPlanContext } from "../../src/forms/fillPlan.js";
 
-const CTX: FillPlanContext = { language: "en", market: "UK", hasCountryCodeSelector: false };
+const CTX: FillPlanContext = { language: "en", market: "UK", hasCountryCodeSelector: false, hasDealerSearchWidget: false };
 
 function field(overrides: Partial<FormFieldDescriptor>): FormFieldDescriptor {
   return {
@@ -102,6 +102,21 @@ test("fill rules: a required dropdown with no negative option (e.g. enquiry type
 test("fill rules: a dealer-search field is filled with the market postcode and flagged for the search flow", () => {
   const result = planField(field({ label: "Find a dealer (postcode or city)" }), CTX);
   assert.deepEqual(result.decision, { kind: "dealer_search", postcode: "SW1A 1AA" });
+});
+
+test("fill rules: a plainly-labelled postcode field is upgraded to dealer_search when the form structurally has a dealer-search widget", () => {
+  const withWidget: FillPlanContext = { ...CTX, hasDealerSearchWidget: true };
+  const result = planField(field({ label: "Postcode" }), withWidget);
+  assert.deepEqual(result, {
+    descriptor: field({ label: "Postcode" }),
+    matchedField: "dealerSearch",
+    decision: { kind: "dealer_search", postcode: "SW1A 1AA" },
+  });
+});
+
+test("fill rules: a plainly-labelled postcode field stays a plain fill_text when no dealer-search widget is structurally detected", () => {
+  const result = planField(field({ label: "Postcode" }), CTX);
+  assert.deepEqual(result.decision, { kind: "fill_text", field: "postcode", value: "SW1A 1AA" });
 });
 
 test("fill rules: landline vs mobile use the right per-market value, national vs international by country-code-selector presence", () => {

@@ -46,6 +46,17 @@ export interface FillPlanContext {
   language: SupportedLanguage;
   market: SupportedMarket;
   hasCountryCodeSelector: boolean;
+  /**
+   * True when the form structurally contains a dealer-search widget (a search-trigger
+   * control plus an accessible selectable-result container -- see fillForm.ts's
+   * findSearchTrigger/DEALER_RESULT_SELECTOR), independent of what the postcode field's own
+   * label says. A dealer-locator's postcode input is very often labelled exactly like a plain
+   * postcode field ("Postcode"/"Code postal") with no dealer-specific wording of its own --
+   * the dealerSearch keyword list can only ever match label text, so without this the field
+   * keyword-matches the generic "postcode" purpose and the whole search/select/verify flow
+   * never runs. See docs/architecture.md.
+   */
+  hasDealerSearchWidget: boolean;
 }
 
 const NEGATIVE_OPTION_KEYWORDS: Record<SupportedLanguage, string[]> = {
@@ -132,6 +143,13 @@ export function planField(descriptor: FormFieldDescriptor, context: FillPlanCont
     case "email":
       return { descriptor, matchedField, decision: { kind: "fill_text", field: "email", value: FIXED_FIELDS.email } };
     case "postcode":
+      if (context.hasDealerSearchWidget) {
+        return {
+          descriptor,
+          matchedField: "dealerSearch",
+          decision: { kind: "dealer_search", postcode: marketDataFor(context.market).postcode },
+        };
+      }
       return {
         descriptor,
         matchedField,

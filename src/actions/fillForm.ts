@@ -58,6 +58,12 @@ export interface DealerSearchDiagnostics {
   dealerResultsDetected: boolean;
   dealerSelected: boolean;
   dealerSelectionVerified: boolean;
+  /**
+   * Diagnostic only -- never used to select or click. Checked only when dealerResultsDetected
+   * is false, so a future live run can tell "no results anywhere" apart from "the widget's
+   * results render outside the <form> boundary, where waitForDealerResult never looks".
+   */
+  dealerResultsDetectedOutsideForm: boolean;
 }
 
 /** Post-submit validation evidence, read fresh (after re-tagging) so a field revealed only after a dynamic widget interaction is never invisible to it. */
@@ -66,6 +72,14 @@ export interface PostSubmitDiagnostics {
   nativeValidationMessages: Record<string, string>;
   postSubmitValidationMessages: string[];
 }
+
+const EMPTY_DEALER_SEARCH_DIAGNOSTICS: DealerSearchDiagnostics = {
+  postcodeSearchTriggered: false,
+  dealerResultsDetected: false,
+  dealerSelected: false,
+  dealerSelectionVerified: false,
+  dealerResultsDetectedOutsideForm: false,
+};
 
 export interface ExecuteFillFormParams {
   page: Page;
@@ -410,9 +424,22 @@ async function applyDecision(
         dealerSelected = true;
         dealerSelectionVerified = await verifyDealerSelectionCommitted(page, dealerOption);
       }
+      const dealerResultsDetectedOutsideForm = dealerResultsDetected
+        ? false
+        : await page
+            .locator(DEALER_RESULT_SELECTOR)
+            .count()
+            .then((count) => count > 0)
+            .catch(() => false);
       return {
         key: "dealerSearch",
-        dealerSearch: { postcodeSearchTriggered: true, dealerResultsDetected, dealerSelected, dealerSelectionVerified },
+        dealerSearch: {
+          postcodeSearchTriggered: true,
+          dealerResultsDetected,
+          dealerSelected,
+          dealerSelectionVerified,
+          dealerResultsDetectedOutsideForm,
+        },
       };
     }
     default:
@@ -540,14 +567,29 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
    * supporting evidence only -- see forms/formRelevance.ts.
    */
   const pageSignals = await gatherSemanticPageSignals(page);
-  const candidateEvidence: { index: number; hasCountryCodeSelector: boolean; textSignals: FormTextSignals; score: ReturnType<typeof computeFormScore> }[] =
-    [];
+  const candidateEvidence: {
+    index: number;
+    hasCountryCodeSelector: boolean;
+    hasDealerSearchWidget: boolean;
+    textSignals: FormTextSignals;
+    score: ReturnType<typeof computeFormScore>;
+  }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
     const hasCountryCodeSelectorCandidate = (await candidate.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
+    // Structural, generic dealer-widget detection (a search trigger plus an accessible
+    // selectable-result container) -- never label text, which a dealer-search postcode field
+    // very often shares with a plain postcode field. See fillPlan.ts's hasDealerSearchWidget.
+    const hasDealerSearchWidgetCandidate =
+      (await findSearchTrigger(candidate)) !== null && (await candidate.locator(DEALER_RESULT_SELECTOR).count()) > 0;
     const raw = await tagAndReadFields(candidate);
     const descriptors = raw.map(toDescriptor);
-    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
+    const plan = buildFillPlan(descriptors, {
+      language,
+      market,
+      hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
+      hasDealerSearchWidget: hasDealerSearchWidgetCandidate,
+    });
     const actionableFieldCount = scorePlan(plan);
     const formSignals = await gatherFormSignals(candidate);
 
@@ -569,6 +611,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     candidateEvidence.push({
       index: i,
       hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
+      hasDealerSearchWidget: hasDealerSearchWidgetCandidate,
       textSignals,
       score: computeFormScore({
         journeyContext,
@@ -623,6 +666,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         fieldsDiscovered: 0,
         requiredFieldsDetected: 0,
         requiredFieldsFilled: 0,
+        dealerSearchWidgetDetected: chosenEvidence.hasDealerSearchWidget,
         unmappedRequiredFieldIds: [],
         skippedFieldReasons: [],
         fieldDiagnostics: [],
@@ -636,6 +680,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const form = forms.nth(selection.chosenIndex);
   const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
+  const hasDealerSearchWidget = chosenEvidence.hasDealerSearchWidget;
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
@@ -645,7 +690,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const raw = await tagAndReadFields(form);
     const descriptors = raw.map(toDescriptor).filter((d) => !onlyIndices || onlyIndices.has(d.id));
-    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector, hasDealerSearchWidget });
     const filledIds = new Set<string>();
 
     const needingClaude = plan.filter((p) => p.decision.kind === "needs_claude");
@@ -691,6 +736,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     fieldsDiscovered: initialPlan.length,
     requiredFieldsDetected: requiredFields.length,
     requiredFieldsFilled,
+    dealerSearchWidgetDetected: hasDealerSearchWidget,
     unmappedRequiredFieldIds: requiredFields.filter((p) => !initialFilledIds.has(p.descriptor.id)).map((p) => p.descriptor.id),
     skippedFieldReasons: initialPlan
       .filter((p): p is PlannedField & { decision: { kind: "skip"; reason: string } } => p.decision.kind === "skip")
@@ -746,7 +792,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   async function rerunDealerSearch(): Promise<void> {
     const raw = await tagAndReadFields(form);
     const descriptors = raw.map(toDescriptor);
-    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector, hasDealerSearchWidget });
     const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
     if (!dealerField) return;
     const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector);
@@ -801,7 +847,12 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     attempt = await attemptSubmit();
   }
 
-  const formDealerSearchDiagnostics = dealerSearchDiagnostics;
+  // Always present, even when the dealer_search decision never ran at all (e.g. no dealer
+  // widget was structurally detected on this form) -- a promised diagnostic field must appear
+  // with explicit false defaults rather than being silently omitted from the serialized
+  // response, which previously made "the dealer flow never activated" indistinguishable from
+  // "it activated and every step came back false".
+  const formDealerSearchDiagnostics = dealerSearchDiagnostics ?? EMPTY_DEALER_SEARCH_DIAGNOSTICS;
   const formPostSubmitDiagnostics = {
     submitCanceled: !attempt.succeeded,
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
