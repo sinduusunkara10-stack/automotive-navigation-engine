@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // The site injects a brand-new required field into the form only once a first submit is
+      // attempted -- it never existed in the DOM at discovery time, so a fix that only re-reads
+      // fields it already knew about at the start of the run would never see it either. This is
+      // the generic case this fixture exists to prove: re-tagging live, right before checking
+      // post-submit validity, is what catches a field a dynamic widget reveals only after a
+      // cancelled submit.
+      let revealed = false;
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!revealed) {
+          event.preventDefault();
+          revealed = true;
+          const label = document.createElement("label");
+          label.setAttribute("for", "extra-postcode");
+          label.textContent = "Postcode";
+          const input = document.createElement("input");
+          input.type = "text";
+          input.id = "extra-postcode";
+          input.name = "extraPostcode";
+          input.required = true;
+          document.getElementById("submit-lead").insertAdjacentElement("beforebegin", label);
+          document.getElementById("submit-lead").insertAdjacentElement("beforebegin", input);
+        }
+      });
+    </script>
+  </body>
+</html>

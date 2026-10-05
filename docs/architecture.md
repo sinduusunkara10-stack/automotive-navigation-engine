@@ -3901,3 +3901,55 @@ field from the response alone. `schemaVersion`/`outputSchemaVersion` moved `1.35
 `1.36.0`. All changes are additive except the stricter required-detection/prefilled logic and
 the broadened submit guard themselves. No existing field removed, renamed, or had its meaning
 changed.
+
+### Lead-form filling: dealer-search flow and post-submit validation re-read fix (schemaVersion 1.36.0 -> 1.37.0)
+
+Production incident (2026-10-05, same Peugeot FR thread as the three fixes above): after the
+1.36.0 fix, the correct form was selected and every required field was detected and filled
+(`requiredFieldsDetected: 6`, `requiredFieldsFilled: 6`, `formFieldsFilled` including
+`firstName`/`lastName`/`email`/`genericPhone`/`postcode`), including a `searchBox/postCode`
+field. Submit was still clicked and still cancelled (`gtm.formCanceled: true`), with
+`formValidationMissingFields: []` -- no diagnosable signal.
+
+**Root cause (dealer-search flow)**: the `dealer_search` decision only ever filled the
+postcode value and pressed Enter. It never waited for dealer results to appear, never selected
+one, and never verified the widget's own JS actually committed that selection. A site requiring
+a committed dealer before it accepts the lead form kept cancelling submit even though every
+field the engine could see (the postcode text itself) was filled -- `requiredFieldsFilled`
+being non-zero was never, by itself, proof this dynamic widget's dependent selection was
+complete.
+
+**Root cause (post-submit validation)**: `findInvalidFieldIds` was only ever checked against
+whatever `data-nav-engine-field-index`/`-required` attributes `tagAndReadFields` had already
+written during the initial fill pass -- before any submit was attempted. A field a dynamic
+widget only reveals or creates after that first submit attempt (e.g. a page injecting a new
+required field into the DOM once it sees a cancelled submission) never carried those
+attributes at all and was invisible to the check, which is why `formValidationMissingFields`
+could report empty even though the site's own validation cancelled the submit.
+
+**Fixes, both generic (no brand-specific selectors)**:
+
+- `dealer_search` now runs postcode -> trigger search (a nearby button whose accessible name
+  matches a generic, multilingual search/go/find/ok vocabulary, falling back to Enter only when
+  no such button exists) -> wait (bounded, 3s) for an accessible dealer-result candidate
+  (`[role="radio"]`, a radio `<input>`, or `[role="option"]` -- never a brand-specific selector)
+  -> select the first one -> verify the widget's own state (`checked`, or `aria-selected`)
+  actually committed the selection after a short settle.
+- Every post-submit validation check (`collectPostSubmitDiagnostics`) now re-runs
+  `tagAndReadFields` immediately before reading `findInvalidFieldIds`/native
+  `validationMessage`/visible error text, so a field only revealed or created after the submit
+  attempt is never invisible to it.
+- Retries (still bounded at 2) are now driven by a real corrective action: an unverified dealer
+  selection re-runs the dealer search/select/verify flow; any other invalid field is re-read and
+  re-filled via the existing fill pass. With neither (submit cancelled but nothing invalid and no
+  uncommitted dealer selection to act on), the engine does not retry at all rather than
+  resubmitting identical state.
+
+New `ActionResult.formDealerSearchDiagnostics` (`postcodeSearchTriggered`,
+`dealerResultsDetected`, `dealerSelected`, `dealerSelectionVerified`) -- present only when the
+selected form had a field mapped to the `dealerSearch` purpose. New
+`ActionResult.formPostSubmitDiagnostics` (`submitCanceled`, `invalidFieldIds`,
+`nativeValidationMessages`, `postSubmitValidationMessages`, `retryDecision`) -- present whenever
+a submit control was found and clicked. `schemaVersion`/`outputSchemaVersion` moved `1.36.0` ->
+`1.37.0`. All changes are additive except the `dealer_search` behaviour and the post-submit
+re-tag themselves. No existing field removed, renamed, or had its meaning changed.

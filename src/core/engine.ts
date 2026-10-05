@@ -668,7 +668,7 @@ function buildTerminalResponse(params: {
     : undefined;
 
   return {
-    schemaVersion: "1.36.0",
+    schemaVersion: "1.37.0",
     taskId: task.taskId,
     status,
     statusReason,
@@ -681,7 +681,7 @@ function buildTerminalResponse(params: {
       taskId: task.taskId,
       ...(task.journeyType ? { journeyType: task.journeyType } : {}),
       startUrl: task.startUrl,
-      schemaVersion: "1.36.0",
+      schemaVersion: "1.37.0",
       pageVisits: captures.page_visits ?? [],
       ctaClicks: captures.cta_clicks ?? [],
       startPageUrl,

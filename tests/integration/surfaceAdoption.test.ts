@@ -24,7 +24,7 @@ import { ScriptedReasoningProvider, byAccessibleName, byAccessibleNameAndHeading
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.34.0",
+    schemaVersion: "1.35.0",
     taskId: "surface-adoption-test",
     // Deliberately short and vocabulary-matched to these fixtures' own title text
     // ("Confirmed Partner Offer") -- surface-relevance corrective work, PR 5 (trust-policy
@@ -47,7 +47,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
     captureModules: ["page_visits"],
     limits: { maxSteps: 10, maxBacktracks: 0 },
     safety: { allowedActions: ["click", "capture", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.36.0",
+    outputSchemaVersion: "1.37.0",
     ...rest,
   };
 }
