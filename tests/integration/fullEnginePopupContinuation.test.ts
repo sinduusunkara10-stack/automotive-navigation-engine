@@ -64,7 +64,7 @@ function crossHostBase(baseUrl: string): string {
 function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successPattern: string }): TaskRequest {
   const { startUrl, successPattern, ...rest } = overrides;
   return {
-    schemaVersion: "1.33.0",
+    schemaVersion: "1.34.0",
     taskId: "full-engine-popup-continuation-test",
     objective: "Review the configuration overview, complete the finance application, and reach the submission confirmation.",
     startUrl,
@@ -90,7 +90,7 @@ function baseTask(overrides: Partial<TaskRequest> & { startUrl: string; successP
       allowSurfaceAdoption: true,
       surfaceAdoptionDomainPolicy: "require_allowed_domain",
     },
-    outputSchemaVersion: "1.35.0",
+    outputSchemaVersion: "1.36.0",
     ...rest,
   };
 }

@@ -14,9 +14,13 @@ export interface FormFieldDescriptor extends FormFieldTextHints {
   tagName: FormFieldTagName;
   type?: string;
   required: boolean;
+  /** How `required` was decided -- "attribute" (HTML `required`/`aria-required`), "marker" (a visible "*" near the field with no such attribute), or "none". Diagnostic only; `required` itself already folds this in. */
+  requiredEvidence?: "attribute" | "marker" | "none";
   visible: boolean;
   /** Current value for a text-like field; the selected option's value for a select; "true"/"false" for a checkbox. */
   currentValue: string;
+  /** True when `currentValue` only mirrors this field's own label/placeholder text -- see fillForm.ts's tagAndReadFields. Never treated as real prefilled data. */
+  isPlaceholderMimicry?: boolean;
   /** True for a select/radio-group already resting on a non-default, meaningfully-chosen option. */
   isPreselected?: boolean;
   options?: SelectOptionDescriptor[];
@@ -83,7 +87,7 @@ export function planField(descriptor: FormFieldDescriptor, context: FillPlanCont
   const isCheckbox = descriptor.type === "checkbox";
   const isPrefilled = isCheckbox
     ? descriptor.currentValue === "true" || Boolean(descriptor.isPreselected)
-    : descriptor.currentValue.trim().length > 0 || Boolean(descriptor.isPreselected);
+    : (descriptor.currentValue.trim().length > 0 && !descriptor.isPlaceholderMimicry) || Boolean(descriptor.isPreselected);
   if (isPrefilled) {
     return { descriptor, matchedField, decision: { kind: "skip", reason: "prefilled" } };
   }

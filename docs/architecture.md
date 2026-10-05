@@ -3846,3 +3846,58 @@ candidate's own evidence -- never trusted blindly.
 picked the highest-field-count form now reports `form_discovery_failed` when no candidate
 clears the confidence threshold or the top two are too close to call deterministically. No
 existing field removed, renamed, or had its meaning changed.
+
+### Lead-form filling: required-field detection and submit-guard fix (schemaVersion 1.35.0 -> 1.36.0)
+
+Production incident (2026-10-05, same Peugeot FR thread as the two fixes above): the correct
+form was now selected (`journeyRelevanceScore 0.6`, `visibilityProminenceScore 0.8`), but every
+visible, empty, asterisk-marked required field (civility, first name, surname, email) was
+reported `fieldActionabilityScore: 0`, `requiredFieldsDetected: 0`, `formFieldsFilled: []` --
+then the engine still clicked Submit, which the site's own validation cancelled
+(`gtm.formCanceled: true`).
+
+**Root cause (field discovery)**: `tagAndReadFields` only ever decided `required` from the
+HTML `required` attribute or `aria-required`. A site that marks a field required only
+visually -- a bare `"*"` appended to the label text, or as a separate sibling element next to
+the label or the field, with neither attribute set -- was invisible to the engine: the field
+was classified `"optional"` and skipped before the fill plan ever looked at whether it was
+mapped to a known purpose.
+
+**Root cause (safety guard)**: the existing submit guard (added in the 1.34.0 fix above) only
+fired when `requiredFields.length > 0 && requiredFieldsFilled === 0`. With the detection gap
+above, `requiredFields.length` was itself `0`, so the guard never tripped and Submit was
+clicked having filled nothing.
+
+**Fixes, both generic (no brand-specific selectors)**:
+
+- `tagAndReadFields` now also treats a bare `"*"` near a field's own label (in the label's own
+  text, as the label's next sibling, or as the field's own next sibling) as a required marker,
+  independent of the `required`/`aria-required` attributes; `requiredEvidence`
+  (`"attribute" | "marker" | "none"`) records which. When a control's `id` resolves to no
+  label's `for` and it isn't wrapped in a `<label>` either (a custom-widget-generated id, or a
+  label still pointing at a hidden backing duplicate), a bounded sibling/ancestor walk -- the
+  same shape `forms/formRelevance.ts`'s `gatherFormSignals` already uses for
+  `nearestHeadingText` -- finds the nearest short preceding text as a fallback label; it never
+  runs for a hidden field (which is always skipped regardless of its label) and never climbs
+  past the form's own boundary.
+- A field whose current value only echoes its own label or `placeholder` text (a site
+  rendering its placeholder into the live value) is no longer treated as `"prefilled"` --
+  `isPlaceholderMimicry` on the descriptor, surfaced as `valueState: "placeholder_mimicry"`.
+- The submit guard now also stops (`form_discovery_failed`) whenever the selected form's
+  `fieldActionabilityScore` is `0` or nothing was actually filled (`initialFilledIds.size ===
+  0`), independent of whether any field was detected as required -- closing the exact gap that
+  let the Peugeot FR run submit anyway. The original `requiredFields.length > 0 &&
+  requiredFieldsFilled === 0` condition is kept alongside it.
+- `findInvalidFieldIds` (the post-submit validation-retry check) now reuses the same
+  requiredness `tagAndReadFields` already computed (via a `data-nav-engine-field-index-required`
+  attribute written at tagging time) instead of recomputing `hasAttribute("required")` alone.
+
+`ActionResult.formDiscoveryDiagnostics` gains `fieldDiagnostics` (now required within
+`formDiscoveryDiagnostics`, itself still optional): one entry per discovered field with its
+label, control type, visibility, `requiredEvidence`, `valueState`
+(`"empty" | "has_value" | "placeholder_mimicry"`), matched purpose (if any), fill-plan decision,
+and whether it was actually filled -- so a discovery/mapping failure is diagnosable field-by-
+field from the response alone. `schemaVersion`/`outputSchemaVersion` moved `1.35.0` ->
+`1.36.0`. All changes are additive except the stricter required-detection/prefilled logic and
+the broadened submit guard themselves. No existing field removed, renamed, or had its meaning
+changed.
