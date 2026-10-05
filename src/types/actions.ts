@@ -5,6 +5,7 @@ export const ACTION_TYPES = [
   "go_back",
   "navigate",
   "capture",
+  "fill_form",
   "stop_success",
   "stop_blocked",
   "stop_failure",

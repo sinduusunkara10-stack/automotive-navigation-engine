@@ -48,6 +48,16 @@ export function validateDecision(params: {
     flags.push("action_not_allowed");
   }
 
+  // Lead-form filling (Phase 1): fill_form is the only action in the vocabulary capable of
+  // writing a value into a form field, so it is gated by both flags together -- never by
+  // allowedActions alone -- so a task can never fill personal data merely by listing the
+  // action without also explicitly opting in to both allowFormSubmission and
+  // allowPersonalDataEntry. Every other action/journey is unaffected (CLAUDE.md's
+  // non-negotiable no-personal-data-entry guarantee stays the default for everything else).
+  if (action.type === "fill_form" && !(safety.allowFormSubmission && safety.allowPersonalDataEntry)) {
+    flags.push("lead_form_entry_not_allowed");
+  }
+
   if (action.type === "navigate" && action.target && !checkNavigationAllowed(action.target, allowedDomains)) {
     flags.push("domain_blocked");
   }

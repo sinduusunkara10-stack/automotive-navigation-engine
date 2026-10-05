@@ -26,7 +26,7 @@ async function startHangingServer(): Promise<{ baseUrl: string; close: () => Pro
 
 function buildTask(startUrl: string) {
   return {
-    schemaVersion: "1.30.0",
+    schemaVersion: "1.31.0",
     taskId: "concurrency-limit-task",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl,
@@ -47,7 +47,7 @@ function buildTask(startUrl: string) {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.32.0",
+    outputSchemaVersion: "1.33.0",
   };
 }
 

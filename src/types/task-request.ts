@@ -80,7 +80,16 @@ export interface Safety {
   allowedActions: ActionType[];
   allowFormSubmission?: boolean;
   allowPaymentOrPurchase?: false;
-  allowPersonalDataEntry?: false;
+  /**
+   * Lead-form filling (Phase 1, see docs/architecture.md "Lead-form filling"): relaxed from
+   * the previous hard `false`-only lock to an explicit, per-task opt-in -- matching the
+   * existing allowFormSubmission pattern -- so the one action capable of entering data into a
+   * form field (`fill_form`) can be used at all. Omitted or false means the lock is
+   * unchanged: no action anywhere in the engine can write a value into a form field. Payment/
+   * purchase flows remain always disallowed (allowPaymentOrPurchase keeps its hard `false`
+   * lock); this relaxation never extends to it.
+   */
+  allowPersonalDataEntry?: boolean;
   requireDomainConfirmationOnRedirect?: boolean;
   /** See ConsentInteractionPolicy above. Omitted means "reject_optional". */
   consentInteractionPolicy?: ConsentInteractionPolicy;
@@ -130,7 +139,7 @@ export interface Settling {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.30.0";
+  schemaVersion: "1.31.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -154,7 +163,7 @@ export interface TaskRequest {
   safety: Safety;
   /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
   settling?: Settling;
-  outputSchemaVersion: "1.32.0";
+  outputSchemaVersion: "1.33.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

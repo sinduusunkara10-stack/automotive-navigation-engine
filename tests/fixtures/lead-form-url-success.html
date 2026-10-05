@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Book a Test Drive</title>
+  </head>
+  <body>
+    <h1>Book a Test Drive</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="mobile">Mobile</label>
+      <input type="tel" id="mobile" name="mobile" required />
+      <label for="postcode">Postcode</label>
+      <input type="text" id="postcode" name="postcode" required />
+      <label for="comments">Comments</label>
+      <textarea id="comments" name="comments"></textarea>
+      <input type="hidden" id="honeypot" name="website" />
+      <label><input type="checkbox" id="stay-in-touch" name="stayInTouch" /> Stay in touch</label>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>
