@@ -446,6 +446,18 @@ export interface ActionResult {
     requiredFieldsFilled: number;
     unmappedRequiredFieldIds: string[];
     skippedFieldReasons: { id: string; reason: string }[];
+    /** How well the selected form's own text matches the objective/active-milestone/previous-CTA anchors and generic request-a-quote/offer/test-drive/contact vocabulary -- see forms/formRelevance.ts. */
+    journeyRelevanceScore: number;
+    /** Visible, main-content-area, reasonably large, near a heading, with a visible submit control -- see forms/formRelevance.ts. */
+    visibilityProminenceScore: number;
+    /** Supporting evidence only -- the fraction of the selected form's fields the deterministic plan could actually act on. */
+    fieldActionabilityScore: number;
+    /** Weighted combination of the three scores above; selection and the submit guard are both decided from this. */
+    totalFormScore: number;
+    /** Human-readable explanation of why this form was selected (or why none reached the confidence threshold). */
+    selectedFormReason: string;
+    /** Every other candidate form considered, with its own score and why it was not selected. */
+    rejectedFormsAndReasons: { index: number; totalFormScore: number; reason: string }[];
   };
 }
 
@@ -1427,7 +1439,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.34.0";
+  schemaVersion: "1.35.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

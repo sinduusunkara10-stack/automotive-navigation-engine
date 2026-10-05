@@ -1961,6 +1961,22 @@ export async function runStep(params: {
               : undefined,
           surfaceAdoption: surfaceAdoptionRequest,
           timingOut: isClick ? clickTimingOut : undefined,
+          // Multi-form journey-relevance selection (see forms/formRelevance.ts): built only for
+          // fill_form, from evidence the engine already has -- the objective, the currently-
+          // unsatisfied required milestones' own descriptions, and the previous step's clicked
+          // CTA label (RunState.lastClickLabel, set generically for every click, not just one
+          // leading to a form). Per-anchor, never blended into one string, for the same reason
+          // core/surfaceRelevance.ts's own objectiveTexts never are.
+          formJourneyContext:
+            effectiveAction.type === "fill_form"
+              ? {
+                  objective: task.objective,
+                  activeMilestoneTexts: task.successCriteria
+                    .filter((criterion) => getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).includes(criterion.id))
+                    .map((criterion) => criterion.description),
+                  previousActionLabel: state.lastClickLabel,
+                }
+              : undefined,
         });
 
   // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured
@@ -2241,6 +2257,9 @@ export async function runStep(params: {
   }
 
   state.recordAction(effectiveAction, { url: observation.url, title: observation.title }, actionResult.surfaceChangeType);
+  if (isClick && clickedCtaAccessibleName) {
+    state.lastClickLabel = clickedCtaAccessibleName;
+  }
 
   // Goal-Directed Bounded Branch Exploration: this step's own dispatched action counts as
   // one downstream action against the active branch's depth budget, but only while a

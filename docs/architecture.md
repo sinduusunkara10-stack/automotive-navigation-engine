@@ -3797,3 +3797,52 @@ moved `1.33.0` -> `1.34.0`. All changes are additive except the new submit guard
 that would previously have clicked submit having filled zero required fields now reports
 `form_discovery_failed` instead of attempting submission. No existing field removed, renamed,
 or had its meaning changed.
+
+### Lead-form filling: journey-relevance/visibility-prominence form selection (schemaVersion 1.34.0 -> 1.35.0)
+
+Field-actionability-only selection (above) was still wrong whenever a form with *more*
+fillable fields wasn't the journey's actual lead-capture form (e.g. a 5-field newsletter signup
+next to the real 2-field "Request a quote" form, or an off-screen form with more fields than
+the visible one). `executeFillForm` now scores every candidate `<form>` on three generic,
+brand-agnostic dimensions (`src/forms/formRelevance.ts`), weighted so field actionability is
+supporting evidence only:
+
+- **Journey relevance** (weight 0.5): per-anchor-max token-overlap (the same dilution-avoiding
+  pattern as `surfaceRelevance.ts`/`successEvaluator.ts`) between the form's own local text
+  (nearest heading, submit-button text, form attributes) plus the page title, and the
+  objective/active-milestone descriptions/previous clicked CTA's accessible name. A generic,
+  multi-language (en/fr/de/nl/it/es/pl/pt) keyword vocabulary zeroes the score for newsletter/
+  search/login-purpose forms and gives a bonus for request-a-quote/offer/test-drive/contact/
+  dealer-enquiry-purpose forms. Deliberately excludes every heading anywhere on the page (only
+  the form's own nearest heading) so one form's heading can never inflate or veto a different
+  form's score when several forms share a page.
+- **Visibility/prominence** (weight 0.35): 0 for any form not actually on-screen (a form can
+  have a positive bounding-rect size while still being positioned off-screen, e.g.
+  `left: -9999px` -- `visible` now requires the rect to intersect the viewport, not just have
+  nonzero area); otherwise a bounded sum of in-main-content-area (vs. header/footer/nav
+  chrome), visible area ratio, a nearby heading, and a visible submit control.
+- **Field actionability** (weight 0.15, unchanged computation): fraction of discovered fields
+  the deterministic fill plan can act on.
+
+`RunState` gains `lastClickLabel` (the most recently clicked control's own accessible name,
+never cleared), threaded through `core/loop.ts`'s existing per-dispatch evidence construction
+into a new `formJourneyContext` passed only to `fill_form` dispatches -- no new Playwright
+evidence-gathering, reusing the click-accessible-name computation every click already performs.
+
+Selection is three-tier, mirroring `surfaceRelevance.ts`: a total score below
+`FORM_SELECTION_ADOPT_THRESHOLD` (0.4), or an ambiguous near-tie between the top two candidates
+(within 0.1 of each other, both above `FORM_SELECTION_REJECT_THRESHOLD` 0.15), never fills or
+submits -- reported as `form_discovery_failed`, never guessed. An optional, bounded
+`FormSelectionAmbiguityResolver` may resolve the ambiguous band only (no caller configures one
+yet, same as the existing `unmappedFieldResolver` precedent); its resolution is trusted only at
+confidence >= 0.7 and only when its rationale cites a token actually present in the chosen
+candidate's own evidence -- never trusted blindly.
+
+`ActionResult.formDiscoveryDiagnostics` gains `journeyRelevanceScore`,
+`visibilityProminenceScore`, `fieldActionabilityScore`, `totalFormScore`, `selectedFormReason`,
+`rejectedFormsAndReasons` (each rejected candidate's own score and why). `schemaVersion`/
+`outputSchemaVersion` moved `1.34.0` -> `1.35.0`. All changes are additive except the stricter
+`visible` computation and the new confidence gate itself: a run that would previously have
+picked the highest-field-count form now reports `form_discovery_failed` when no candidate
+clears the confidence threshold or the top two are too close to call deterministically. No
+existing field removed, renamed, or had its meaning changed.

@@ -524,6 +524,15 @@ export class RunState {
   private lastActionObservationBefore: { url: string; title: string } | undefined;
 
   /**
+   * The most recently clicked control's own accessible name/CTA text (see core/loop.ts's
+   * clickedCtaAccessibleName, computed generically for every click dispatch) -- never
+   * cleared, so a later `fill_form` step on the page that click navigated to can use it as
+   * one more generic journey-relevance anchor (see forms/formRelevance.ts) without any new
+   * Playwright evidence-gathering of its own. Undefined until the run's first click.
+   */
+  lastClickLabel: string | undefined;
+
+  /**
    * Route Memory (see core/routeMemory.ts): remembers, per decision-point fingerprint,
    * which candidate route choices (click/navigate) have already been tried and what
    * happened, so a repeated dead end is visible to the reasoning layer even across

@@ -121,9 +121,113 @@ test("fill_form: picks the form with actionable fields over the first <form> on 
     assert.equal(result.formDiscoveryDiagnostics?.selectedFormIndex, 1);
     assert.equal(result.formDiscoveryDiagnostics?.formsOnPage, 2);
     assert.ok(result.resultingUrl?.includes("lead-form-thank-you.html"));
+    assert.ok((result.formDiscoveryDiagnostics?.totalFormScore ?? 0) > 0);
+    assert.equal(result.formDiscoveryDiagnostics?.rejectedFormsAndReasons?.length, 1);
+    assert.equal(result.formDiscoveryDiagnostics?.rejectedFormsAndReasons?.[0]?.index, 0);
 
     const url = new URL(result.resultingUrl!);
     assert.equal(url.searchParams.has("q"), false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: prefers a visible, prominent request-a-quote form over an off-screen form with more fields", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-offscreen-vs-prominent.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formDiscoveryDiagnostics?.selectedFormIndex, 1);
+    assert.ok((result.formDiscoveryDiagnostics?.visibilityProminenceScore ?? 0) > 0);
+    assert.ok(result.resultingUrl?.includes("quote-thank-you.html"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: prefers a request-a-quote form over a newsletter form with more fields", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-newsletter-vs-quote.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formDiscoveryDiagnostics?.selectedFormIndex, 1);
+    assert.ok(result.resultingUrl?.includes("quote-thank-you.html"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: uses the previous CTA/objective to pick between two equally visible forms", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-cta-relevance.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+      journeyContext: { previousActionLabel: "Take advantage of our electricity offers" },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formDiscoveryDiagnostics?.selectedFormIndex, 1);
+    assert.ok(result.resultingUrl?.includes("electricity-thank-you.html"));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a single low-relevance, low-visibility, low-actionability form stops safely without submitting", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-low-confidence-single.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_discovery_failed");
+    assert.ok((result.formDiscoveryDiagnostics?.totalFormScore ?? 1) < 0.4);
+
+    const submitted = await page.evaluate(() => window.location.href);
+    assert.ok(!submitted.includes("utility-thank-you.html"));
   } finally {
     await page.close();
     await browser.close();

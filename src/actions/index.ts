@@ -15,6 +15,7 @@ import { executeStopBlocked } from "./stopBlocked.js";
 import { executeStopFailure } from "./stopFailure.js";
 import { executeFillForm } from "./fillForm.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
+import type { FormJourneyContext, FormSelectionAmbiguityResolver } from "../forms/formRelevance.js";
 
 export interface DispatchParams {
   page: Page;
@@ -35,6 +36,10 @@ export interface DispatchParams {
   timingOut?: ActionTimingOut;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
   unmappedFieldResolver?: UnmappedFieldResolver;
+  /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
+  formJourneyContext?: FormJourneyContext;
+  /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
+  formSelectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
 }
 
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
@@ -52,6 +57,8 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     surfaceAdoption,
     timingOut,
     unmappedFieldResolver,
+    formJourneyContext,
+    formSelectionAmbiguityResolver,
   } = params;
   switch (action.type) {
     case "click":
@@ -89,7 +96,16 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     case "capture":
       return executeCapture(page, captures, stepIndex, captureModules);
     case "fill_form":
-      return executeFillForm({ page, action, captures, stepIndex, captureModules, unmappedFieldResolver });
+      return executeFillForm({
+        page,
+        action,
+        captures,
+        stepIndex,
+        captureModules,
+        unmappedFieldResolver,
+        journeyContext: formJourneyContext,
+        selectionAmbiguityResolver: formSelectionAmbiguityResolver,
+      });
     case "stop_success":
       return executeStopSuccess();
     case "stop_blocked":

@@ -37,7 +37,7 @@ test("the generated deployable node produces output identical to the TypeScript 
     {
       runId: "run-1",
       taskId: "task-1",
-      schemaVersion: "1.34.0",
+      schemaVersion: "1.35.0",
       journeySequence: 1,
       recordType: "START_PAGE",
       stepIndex: 0,
@@ -50,7 +50,7 @@ test("the generated deployable node produces output identical to the TypeScript 
     {
       runId: "run-1",
       taskId: "task-1",
-      schemaVersion: "1.34.0",
+      schemaVersion: "1.35.0",
       journeySequence: 2,
       recordType: "ANALYTICS_EVENT",
       stepIndex: 1,
@@ -81,7 +81,7 @@ test("the generated deployable node produces output identical to the TypeScript 
       taskId: "task-1",
       status: "completed",
       result: {
-        schemaVersion: "1.34.0",
+        schemaVersion: "1.35.0",
         status: "success",
         analyticsReportingRows,
         diagnostics: { surfaceAdoption: { attempts: [{ stepIndex: 1, surfaceId: "s1", event: "adopted" }] } },
