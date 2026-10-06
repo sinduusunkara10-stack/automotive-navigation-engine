@@ -483,20 +483,52 @@ export interface ActionResult {
    * field that confirms the widget's own JS committed the selection.
    */
   formDealerSearchDiagnostics?: {
-    postcodeSearchTriggered: boolean;
+    /** A plain (non-dealer) postcode-purpose field was also present on the chosen form -- e.g. a customer-address postcode, distinct from the dealer-lookup postcode/city field. */
+    customerPostcodeFieldDetected: boolean;
+    /** A field was identified as serving the dealer-lookup purpose (by keyword match or by structural adjacency to a lookup control). */
+    dealerLookupFieldDetected: boolean;
+    dealerLookupFieldEvidence: string;
+    /** The dealer-lookup field had its own structurally-adjacent lookup control -- not just a keyword match with no control found (which falls back to pressing Enter). */
+    dealerLookupControlDetected: boolean;
+    dealerLookupControlEvidence: string;
+    dealerLookupTriggered: boolean;
+    dealerLookupOutcome: "auto_populated" | "suggestion_selected" | "dealer_selected" | "unresolved" | "not_applicable";
+    locationSuggestionsDetected: boolean;
+    locationSuggestionSelected: boolean;
     dealerResultsDetected: boolean;
+    dealerAutoPopulated: boolean;
     dealerSelected: boolean;
-    dealerSelectionVerified: boolean;
-    /** Diagnostic only, checked only when dealerResultsDetected is false -- distinguishes "no results anywhere" from "results exist but render outside the <form> boundary, where the search is scoped". Never used to select or click. */
-    dealerResultsDetectedOutsideForm: boolean;
+    dealerValueVerified: boolean;
+    dealerVerificationEvidence: string;
+    dealerLookupFailureReason?: string;
+  };
+  /**
+   * Generic radio-group consent discovery/resolution diagnostics (see forms/consentGroups.ts) --
+   * always present whenever a submit was attempted or the pre-submit readiness gate ran, even
+   * when zero consent groups exist on the form.
+   */
+  formConsentDiagnostics?: {
+    consentGroupsDetected: number;
+    consentGroupsInitiallyVisible: number;
+    consentGroupDiagnostics: {
+      groupId: string;
+      questionText: string;
+      requiredEvidence: "attribute" | "marker" | "none";
+      resolved: boolean;
+      selectedMemberFieldId: string | null;
+    }[];
+    consentGroupsCompleted: number;
+    conditionalConsentGroupsRevealed: number;
+    consentRescanCount: number;
+    unresolvedRequiredConsentGroups: string[];
   };
   /**
    * Live validation evidence read immediately after each submit attempt (re-tagged first, so a
    * field a dynamic widget only reveals after the submit attempt is never invisible to it).
-   * Present whenever a submit control was found and clicked.
+   * Present whenever a submit control was found and clicked, or the pre-submit readiness gate ran.
    */
   formPostSubmitDiagnostics?: {
-    /** True whenever the submit did not result in a URL change or an on-screen confirmation, after any retries. */
+    /** True whenever the submit did not result in a URL change or an on-screen confirmation, after any retries -- or whenever submit was never attempted at all because the readiness gate failed. */
     submitCanceled: boolean;
     /** Field ids still failing native constraint validation or carrying aria-invalid="true" after the last submit attempt. */
     invalidFieldIds: string[];
@@ -506,6 +538,12 @@ export interface ActionResult {
     postSubmitValidationMessages: string[];
     /** Human-readable explanation of whether a retry was attempted and why (or why not). */
     retryDecision: string;
+    /** False only when the generic pre-submit readiness gate (required fields, dealer dependency, required consent groups) failed and Submit was never clicked at all. */
+    preSubmitReadinessPassed: boolean;
+    /** Each failed readiness condition, e.g. "unresolved_required_fields:3,7", "dealer_dependency_unresolved", "unresolved_required_consent_groups:marketingConsent". Empty when the gate passed. */
+    preSubmitReadinessFailures: string[];
+    /** False only when the pre-submit readiness gate failed and Submit was never clicked. */
+    submitAttempted: boolean;
   };
 }
 
@@ -1487,7 +1525,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.38.0";
+  schemaVersion: "1.39.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

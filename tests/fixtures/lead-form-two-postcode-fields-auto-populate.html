@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="address-postcode">Postcode</label>
+      <input type="text" id="address-postcode" name="addressPostcode" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">CP or city</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <button type="button" id="dealer-ok-btn">OK</button>
+        <div id="dealer-result-placeholder">Select a dealer</div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Path A (auto-populate): clicking OK never reveals a selectable list -- the placeholder
+      // text itself is replaced by a real dealer card. This fixture exists to prove the two
+      // postcode fields are judged independently (only dealer-postcode gets a trigger) and that
+      // the auto-populate outcome is recognized from scoped text change alone, with no
+      // role="radio"/role="option" element ever appearing.
+      document.getElementById("dealer-ok-btn").addEventListener("click", () => {
+        document.getElementById("dealer-result-placeholder").textContent = "Garage Laurence · 2.9km · 40 Rue Jouffroy d'Abbans";
+        document.getElementById("dealer-committed").value = "dealer-1";
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

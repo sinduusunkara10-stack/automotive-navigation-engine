@@ -24,6 +24,15 @@ export interface FormFieldDescriptor extends FormFieldTextHints {
   /** True for a select/radio-group already resting on a non-default, meaningfully-chosen option. */
   isPreselected?: boolean;
   options?: SelectOptionDescriptor[];
+  /**
+   * Set (to the id fillForm.ts's tagAndFindLookupTriggers tagged on the candidate control) when
+   * THIS specific field has its own structurally-adjacent lookup control (same wrapper/fieldset/
+   * nearest-preceding-sibling relationship, generic multilingual "search/find/go/ok/select/choose"
+   * vocabulary) -- never a form-wide flag. A form can have two postcode-purpose fields (a plain
+   * customer-address postcode and a dealer-locator postcode/city) that share identical label
+   * vocabulary; only the one actually paired with a lookup control is upgraded to dealer_search.
+   */
+  dealerLookupTriggerIndex?: string;
 }
 
 export type FillDecision =
@@ -33,7 +42,7 @@ export type FillDecision =
   | { kind: "choose_first_valid_option" }
   | { kind: "select_negative_option" }
   | { kind: "tick_checkbox" }
-  | { kind: "dealer_search"; postcode: string }
+  | { kind: "dealer_search"; postcode: string; triggerIndex?: string }
   | { kind: "needs_claude" };
 
 export interface PlannedField {
@@ -46,20 +55,9 @@ export interface FillPlanContext {
   language: SupportedLanguage;
   market: SupportedMarket;
   hasCountryCodeSelector: boolean;
-  /**
-   * True when the form structurally contains a dealer-search widget (a search-trigger
-   * control plus an accessible selectable-result container -- see fillForm.ts's
-   * findSearchTrigger/DEALER_RESULT_SELECTOR), independent of what the postcode field's own
-   * label says. A dealer-locator's postcode input is very often labelled exactly like a plain
-   * postcode field ("Postcode"/"Code postal") with no dealer-specific wording of its own --
-   * the dealerSearch keyword list can only ever match label text, so without this the field
-   * keyword-matches the generic "postcode" purpose and the whole search/select/verify flow
-   * never runs. See docs/architecture.md.
-   */
-  hasDealerSearchWidget: boolean;
 }
 
-const NEGATIVE_OPTION_KEYWORDS: Record<SupportedLanguage, string[]> = {
+export const NEGATIVE_OPTION_KEYWORDS: Record<SupportedLanguage, string[]> = {
   en: ["no", "i do not agree", "do not agree"],
   fr: ["non", "je ne souhaite pas", "je n'accepte pas"],
   de: ["nein", "ich stimme nicht zu"],
@@ -70,7 +68,7 @@ const NEGATIVE_OPTION_KEYWORDS: Record<SupportedLanguage, string[]> = {
   pt: ["nao", "não", "nao aceito", "não aceito"],
 };
 
-function normalize(value: string): string {
+export function normalize(value: string): string {
   return value
     .toLowerCase()
     .normalize("NFD")
@@ -80,6 +78,12 @@ function normalize(value: string): string {
 function findNegativeOption(options: SelectOptionDescriptor[], language: SupportedLanguage): SelectOptionDescriptor | undefined {
   const keywords = NEGATIVE_OPTION_KEYWORDS[language] ?? NEGATIVE_OPTION_KEYWORDS.en;
   return options.find((option) => keywords.some((keyword) => normalize(option.label).includes(normalize(keyword))));
+}
+
+/** Same negative-option vocabulary as a select/dropdown -- reused generically by consentGroups.ts to pick the opt-out radio in a discovered Oui/Non-shaped consent group, across every supported language, never hard-coded to one brand's wording. */
+export function findNegativeOptionLabel(labels: string[], language: SupportedLanguage): string | undefined {
+  const keywords = NEGATIVE_OPTION_KEYWORDS[language] ?? NEGATIVE_OPTION_KEYWORDS.en;
+  return labels.find((label) => keywords.some((keyword) => normalize(label).includes(normalize(keyword))));
 }
 
 function firstValidOption(options: SelectOptionDescriptor[]): SelectOptionDescriptor | undefined {
@@ -101,6 +105,24 @@ export function planField(descriptor: FormFieldDescriptor, context: FillPlanCont
     : (descriptor.currentValue.trim().length > 0 && !descriptor.isPlaceholderMimicry) || Boolean(descriptor.isPreselected);
   if (isPrefilled) {
     return { descriptor, matchedField, decision: { kind: "skip", reason: "prefilled" } };
+  }
+
+  // A field with its own structurally-adjacent lookup control (dealerLookupTriggerIndex, set by
+  // fillForm.ts's tagAndFindLookupTriggers -- see FormFieldDescriptor) is routed through
+  // dealer_search unconditionally, independent of matchLeadFormField's keyword result. A real
+  // dealer-locator's postcode/city field is very often labelled with no postcode vocabulary at
+  // all (e.g. "CP ou ville"), so gating this on a keyword match (the old `case "postcode":`-only
+  // behaviour) misses it entirely; the structural signal is authoritative on its own.
+  if (descriptor.dealerLookupTriggerIndex && (descriptor.tagName === "input" || descriptor.tagName === "textarea")) {
+    return {
+      descriptor,
+      matchedField: "dealerSearch",
+      decision: {
+        kind: "dealer_search",
+        postcode: marketDataFor(context.market).postcode,
+        triggerIndex: descriptor.dealerLookupTriggerIndex,
+      },
+    };
   }
 
   if (matchedField && CONSENT_FIELDS.includes(matchedField)) {
@@ -143,20 +165,21 @@ export function planField(descriptor: FormFieldDescriptor, context: FillPlanCont
     case "email":
       return { descriptor, matchedField, decision: { kind: "fill_text", field: "email", value: FIXED_FIELDS.email } };
     case "postcode":
-      if (context.hasDealerSearchWidget) {
-        return {
-          descriptor,
-          matchedField: "dealerSearch",
-          decision: { kind: "dealer_search", postcode: marketDataFor(context.market).postcode },
-        };
-      }
+      // descriptor.dealerLookupTriggerIndex was already handled unconditionally above -- this
+      // case is only reached for a plain postcode-purpose field with no adjacent lookup control.
       return {
         descriptor,
         matchedField,
         decision: { kind: "fill_text", field: "postcode", value: marketDataFor(context.market).postcode },
       };
     case "dealerSearch":
-      return { descriptor, matchedField, decision: { kind: "dealer_search", postcode: marketDataFor(context.market).postcode } };
+      // Keyword-matched dealer-lookup vocabulary (e.g. "find a dealer") with no structurally-
+      // adjacent control found -- falls back to Enter (see applyDecision/resolveDealerLookup).
+      return {
+        descriptor,
+        matchedField,
+        decision: { kind: "dealer_search", postcode: marketDataFor(context.market).postcode },
+      };
     case "landlinePhone":
       return {
         descriptor,
