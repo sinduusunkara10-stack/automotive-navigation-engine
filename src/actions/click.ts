@@ -101,10 +101,25 @@ export interface ExecuteClickParams {
    * resolves; every other action type leaves it untouched.
    */
   timingOut?: ActionTimingOut;
+  /**
+   * CTA-reveal dead-end fix: a mutable out-param (same convention as `timingOut` above)
+   * this executor writes `newInteractiveElementCount` into when a successful, non-
+   * navigating click's own before/after snapshot diff found new on-screen interactive
+   * elements (e.g. a "Continue" that expands its own panel to reveal "Add to cart", with no
+   * URL/title change) -- never part of the JSON-serializable ActionResult/wire contract, to
+   * avoid a schema/outputSchemaVersion bump for what is purely internal progress bookkeeping
+   * (see core/state.ts's RunState.resolveLastActionProgress, the only consumer). core/loop.ts
+   * reads it back once dispatchAction resolves and threads it into state.recordAction.
+   */
+  progressSignal?: ClickProgressSignal;
 }
 
 export interface ActionTimingOut {
   physicalClickDispatchedAt?: string;
+}
+
+export interface ClickProgressSignal {
+  newInteractiveElementCount?: number;
 }
 
 type ClickErrorCategory =
@@ -513,6 +528,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     settleCeilingMs,
     surfaceAdoption,
     timingOut,
+    progressSignal,
   } = params;
 
   if (!action.target) {
@@ -755,6 +771,9 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
               recoverable: true,
               stoppedRun: false,
             });
+          }
+          if (progressSignal && observedSurfaceChange.newElementCount > 0) {
+            progressSignal.newInteractiveElementCount = observedSurfaceChange.newElementCount;
           }
           return {
             success: true,
@@ -1010,6 +1029,9 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         : reportableSurfaceChangeType === "layer_panel_appeared"
           ? "settled_panel"
           : undefined;
+    if (progressSignal && observedSurfaceChange.newElementCount > 0) {
+      progressSignal.newInteractiveElementCount = observedSurfaceChange.newElementCount;
+    }
     return {
       success: true,
       resultingUrl: safePageUrl(page) ?? urlBeforeClick,

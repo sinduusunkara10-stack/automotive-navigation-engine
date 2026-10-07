@@ -3,7 +3,7 @@ import type { SelectedAction } from "../types/actions.js";
 import type { ActionResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
-import type { ActionTimingOut } from "./click.js";
+import type { ActionTimingOut, ClickProgressSignal } from "./click.js";
 import { executeClick } from "./click.js";
 import { executeScroll } from "./scroll.js";
 import { executeWait } from "./wait.js";
@@ -34,6 +34,8 @@ export interface DispatchParams {
   surfaceAdoption?: SurfaceAdoptionRequest;
   /** Only meaningful for a `click` action -- see ExecuteClickParams.timingOut in actions/click.ts. */
   timingOut?: ActionTimingOut;
+  /** Only meaningful for a `click` action -- see ExecuteClickParams.progressSignal in actions/click.ts. */
+  progressSignal?: ClickProgressSignal;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
   unmappedFieldResolver?: UnmappedFieldResolver;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
@@ -56,6 +58,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     settleCeilingMs,
     surfaceAdoption,
     timingOut,
+    progressSignal,
     unmappedFieldResolver,
     formJourneyContext,
     formSelectionAmbiguityResolver,
@@ -73,6 +76,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         reObservationAttempted,
         knownDestinationUrl,
         timingOut,
+        progressSignal,
         settleCeilingMs,
         surfaceAdoption,
       });

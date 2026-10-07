@@ -40,4 +40,12 @@ export interface RecordedAction extends SelectedAction {
    * that a newly-opened, non-ARIA surface was the reason its own confidence was low.
    */
   surfaceChangeType?: string;
+  /**
+   * CTA-reveal dead-end fix: set only when this action's own ActionResult carried
+   * newInteractiveElementCount > 0 -- see types/task-response.ts's ActionResult.
+   * newInteractiveElementCount. Carried forward so RunState.resolveLastActionProgress can
+   * count a click that expanded the on-screen CTA inventory (without navigating or opening
+   * a dialog/panel) as observed progress, not just a url/title diff.
+   */
+  newInteractiveElementCount?: number;
 }

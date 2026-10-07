@@ -48,6 +48,19 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
     if (path === "/progress-mid.html") {
       return void page("Mid", '<a href="/done.html">Finish</a>');
     }
+    // CTA-reveal regression (dead-end false positive): clicking this expands the same
+    // panel in place -- no navigation, no title change -- revealing the control that
+    // actually reaches the target. Mirrors a configurator "Continue" that reveals "Add to
+    // cart" within its own summary panel rather than navigating anywhere.
+    if (path === "/reveal-start.html") {
+      return void page(
+        "Panel",
+        '<button type="button" id="reveal" onclick="' +
+          "var a=document.createElement('a');a.href='/done.html';a.textContent='Finish';document.body.appendChild(a);" +
+          "var b=document.createElement('button');b.type='button';b.textContent='Extra option';document.body.appendChild(b);" +
+          '">Reveal</button>',
+      );
+    }
 
     res.writeHead(404).end("Not found");
   });
@@ -187,6 +200,37 @@ test("existing successful multi-step navigation is unaffected: advancing clicks 
     assert.equal(afterFinish?.length, 2);
     assert.equal(afterFinish?.[0]?.observedProgress, true);
     assert.equal(afterFinish?.[1]?.observedProgress, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+/**
+ * CTA-reveal dead-end fix: a click that expands the current panel in place -- revealing new
+ * controls (new CTA inventory) with no URL or title change -- must still be tracked as
+ * observedProgress: true. Before this fix, resolveLastActionProgress only diffed url/title,
+ * so this exact shape (Continue expanding a summary panel to reveal Add to cart) was
+ * indistinguishable from a genuine no-op click and could accumulate toward a false dead_end.
+ */
+test("a click that reveals new interactive elements in place (no navigation, no title change) is tracked as observedProgress: true", async () => {
+  const { baseUrl, close } = await startFixtureServer();
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  try {
+    const task = buildTask({ startUrl: `${baseUrl}/reveal-start.html`, successUrlPattern: `${baseUrl}/done.html` });
+    const reasoning = new ScriptedRecordingProvider(["Reveal", "Finish"]);
+    const response = await runTask({ page, task, reasoning });
+
+    assert.equal(response.status, "success");
+    assert.equal(response.finalUrl, `${baseUrl}/done.html`);
+
+    const afterReveal = reasoning.recentActionsSeen[1];
+    assert.equal(afterReveal?.length, 1);
+    assert.equal(afterReveal?.[0]?.type, "click");
+    assert.equal(afterReveal?.[0]?.observedProgress, true);
   } finally {
     await page.close();
     await browser.close();
