@@ -718,6 +718,7 @@ test("fill_form: Oui/Non radio consent groups with no matchable label text are d
     assert.equal(result.formConsentDiagnostics?.consentGroupsCompleted, 3);
     assert.ok((result.formConsentDiagnostics?.conditionalConsentGroupsRevealed ?? 0) >= 1);
     assert.ok(result.formConsentDiagnostics?.consentGroupDiagnostics.every((g) => g.resolved));
+    assert.ok(result.formConsentDiagnostics?.consentGroupDiagnostics.every((g) => g.classification === "marketing_consent"));
 
     const checked = await page.evaluate(() => ({
       a: (document.querySelector('input[name="consentA"]:checked') as HTMLInputElement | null)?.value,
@@ -727,6 +728,179 @@ test("fill_form: Oui/Non radio consent groups with no matchable label text are d
     assert.equal(checked.a, "no");
     assert.equal(checked.b, "no");
     assert.equal(checked.c, "no");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a journey_intent radio group is resolved against the task's own workflow journey context, never defaulted", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-journey-intent.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+      journeyContext: { objective: "Get a price quote for the new model" },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const group = result.formConsentDiagnostics?.consentGroupDiagnostics.find((g) => g.groupId === "intent");
+    assert.equal(group?.classification, "journey_intent");
+    assert.equal(group?.resolved, true);
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("intent"), "quote");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a journey_intent radio group with no usable workflow journey context is left unresolved and blocks submit", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-journey-intent.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+    const group = result.formConsentDiagnostics?.consentGroupDiagnostics.find((g) => g.groupId === "intent");
+    assert.equal(group?.classification, "journey_intent");
+    assert.equal(group?.resolved, false);
+    assert.ok(group?.unresolvedReason);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a customer_qualification radio group always resolves to the private-customer option, independent of the field's own document order", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-customer-qualification.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const group = result.formConsentDiagnostics?.consentGroupDiagnostics.find((g) => g.groupId === "customerType");
+    assert.equal(group?.classification, "customer_qualification");
+    assert.equal(group?.resolved, true);
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("customerType"), "private");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a customer_qualification radio group with no option matching private-customer vocabulary is left unresolved and blocks submit", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-qualification-unresolved.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+    const group = result.formConsentDiagnostics?.consentGroupDiagnostics.find((g) => g.groupId === "customerType");
+    assert.equal(group?.classification, "customer_qualification");
+    assert.equal(group?.resolved, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a radio group with no classifiable vocabulary at all is ambiguous, left unresolved, and blocks submit rather than guessed", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-ambiguous.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+    const group = result.formConsentDiagnostics?.consentGroupDiagnostics.find((g) => g.groupId === "miscChoice");
+    assert.equal(group?.classification, "ambiguous");
+    assert.equal(group?.resolved, false);
+    assert.ok(group?.unresolvedReason);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: marketing_consent, journey_intent, and customer_qualification groups on the same form are each resolved by their own rule, independently", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-radio-mixed-groups.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+      journeyContext: { objective: "Book a test drive at a local dealer" },
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const byGroup = new Map(result.formConsentDiagnostics?.consentGroupDiagnostics.map((g) => [g.groupId, g]));
+    assert.equal(byGroup.get("intent")?.classification, "journey_intent");
+    assert.equal(byGroup.get("customerType")?.classification, "customer_qualification");
+    assert.equal(byGroup.get("marketingOptIn")?.classification, "marketing_consent");
+
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("intent"), "test_drive");
+    assert.equal(url.searchParams.get("customerType"), "private");
+    assert.equal(url.searchParams.get("marketingOptIn"), "no");
   } finally {
     await page.close();
     await browser.close();

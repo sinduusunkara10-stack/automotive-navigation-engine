@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Get in touch</title>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <p>What would you like to do? *</p>
+      <label><input type="radio" name="intent" value="quote" /> Request a quote</label>
+      <label><input type="radio" name="intent" value="test_drive" /> Book a test drive</label>
+
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>

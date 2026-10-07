@@ -516,6 +516,13 @@ export interface ActionResult {
       requiredEvidence: "attribute" | "marker" | "none";
       resolved: boolean;
       selectedMemberFieldId: string | null;
+      /** Three-way radio-group taxonomy result (see forms/radioGroupClassifier.ts). "ambiguous" is never resolved by this engine. */
+      classification: "marketing_consent" | "journey_intent" | "customer_qualification" | "ambiguous";
+      classificationEvidence: string;
+      /** Present only when resolved: why this option was selected. */
+      selectionReason?: string;
+      /** Present only when not resolved: why this group was left unresolved rather than guessed. */
+      unresolvedReason?: string;
     }[];
     consentGroupsCompleted: number;
     conditionalConsentGroupsRevealed: number;
@@ -1525,7 +1532,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.39.0";
+  schemaVersion: "1.40.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
