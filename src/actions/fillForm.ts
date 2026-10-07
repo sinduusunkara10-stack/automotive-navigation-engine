@@ -31,6 +31,7 @@ import {
   type FormVisibilityProminenceSignals,
 } from "../forms/formRelevance.js";
 import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
+import { firstSelectableOption } from "../forms/vehicleSelection.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 const MAX_RETRIES = 2;
@@ -142,7 +143,7 @@ interface RawFieldDescriptor {
   /** True when `currentValue` only mirrors this field's own label/placeholder text (a site rendering its placeholder into the live value instead of the `placeholder` attribute) -- never real prefilled data, so fillPlan.ts must not skip the field as "prefilled" because of it. */
   isPlaceholderMimicry: boolean;
   isPreselected?: boolean;
-  options?: { value: string; label: string }[];
+  options?: { value: string; label: string; disabled?: boolean }[];
   dealerLookupTriggerIndex?: string;
 }
 
@@ -164,7 +165,7 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
       let options: { value: string; label: string }[] | undefined;
       if (tagName === "select") {
         const select = el as HTMLSelectElement;
-        options = Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() ?? "" }));
+        options = Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() ?? "", disabled: o.disabled }));
         currentValue = select.value;
         isPreselected = select.selectedIndex > 0 && select.value.trim().length > 0;
       } else if (type === "checkbox" || type === "radio") {
@@ -406,6 +407,7 @@ async function applyDecision(
   form: Locator,
   plannedField: PlannedField,
   hasCountryCodeSelector: boolean,
+  language: SupportedLanguage,
 ): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome }> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
   switch (plannedField.decision.kind) {
@@ -417,10 +419,26 @@ async function applyDecision(
       return { key: plannedField.matchedField };
     }
     case "choose_first_valid_option": {
+      // Any valid option is acceptable to the automation (e.g. a model/engine-style select
+      // with no matched field) -- never disabled, never a generic placeholder option (see
+      // forms/vehicleSelection.ts). A select with no selectable option at all is left unfilled
+      // (never falsely reported as filled) so it still surfaces as a genuine gap.
       const options = plannedField.descriptor.options ?? [];
-      const first = options.find((o) => o.value.trim().length > 0);
-      if (first) await field.selectOption({ value: first.value });
-      return { key: plannedField.matchedField };
+      const first = firstSelectableOption(options, language);
+      if (!first) {
+        return {};
+      }
+      await field.selectOption({ value: first.value });
+      // Verify the final state actually committed the intended option rather than trusting the
+      // click alone -- some sites' own JS can reset or reject a programmatic selection.
+      const committedValue = await field.inputValue().catch(() => undefined);
+      if (committedValue !== first.value) {
+        await field.selectOption({ value: first.value }).catch(() => {});
+      }
+      // No matched field purpose exists for this select by definition (that's why it fell
+      // through to this generic fallback) -- fall back to the field's own id so a real,
+      // verified selection is never falsely left untracked as "unfilled".
+      return { key: plannedField.matchedField ?? plannedField.descriptor.id };
     }
     case "select_negative_option": {
       const options = plannedField.descriptor.options ?? [];
@@ -706,7 +724,16 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         }
         continue;
       }
-      const outcome = await applyDecision(page, form, plannedField, hasCountryCodeSelector);
+      // A field already carrying a genuine, non-placeholder value (e.g. a model/engine select
+      // the page itself preselected before this action ran) needs no action from this engine
+      // at all -- counting it as resolved here is what "preserve a valid preselection" actually
+      // means for the readiness gate below, which otherwise has no other way to know a required
+      // field it never touched is already satisfied.
+      if (plannedField.decision.kind === "skip" && plannedField.decision.reason === "prefilled") {
+        filledIds.add(plannedField.descriptor.id);
+        continue;
+      }
+      const outcome = await applyDecision(page, form, plannedField, hasCountryCodeSelector, language);
       if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
       if (outcome.key) {
         fieldsFilled.add(outcome.key);
@@ -716,7 +743,29 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     return { plan, filledIds };
   }
 
-  const { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
+  let { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
+
+  // Generic dependent-control catch-up: selecting one <select> can cause the page's own JS to
+  // populate or enable a DEPENDENT <select> (e.g. a narrower choice whose options only exist
+  // once a broader one is picked) that had no selectable options at the initial scan. Bounded
+  // polling re-checks every still-required, still-unfilled select a few times, stopping as
+  // soon as a poll resolves nothing new -- never brand/field-specific, just re-running the same
+  // generic fill plan against freshly-read options.
+  const MAX_DEPENDENT_SELECT_POLLS = 3;
+  for (let attempt = 0; attempt < MAX_DEPENDENT_SELECT_POLLS; attempt += 1) {
+    const pendingSelectIds = new Set(
+      initialPlan
+        .filter((p) => p.descriptor.tagName === "select" && p.descriptor.required && p.descriptor.visible && !initialFilledIds.has(p.descriptor.id))
+        .map((p) => p.descriptor.id),
+    );
+    if (pendingSelectIds.size === 0) break;
+    await page.waitForTimeout(150);
+    const { plan: pollPlan, filledIds: pollFilledIds } = await fillAllRequired(pendingSelectIds);
+    if (pollFilledIds.size === 0) break;
+    initialFilledIds = new Set([...initialFilledIds, ...pollFilledIds]);
+    const pollById = new Map(pollPlan.map((p) => [p.descriptor.id, p]));
+    initialPlan = initialPlan.map((p) => pollById.get(p.descriptor.id) ?? p);
+  }
 
   const dealerFieldPlanned = initialPlan.find((p) => p.matchedField === "dealerSearch");
   const customerPostcodeFieldPlanned = initialPlan.find((p) => p.matchedField === "postcode" && p.decision.kind === "fill_text");
@@ -895,7 +944,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
     const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
     if (!dealerField) return;
-    const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector);
+    const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector, language);
     if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
   }
 

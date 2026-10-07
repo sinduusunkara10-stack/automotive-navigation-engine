@@ -7,6 +7,7 @@ export type FormFieldTagName = "input" | "select" | "textarea";
 export interface SelectOptionDescriptor {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 export interface FormFieldDescriptor extends FormFieldTextHints {

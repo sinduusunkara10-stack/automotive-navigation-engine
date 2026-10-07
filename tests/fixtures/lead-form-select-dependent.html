@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a quote</title>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="category">Category</label>
+      <select id="category" name="category" required>
+        <option value="" disabled selected>Please select</option>
+        <option value="saloon">Saloon</option>
+        <option value="estate">Estate</option>
+      </select>
+
+      <!-- Starts with only a disabled placeholder -- real options are only added, asynchronously,
+           once a category is chosen, simulating a site's own JS-driven dependent dropdown. -->
+      <label for="engine">Engine</label>
+      <select id="engine" name="engine" required>
+        <option value="" disabled selected>Please select</option>
+      </select>
+
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      document.getElementById("category").addEventListener("change", () => {
+        setTimeout(() => {
+          const engine = document.getElementById("engine");
+          const petrol = document.createElement("option");
+          petrol.value = "petrol";
+          petrol.textContent = "Petrol";
+          const diesel = document.createElement("option");
+          diesel.value = "diesel";
+          diesel.textContent = "Diesel";
+          engine.appendChild(petrol);
+          engine.appendChild(diesel);
+        }, 200);
+      });
+    </script>
+  </body>
+</html>

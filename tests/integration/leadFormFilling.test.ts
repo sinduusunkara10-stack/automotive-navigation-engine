@@ -934,3 +934,79 @@ test("fill_form: a required field the page only reveals after a cancelled submit
     await close();
   }
 });
+
+test("fill_form: a required unmapped select skips the disabled placeholder option and chooses the first real, selectable option", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-select-generic-first-valid.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("model"), "base");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a real, non-placeholder preselected option on a required select is preserved rather than overridden", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-select-preselected.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("model"), "sport");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a dependent select that only gains real options after an earlier select changes is caught by bounded polling and filled", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-select-dependent.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    const url = new URL(result.resultingUrl!);
+    assert.ok(["saloon", "estate"].includes(url.searchParams.get("category") ?? ""));
+    assert.ok(["petrol", "diesel"].includes(url.searchParams.get("engine") ?? ""));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
