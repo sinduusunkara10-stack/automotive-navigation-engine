@@ -1,5 +1,7 @@
 import type { Locator, Page } from "playwright";
 import { findNegativeOptionLabel } from "./fillPlan.js";
+import type { FormJourneyContext } from "./formRelevance.js";
+import { classifyRadioGroup, resolveJourneyIntentOption, resolvePrivateCustomerOption, type RadioGroupClassification } from "./radioGroupClassifier.js";
 import type { SupportedLanguage } from "./testData.js";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
@@ -129,6 +131,13 @@ export interface ConsentGroupResolutionResult {
     requiredEvidence: "attribute" | "marker" | "none";
     resolved: boolean;
     selectedMemberFieldId: string | null;
+    /** Three-way taxonomy result (see radioGroupClassifier.ts) -- "ambiguous" is never resolved. */
+    classification: RadioGroupClassification;
+    classificationEvidence: string;
+    /** Why this option was selected, present only when resolved. */
+    selectionReason?: string;
+    /** Why this group was left unresolved despite being visible, present only when not resolved. */
+    unresolvedReason?: string;
   }[];
   consentGroupsCompleted: number;
   conditionalConsentGroupsRevealed: number;
@@ -139,20 +148,27 @@ export interface ConsentGroupResolutionResult {
 const MAX_RESCANS = 5;
 
 /**
- * Resolves every currently-visible radio group deterministically (the same generic negative-
- * option/opt-out vocabulary an unmapped Yes/No select already uses), then rescans for newly
- * revealed conditional groups until none remain or the bounded loop limit is reached. Resolving
- * a group that later turns out not to be required is harmless (it is the test-consent policy's
- * own deterministic default); the readiness gate, not this function, decides what blocks submit.
+ * Resolves every currently-visible radio group according to its classification (see
+ * radioGroupClassifier.ts): marketing_consent keeps the original opt-out/negative-option
+ * resolution; journey_intent is matched against the task's own workflow journey context, never
+ * defaulted; customer_qualification always resolves to the private-customer option, a fixed
+ * policy independent of any workflow field; ambiguous groups are left unresolved rather than
+ * guessed. Then rescans for newly revealed conditional groups until none remain or the bounded
+ * loop limit is reached. The readiness gate (fillForm.ts), not this function, decides what
+ * blocks submit -- but an unresolved required group now stays unresolved on purpose when this
+ * function cannot confidently classify or resolve it, rather than silently defaulting.
  */
 export async function resolveConsentGroups(
   page: Page,
   form: Locator,
   language: SupportedLanguage,
   fieldByIndex: (form: Locator, index: string) => Promise<Locator>,
+  journeyContext: FormJourneyContext = {},
 ): Promise<ConsentGroupResolutionResult> {
   const seenVisibleGroupIds = new Set<string>();
   const completedGroupIds = new Set<string>();
+  const blockedGroupIds = new Set<string>();
+  const groupMeta = new Map<string, { classification: RadioGroupClassification; classificationEvidence: string; selectionReason?: string; unresolvedReason?: string }>();
   let conditionalRevealedCount = 0;
   let consentGroupsInitiallyVisible = 0;
   let rescanCount = 0;
@@ -170,18 +186,61 @@ export async function resolveConsentGroups(
       newlyRevealed.forEach((g) => seenVisibleGroupIds.add(g.groupId));
     }
 
-    const unresolved = visibleGroups.filter((g) => g.checkedMemberFieldId === null && !completedGroupIds.has(g.groupId));
+    const unresolved = visibleGroups.filter(
+      (g) => g.checkedMemberFieldId === null && !completedGroupIds.has(g.groupId) && !blockedGroupIds.has(g.groupId),
+    );
     if (unresolved.length === 0) break;
 
     for (const group of unresolved) {
-      const negativeLabel = findNegativeOptionLabel(group.memberLabels, language);
-      const targetIndex = negativeLabel ? group.memberLabels.indexOf(negativeLabel) : group.memberFieldIds.length - 1;
-      const targetFieldId = group.memberFieldIds[targetIndex];
-      if (targetFieldId) {
-        const field = await fieldByIndex(form, targetFieldId);
-        await field.check().catch(() => {});
-        completedGroupIds.add(group.groupId);
+      const classificationResult = classifyRadioGroup({ questionText: group.questionText, memberLabels: group.memberLabels }, language);
+
+      let resolution: { index: number; reason: string } | undefined;
+      switch (classificationResult.classification) {
+        case "marketing_consent": {
+          const negativeLabel = findNegativeOptionLabel(group.memberLabels, language);
+          const targetIndex = negativeLabel ? group.memberLabels.indexOf(negativeLabel) : group.memberFieldIds.length - 1;
+          resolution = { index: targetIndex, reason: negativeLabel ? `selected the negative/opt-out option ("${negativeLabel}")` : "no negative/opt-out option found; selected the last option as the deterministic opt-out default" };
+          break;
+        }
+        case "journey_intent":
+          resolution = resolveJourneyIntentOption(group.memberLabels, journeyContext, language);
+          break;
+        case "customer_qualification":
+          resolution = resolvePrivateCustomerOption(group.memberLabels, language);
+          break;
+        case "ambiguous":
+          resolution = undefined;
+          break;
       }
+
+      if (resolution) {
+        const targetFieldId = group.memberFieldIds[resolution.index];
+        if (targetFieldId) {
+          const field = await fieldByIndex(form, targetFieldId);
+          await field.check().catch(() => {});
+          completedGroupIds.add(group.groupId);
+          groupMeta.set(group.groupId, {
+            classification: classificationResult.classification,
+            classificationEvidence: classificationResult.evidence,
+            selectionReason: resolution.reason,
+          });
+          continue;
+        }
+      }
+
+      // Unresolvable with confidence (ambiguous classification, or a confidently-classified
+      // group with no confidently-matching option) -- left unresolved on purpose, never
+      // defaulted, and not retried on subsequent rescans since the same evidence would just
+      // repeat the same outcome.
+      blockedGroupIds.add(group.groupId);
+      groupMeta.set(group.groupId, {
+        classification: classificationResult.classification,
+        classificationEvidence: classificationResult.evidence,
+        unresolvedReason:
+          classificationResult.classification === "ambiguous"
+            ? "classification was ambiguous; left unresolved rather than guessed"
+            : `classified as ${classificationResult.classification} but no option could be confidently resolved; left unresolved rather than guessed`,
+      });
     }
     await page.waitForTimeout(100);
   }
@@ -193,13 +252,30 @@ export async function resolveConsentGroups(
   return {
     consentGroupsDetected: finalGroups.length,
     consentGroupsInitiallyVisible,
-    consentGroupDiagnostics: finalVisibleGroups.map((g) => ({
-      groupId: g.groupId,
-      questionText: g.questionText,
-      requiredEvidence: g.requiredEvidence,
-      resolved: g.checkedMemberFieldId !== null,
-      selectedMemberFieldId: g.checkedMemberFieldId,
-    })),
+    consentGroupDiagnostics: finalVisibleGroups.map((g) => {
+      const resolved = g.checkedMemberFieldId !== null;
+      let meta = groupMeta.get(g.groupId);
+      if (!meta) {
+        // Already resolved before this function ran (e.g. a default-checked radio) -- still
+        // classified for diagnostics, but never acted on.
+        const classificationResult = classifyRadioGroup({ questionText: g.questionText, memberLabels: g.memberLabels }, language);
+        meta = {
+          classification: classificationResult.classification,
+          classificationEvidence: classificationResult.evidence,
+          ...(resolved ? { selectionReason: "already selected on the page before resolution ran" } : { unresolvedReason: "never became visible during the resolution loop" }),
+        };
+      }
+      return {
+        groupId: g.groupId,
+        questionText: g.questionText,
+        requiredEvidence: g.requiredEvidence,
+        resolved,
+        selectedMemberFieldId: g.checkedMemberFieldId,
+        classification: meta.classification,
+        classificationEvidence: meta.classificationEvidence,
+        ...(resolved ? { selectionReason: meta.selectionReason } : { unresolvedReason: meta.unresolvedReason }),
+      };
+    }),
     consentGroupsCompleted: completedGroupIds.size,
     conditionalConsentGroupsRevealed: conditionalRevealedCount,
     consentRescanCount: rescanCount,

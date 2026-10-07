@@ -740,7 +740,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // computing final discovery diagnostics -- a consent question is very often expressed as
   // Oui/Non-style radios whose own option labels carry no matchable keyword at all, so this never
   // goes through the per-field matchLeadFormField pipeline above.
-  const consentResult = await resolveConsentGroups(page, form, language, fieldByIndex);
+  const consentResult = await resolveConsentGroups(page, form, language, fieldByIndex, journeyContext);
 
   // Consent selections (or the dealer lookup) can generically reveal new required text/select
   // fields -- one bounded catch-up pass, filling only fields not already resolved, so a field a

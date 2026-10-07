@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a quote</title>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <!-- No marketing-consent, journey-intent, or customer-qualification vocabulary anywhere in
+           the question text or either option's own label -- the engine must classify this
+           ambiguous and leave it unresolved rather than guess. -->
+      <p>Please choose an option *</p>
+      <label><input type="radio" name="miscChoice" value="one" /> Option 1</label>
+      <label><input type="radio" name="miscChoice" value="two" /> Option 2</label>
+
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>

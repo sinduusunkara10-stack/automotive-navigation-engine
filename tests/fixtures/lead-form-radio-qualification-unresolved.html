@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a quote</title>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <!-- The question text clearly asks the private/business distinction, but neither option's
+           own label uses any recognised private-customer vocabulary -- the engine must leave
+           this unresolved and block submit rather than guess which option is "private". -->
+      <p>Are you a private individual or a business customer? *</p>
+      <label><input type="radio" name="customerType" value="a" /> Type A</label>
+      <label><input type="radio" name="customerType" value="b" /> Type B</label>
+
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>
