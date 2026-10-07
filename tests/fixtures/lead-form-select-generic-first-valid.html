@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a quote</title>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="model">Model</label>
+      <select id="model" name="model" required>
+        <option value="" disabled selected>Please select</option>
+        <option value="base">Base</option>
+        <option value="sport">Sport</option>
+      </select>
+
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+  </body>
+</html>
