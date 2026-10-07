@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Find stock near you</title>
+  </head>
+  <body>
+    <h1>Find stock near you</h1>
+    <div id="location-gate">
+      <label for="gate-postcode">Enter your postcode</label>
+      <input type="text" id="gate-postcode" name="gatePostcode" />
+      <button type="button" id="gate-continue" onclick="document.getElementById('location-gate').style.display='none'; document.getElementById('stock-results').style.display='block';">
+        Continue
+      </button>
+    </div>
+    <div id="stock-results" style="display: none">
+      <h2>Stock results</h2>
+      <p>Showing stock near SW1A 1AA.</p>
+    </div>
+  </body>
+</html>

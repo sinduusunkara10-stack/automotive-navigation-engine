@@ -42,7 +42,7 @@ async function startFixtureServer(): Promise<{ baseUrl: string; close: () => Pro
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.38.0",
+    schemaVersion: "1.39.0",
     taskId: "journey-memory-cross-run",
     objective: "Reach the finance personalisation step.",
     startUrl,
@@ -58,7 +58,7 @@ function buildTask(startUrl: string): TaskRequest {
     captureModules: [],
     limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.40.0",
+    outputSchemaVersion: "1.41.0",
   };
 }
 

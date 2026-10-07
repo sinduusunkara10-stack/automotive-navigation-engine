@@ -530,6 +530,27 @@ export interface ActionResult {
     unresolvedRequiredConsentGroups: string[];
   };
   /**
+   * Generic location/postcode-gate discovery/resolution diagnostics (see
+   * actions/locationGate.ts) -- a blocking panel some sites show before letting a visitor
+   * reach further content (e.g. stock/availability results), structurally distinct from the
+   * lead-generation form's own customer-address postcode and dealer-lookup postcode/city
+   * fields. Always present whenever fill_form ran past its captcha check, even when no gate
+   * was ever detected.
+   */
+  formLocationGateDiagnostics?: {
+    locationGateDetected: boolean;
+    locationGateInputFilled: boolean;
+    locationGateSuggestionsDetected: boolean;
+    locationGateSuggestionSelected: boolean;
+    locationGateRadiusControlDetected: boolean;
+    locationGateRadiusControlResolved: boolean;
+    locationGateContinueControlFound: boolean;
+    locationGateContinueClicked: boolean;
+    locationGatePassed: boolean;
+    /** Present only when the gate was detected but could not be verified as passed. */
+    locationGateFailureReason?: string;
+  };
+  /**
    * Live validation evidence read immediately after each submit attempt (re-tagged first, so a
    * field a dynamic widget only reveals after the submit attempt is never invisible to it).
    * Present whenever a submit control was found and clicked, or the pre-submit readiness gate ran.
@@ -1532,7 +1553,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.40.0";
+  schemaVersion: "1.41.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

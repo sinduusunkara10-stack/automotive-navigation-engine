@@ -9,7 +9,8 @@ import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
 import { detectCaptcha } from "../forms/captcha.js";
 import { detectPageLanguage } from "../forms/fieldMapper.js";
 import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
-import { resolveMarket, type SupportedLanguage } from "../forms/testData.js";
+import { marketDataFor, resolveMarket, type SupportedLanguage } from "../forms/testData.js";
+import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import { resolveConsentGroups } from "../forms/consentGroups.js";
 import {
@@ -556,12 +557,6 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver } = params;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
 
-  const forms = page.locator("form");
-  const formsOnPage = await forms.count();
-  if (formsOnPage === 0) {
-    return { success: false, error: "no_form_found" };
-  }
-
   if (await detectCaptchaOnPage(page)) {
     return { success: false, formFillOutcome: "blocked_captcha" };
   }
@@ -570,6 +565,20 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const actionMarketParam = typeof params.action?.params?.market === "string" ? (params.action.params.market as string) : undefined;
   const language: SupportedLanguage = detectPageLanguage(htmlLang);
   const market = resolveMarket(language, actionMarketParam);
+
+  // A generic location/postcode gate (see actions/locationGate.ts) can block the rest of the
+  // page's content entirely, including the lead form itself -- resolved first, using the
+  // task's own existing configured workflow postcode, before even counting <form> elements
+  // (the gate's own input deliberately lives outside any <form>, so a page showing only a gate
+  // and no lead form yet would otherwise hit the "no form found" branch below without ever
+  // being given the chance to pass it).
+  const locationGateOutcome: LocationGateOutcome = await resolveLocationGate(page, market, marketDataFor(market).postcode, language);
+
+  const forms = page.locator("form");
+  const formsOnPage = await forms.count();
+  if (formsOnPage === 0) {
+    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome };
+  }
 
   /**
    * A page can have several <form> elements (search, newsletter, cookie/consent, the actual
@@ -670,6 +679,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formFillOutcome: "form_discovery_failed",
       formMarketDetected: market,
       formLanguageDetected: language,
+      formLocationGateDiagnostics: locationGateOutcome,
       formDiscoveryDiagnostics: {
         formsOnPage,
         selectedFormIndex: selection.chosenIndex,
@@ -862,6 +872,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formFillOutcome: "form_discovery_failed",
       formMarketDetected: market,
       formLanguageDetected: language,
+      formLocationGateDiagnostics: locationGateOutcome,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
     };
@@ -911,6 +922,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formFieldsFilled: [...fieldsFilled],
       formMarketDetected: market,
       formLanguageDetected: language,
+      formLocationGateDiagnostics: locationGateOutcome,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
       formDealerSearchDiagnostics: buildDealerSearchDiagnostics(),
@@ -1022,6 +1034,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formFieldsFilled: [...fieldsFilled],
       formMarketDetected: market,
       formLanguageDetected: language,
+      formLocationGateDiagnostics: locationGateOutcome,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
       formDealerSearchDiagnostics,
@@ -1041,6 +1054,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formFieldsFilled: [...fieldsFilled],
     formMarketDetected: market,
     formLanguageDetected: language,
+    formLocationGateDiagnostics: locationGateOutcome,
     formClaudeCallUsed: claudeCallUsed,
     formDiscoveryDiagnostics,
     formDealerSearchDiagnostics,
