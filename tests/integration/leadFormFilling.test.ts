@@ -264,7 +264,7 @@ test("fill_form: a required field with no mapping and no Claude resolver never c
   }
 });
 
-test("fill_form: a cancelled submission (no URL change, no confirmation) is reported as a failure, never success", async () => {
+test("fill_form: a cancelled submission with no observable validation cause at all is reported as validation_cause_not_observed, never success and never a false form_validation_failed", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -279,10 +279,15 @@ test("fill_form: a cancelled submission (no URL change, no confirmation) is repo
     });
 
     assert.equal(result.success, false);
-    assert.equal(result.formFillOutcome, "form_validation_failed");
+    // Every required field was filled validly and the site's own cancellation left no native
+    // invalid field, no aria-invalid, no visible error message, and no unresolved dependent
+    // control -- this engine genuinely cannot observe why the site cancelled it, so it must
+    // never report the diagnosed-sounding "form_validation_failed" it cannot actually back up.
+    assert.equal(result.formFillOutcome, "validation_cause_not_observed");
     assert.equal(result.formRetriesUsed, 0);
     assert.deepEqual(result.formValidationMissingFields, []);
     assert.ok(result.formFieldsFilled && result.formFieldsFilled.length > 0);
+    assert.equal(result.formPostSubmitDiagnostics?.validationCauseObserved, false);
 
     const canceled = await page.evaluate(() => (window as unknown as { __formCanceled?: boolean }).__formCanceled ?? false);
     assert.equal(canceled, true);
@@ -540,6 +545,8 @@ test("fill_form: a plain postcode field with no dealer-search widget on the page
       dealerSelected: false,
       dealerValueVerified: false,
       dealerVerificationEvidence: "",
+      multiplePostcodeFieldsUnresolved: false,
+      multiplePostcodeFieldsEvidence: "",
     });
   } finally {
     await page.close();
@@ -691,6 +698,89 @@ test("fill_form: a trigger using only 'select' vocabulary first reveals a locati
     assert.equal(result.formDealerSearchDiagnostics?.locationSuggestionSelected, true);
     assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
     assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a dealer trigger placed BEFORE its field (sibling order a sibling-walk can never find, since it only looks backward) is still associated and resolved via the nearest-common-ancestor signal", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-trigger-precedes-field.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupControlDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+    assert.equal(result.formDealerSearchDiagnostics?.multiplePostcodeFieldsUnresolved, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a dealer trigger and field sitting in separate parallel wrapper columns under a shared ancestor (no sibling relationship at all) are still associated via nearest-common-ancestor distance plus visual proximity", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-trigger-parallel-wrapper.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupControlDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: two postcode-purpose fields with a dealer trigger too far away (beyond the sanity cutoffs) for either structural signal are never upgraded to dealer_search -- the generic safety net blocks Submit instead of treating the typed postcode text as resolved", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-two-postcode-fields-unresolved.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.formFillOutcome, "form_validation_failed");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, false);
+    assert.equal(result.formDealerSearchDiagnostics?.multiplePostcodeFieldsUnresolved, true);
+    assert.equal(result.formPostSubmitDiagnostics?.preSubmitReadinessPassed, false);
+    assert.ok(result.formPostSubmitDiagnostics?.preSubmitReadinessFailures.some((f) => f.startsWith("multiple_postcode_fields_unresolved")));
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
   } finally {
     await page.close();
     await browser.close();

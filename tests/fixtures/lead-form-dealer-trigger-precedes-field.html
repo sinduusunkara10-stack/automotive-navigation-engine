@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis</title>
+  </head>
+  <body>
+    <h1>Demande de devis</h1>
+    <form id="lead-form">
+      <label for="first-name">Prenom</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nom</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <!-- The trigger is the FIRST child of the widget, the field comes AFTER it -- this is the
+           exact shape a bounded previous-sibling/ancestor walk (the old, rejected fix) can never
+           find: it only ever looks backward through preceding siblings, never forward. The field
+           and trigger do share a direct parent, so this exercises the nearest-common-ancestor
+           signal at its shallowest (one hop each side) while still being unreachable by sibling
+           order alone. -->
+      <div id="dealer-widget">
+        <button type="button" id="dealer-search-btn">Sélectionnez un Point de Vente</button>
+        <label for="dealer-postcode">CP ou ville</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <div id="dealer-results" hidden>
+          <label><input type="radio" name="dealerChoice" value="dealer-1" id="dealer-1" /> Concession Un</label>
+          <label><input type="radio" name="dealerChoice" value="dealer-2" id="dealer-2" /> Concession Deux</label>
+        </div>
+      </div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Merci ! Nous vous contacterons bientot.</div>
+      <div id="dealer-error" class="error-message" role="alert" hidden>Veuillez selectionner un point de vente avant de valider.</div>
+      <button type="submit" id="submit-lead">Valider</button>
+    </form>
+    <script>
+      document.getElementById("dealer-search-btn").addEventListener("click", () => {
+        document.getElementById("dealer-results").hidden = false;
+      });
+      document.querySelectorAll('input[name="dealerChoice"]').forEach((radio) => {
+        radio.addEventListener("change", () => {
+          document.getElementById("dealer-committed").value = radio.value;
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!document.getElementById("dealer-committed").value) {
+          event.preventDefault();
+          document.getElementById("dealer-error").hidden = false;
+          return;
+        }
+        event.preventDefault();
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

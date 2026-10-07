@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis</title>
+  </head>
+  <body>
+    <h1>Demande de devis</h1>
+    <form id="lead-form">
+      <label for="first-name">Prenom</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nom</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <!-- The field and trigger each sit several levels deep inside their OWN separate wrapper
+           column, parallel to each other -- not siblings themselves, and not reachable by
+           walking either one's own ancestor chain's preceding siblings, since every element on
+           that chain is a FIRST child of its own parent. The only thing connecting them
+           structurally is a shared ancestor three levels up. This is the parallel-wrapper layout
+           (e.g. a CSS grid/flex two-column widget) a sibling-order walk, however far widened,
+           can never generalize to. -->
+      <div id="dealer-widget" style="display: flex;">
+        <div class="field-column">
+          <div class="field-inner">
+            <label for="dealer-postcode">CP ou ville</label>
+            <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+          </div>
+        </div>
+        <div class="trigger-column">
+          <div class="trigger-inner">
+            <button type="button" id="dealer-search-btn">Sélectionnez un Point de Vente</button>
+          </div>
+        </div>
+        <!-- Kept inside #dealer-widget (the shared ancestor the field and trigger both resolve
+             to) rather than as a form-level sibling, so resolveDealerLookup's scoped result
+             search can actually see it. -->
+        <div id="dealer-results" hidden>
+          <label><input type="radio" name="dealerChoice" value="dealer-1" id="dealer-1" /> Concession Un</label>
+          <label><input type="radio" name="dealerChoice" value="dealer-2" id="dealer-2" /> Concession Deux</label>
+        </div>
+      </div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Merci ! Nous vous contacterons bientot.</div>
+      <div id="dealer-error" class="error-message" role="alert" hidden>Veuillez selectionner un point de vente avant de valider.</div>
+      <button type="submit" id="submit-lead">Valider</button>
+    </form>
+    <script>
+      document.getElementById("dealer-search-btn").addEventListener("click", () => {
+        document.getElementById("dealer-results").hidden = false;
+      });
+      document.querySelectorAll('input[name="dealerChoice"]').forEach((radio) => {
+        radio.addEventListener("change", () => {
+          document.getElementById("dealer-committed").value = radio.value;
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!document.getElementById("dealer-committed").value) {
+          event.preventDefault();
+          document.getElementById("dealer-error").hidden = false;
+          return;
+        }
+        event.preventDefault();
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

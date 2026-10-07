@@ -4,7 +4,7 @@ import type { Locator, Page } from "playwright";
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 const TRIGGER_INDEX_ATTR = "data-nav-engine-trigger-index";
 /** Written on the smallest ancestor that contains both a field and its adjacent lookup trigger -- lets resolveDealerLookup scope its before/after text comparison to the dealer widget itself rather than the whole form or the whole page. */
-const DEALER_SCOPE_ATTR = "data-nav-engine-dealer-scope";
+export const DEALER_SCOPE_ATTR = "data-nav-engine-dealer-scope";
 
 /** Generic, accessibility-based dealer-result candidates -- never a brand-specific selector. Used for both a location-suggestion list and a final selectable dealer list; resolveDealerLookup tells them apart by whether a selection ever verifiably commits. */
 export const DEALER_RESULT_SELECTOR = '[role="radio"], input[type="radio"], [role="option"]';
@@ -61,24 +61,49 @@ export function matchesLookupTriggerVocabulary(text: string): boolean {
 export interface RawLookupTriggerCandidate {
   triggerIndex: string;
   text: string;
-  /** The FIELD_INDEX_ATTR id of the nearest field found by walking backward through preceding siblings/ancestors (same bounded-walk shape tagAndReadFields already uses for its own label fallback) -- never "any field sharing a distant common ancestor", which on a flat form (fields as direct form children, no wrapper divs) would otherwise resolve to the form's very first field regardless of the trigger's real position. */
+  /**
+   * The FIELD_INDEX_ATTR id of the field this trigger is associated with, if any -- resolved by
+   * combining three independent signals (see tagAndFindLookupTriggers), never by DOM sibling
+   * order alone. Never "any field sharing a distant common ancestor" either: bounded sanity
+   * cutoffs on both DOM distance and visual distance keep this from resolving to an unrelated
+   * field elsewhere on a large form.
+   */
   adjacentFieldId: string | null;
 }
 
 /**
  * Tags every visible, non-submit button-like control in the form with TRIGGER_INDEX_ATTR and
- * reports the nearest preceding field it is adjacent to, if any. Must run after tagAndReadFields
+ * reports the field it is structurally associated with, if any. Must run after tagAndReadFields
  * has already tagged the form's input/select/textarea elements with FIELD_INDEX_ATTR -- adjacency
  * is read back from that attribute, not recomputed here. Also tags the smallest ancestor
- * containing both the trigger and its adjacent field with DEALER_SCOPE_ATTR (keyed by the field's
- * id) so resolveDealerLookup can scope its evidence-gathering to the widget itself.
+ * containing both the trigger and its associated field with DEALER_SCOPE_ATTR (keyed by the
+ * field's id) so resolveDealerLookup can scope its evidence-gathering to the widget itself.
+ *
+ * Association is decided from three independent signals, deliberately not from DOM sibling order
+ * (a "widen the sibling-walk bound" fix only generalizes to a deeper nesting of the same
+ * sibling-chain shape -- it never covers a trigger and its field sitting in separate parallel
+ * wrapper elements with no sibling relationship at all, which is exactly the live-site shape that
+ * slipped past the old walk):
+ *   1. ARIA relationship (trigger aria-controls/aria-owns referencing the field's id, or the
+ *      field's aria-describedby referencing the trigger's id) -- authoritative on its own.
+ *   2. Nearest-common-ancestor DOM distance -- generalizes "adjacent" to any shared wrapper, not
+ *      just a direct-preceding-sibling chain.
+ *   3. Visual/geometric proximity (bounding-rect center distance) -- a secondary scoring signal
+ *      that also catches a CSS-reordered layout where source order and visual position diverge.
+ * Signals 2 and 3 are combined into one score per candidate field and bounded by sanity cutoffs,
+ * so a trigger is never matched to "the nearest field anywhere on the page".
  */
 export async function tagAndFindLookupTriggers(form: Locator): Promise<RawLookupTriggerCandidate[]> {
   return form.evaluate(
     (formEl: HTMLFormElement, attrs: { fieldAttr: string; triggerAttr: string; scopeAttr: string }) => {
       const submitEls = new Set(Array.from(formEl.querySelectorAll('button[type="submit"], input[type="submit"]')));
       const candidates = Array.from(formEl.querySelectorAll('button, input[type="button"], [role="button"]')) as HTMLElement[];
+      const fieldEls = Array.from(formEl.querySelectorAll(`[${attrs.fieldAttr}]`)) as HTMLElement[];
       const results: { triggerIndex: string; text: string; adjacentFieldId: string | null }[] = [];
+
+      const MAX_ANCESTOR_HOPS = 20;
+      const MAX_PIXEL_DISTANCE = 600;
+      const ANCESTOR_HOP_WEIGHT = 40;
 
       candidates.forEach((el, i) => {
         if (submitEls.has(el)) return;
@@ -91,41 +116,77 @@ export async function tagAndFindLookupTriggers(form: Locator): Promise<RawLookup
         el.setAttribute(attrs.triggerAttr, triggerIndex);
         const text = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || (el as HTMLInputElement).value || "";
 
-        // Nearest-preceding-field walk: never "the first field inside whatever ancestor happens
-        // to contain one", which on a flat form (fields as direct <form> children with no
-        // wrapper divs) would resolve to the form's very first field for every trigger button.
-        let adjacentFieldId: string | null = null;
-        let node: Element | null = el;
-        let steps = 0;
-        while (node && node !== formEl && steps < 8 && adjacentFieldId === null) {
-          let sibling: Element | null = node.previousElementSibling;
-          let siblingSteps = 0;
-          while (sibling && siblingSteps < 6 && adjacentFieldId === null) {
-            if (sibling.hasAttribute(attrs.fieldAttr)) {
-              adjacentFieldId = sibling.getAttribute(attrs.fieldAttr);
-            } else {
-              const nested = Array.from(sibling.querySelectorAll(`[${attrs.fieldAttr}]`));
-              if (nested.length > 0) {
-                adjacentFieldId = nested[nested.length - 1]!.getAttribute(attrs.fieldAttr);
-              }
-            }
-            sibling = sibling.previousElementSibling;
-            siblingSteps += 1;
+        const referencedIds = (el.getAttribute("aria-controls") || "")
+          .split(/\s+/)
+          .filter(Boolean)
+          .concat((el.getAttribute("aria-owns") || "").split(/\s+/).filter(Boolean));
+        const triggerDomId = el.getAttribute("id") || "";
+
+        let ariaMatchedId: string | null = null;
+        let bestFieldId: string | null = null;
+        let bestScore = Number.POSITIVE_INFINITY;
+
+        for (let f = 0; f < fieldEls.length; f += 1) {
+          const fieldEl = fieldEls[f]!;
+          const fieldId = fieldEl.getAttribute(attrs.fieldAttr);
+          if (fieldId === null) continue;
+
+          const fieldDomId = fieldEl.getAttribute("id") || "";
+          const describedBy = (fieldEl.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+          if ((fieldDomId && referencedIds.includes(fieldDomId)) || (triggerDomId && describedBy.includes(triggerDomId))) {
+            ariaMatchedId = fieldId;
+            break;
           }
-          node = node.parentElement;
-          steps += 1;
+
+          let ancestor: Element | null = el;
+          let triggerHops = 0;
+          let sharedAncestor: Element | null = null;
+          while (ancestor && ancestor !== formEl.parentElement) {
+            if (ancestor.contains(fieldEl)) {
+              sharedAncestor = ancestor;
+              break;
+            }
+            ancestor = ancestor.parentElement;
+            triggerHops += 1;
+          }
+
+          let ancestorHops = Number.POSITIVE_INFINITY;
+          if (sharedAncestor) {
+            let fieldAncestor: Element | null = fieldEl;
+            let fieldHops = 0;
+            while (fieldAncestor && fieldAncestor !== sharedAncestor) {
+              fieldAncestor = fieldAncestor.parentElement;
+              fieldHops += 1;
+            }
+            ancestorHops = triggerHops + fieldHops;
+          }
+
+          const fieldRect = fieldEl.getBoundingClientRect();
+          const dx = rect.left + rect.width / 2 - (fieldRect.left + fieldRect.width / 2);
+          const dy = rect.top + rect.height / 2 - (fieldRect.top + fieldRect.height / 2);
+          const pixelDistance = Math.sqrt(dx * dx + dy * dy);
+
+          if (ancestorHops > MAX_ANCESTOR_HOPS || pixelDistance > MAX_PIXEL_DISTANCE) continue;
+
+          const score = ancestorHops * ANCESTOR_HOP_WEIGHT + pixelDistance;
+          if (score < bestScore) {
+            bestScore = score;
+            bestFieldId = fieldId;
+          }
         }
+
+        const adjacentFieldId = ariaMatchedId ?? bestFieldId;
 
         if (adjacentFieldId !== null) {
           const fieldEl = formEl.querySelector(`[${attrs.fieldAttr}="${adjacentFieldId}"]`);
           if (fieldEl) {
-            let ancestor: Element | null = el;
-            while (ancestor && ancestor !== formEl.parentElement) {
-              if (ancestor.contains(fieldEl)) {
-                ancestor.setAttribute(attrs.scopeAttr, adjacentFieldId);
+            let scopeAncestor: Element | null = el;
+            while (scopeAncestor && scopeAncestor !== formEl.parentElement) {
+              if (scopeAncestor.contains(fieldEl)) {
+                scopeAncestor.setAttribute(attrs.scopeAttr, adjacentFieldId);
                 break;
               }
-              ancestor = ancestor.parentElement;
+              scopeAncestor = scopeAncestor.parentElement;
             }
           }
         }
