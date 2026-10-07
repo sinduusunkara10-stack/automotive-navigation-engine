@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis</title>
+  </head>
+  <body>
+    <h1>Demande de devis</h1>
+    <form id="lead-form">
+      <label for="first-name">Prénom</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nom</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">E-mail</label>
+      <input type="email" id="email" name="email" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">CP ou ville</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <button type="button" id="dealer-select-btn" aria-label="Sélectionnez un Point de Vente">Sélectionnez un Point de Vente</button>
+        <div id="suggestions" hidden></div>
+        <div id="dealer-list" hidden></div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Merci ! Nous vous recontacterons.</div>
+      <button type="submit" id="submit-lead">Valider</button>
+    </form>
+    <script>
+      // Path B (two-stage): the trigger text uses "select" vocabulary only (no "search"/"find"/
+      // "ok"), first reveals a location-suggestion list (role="option"), selecting the first one
+      // then reveals the REAL dealer list (role="radio") a moment later -- proving the resolver's
+      // second-stage retry (the first list never itself commits a checked/aria-checked state).
+      document.getElementById("dealer-select-btn").addEventListener("click", () => {
+        const suggestions = document.getElementById("suggestions");
+        suggestions.hidden = false;
+        suggestions.innerHTML = '<div role="option" id="suggestion-1">75001 Paris, France</div>';
+        document.getElementById("suggestion-1").addEventListener("click", () => {
+          suggestions.hidden = true;
+          suggestions.innerHTML = "";
+          const dealerList = document.getElementById("dealer-list");
+          dealerList.hidden = false;
+          dealerList.innerHTML =
+            '<label><input type="radio" name="dealerChoice" value="dealer-1" id="dealer-1" /> Garage Laurence</label>';
+          document.getElementById("dealer-1").addEventListener("change", (e) => {
+            document.getElementById("dealer-committed").value = e.target.value;
+          });
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

@@ -293,7 +293,7 @@ test("fill_form: a cancelled submission (no URL change, no confirmation) is repo
   }
 });
 
-test("fill_form: an unresolvable required field triggers retries up to the bound, then reports form_validation_failed", async () => {
+test("fill_form: an unresolvable required field fails the pre-submit readiness gate and never clicks submit at all", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -309,8 +309,11 @@ test("fill_form: an unresolvable required field triggers retries up to the bound
 
     assert.equal(result.success, false);
     assert.equal(result.formFillOutcome, "form_validation_failed");
-    assert.equal(result.formRetriesUsed, 2);
+    assert.equal(result.formRetriesUsed, 0);
     assert.ok(result.formValidationMissingFields && result.formValidationMissingFields.length > 0);
+    assert.equal(result.formPostSubmitDiagnostics?.preSubmitReadinessPassed, false);
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+    assert.ok(result.formPostSubmitDiagnostics?.preSubmitReadinessFailures.some((f) => f.startsWith("unresolved_required_fields")));
 
     const values = await page.evaluate(() => ({
       firstName: (document.getElementById("first-name") as HTMLInputElement).value,
@@ -454,13 +457,13 @@ test("fill_form: dealer search triggers via a nearby button, waits for results, 
     assert.equal(result.success, true);
     assert.equal(result.formFillOutcome, "submitted");
     assert.equal(result.formSuccessDetection, "on_screen_message");
-    assert.deepEqual(result.formDealerSearchDiagnostics, {
-      postcodeSearchTriggered: true,
-      dealerResultsDetected: true,
-      dealerSelected: true,
-      dealerSelectionVerified: true,
-      dealerResultsDetectedOutsideForm: false,
-    });
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupControlDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
     assert.equal(result.formPostSubmitDiagnostics?.submitCanceled, false);
     assert.equal(result.formRetriesUsed, 0);
   } finally {
@@ -489,13 +492,13 @@ test("fill_form: a postcode field labelled with no dealer-specific wording is st
     assert.equal(result.formDiscoveryDiagnostics?.dealerSearchWidgetDetected, true);
     // Never counted among the plain fill_text fields -- it went through dealer_search instead.
     assert.equal(result.formFieldsFilled?.includes("postcode"), false);
-    assert.deepEqual(result.formDealerSearchDiagnostics, {
-      postcodeSearchTriggered: true,
-      dealerResultsDetected: true,
-      dealerSelected: true,
-      dealerSelectionVerified: true,
-      dealerResultsDetectedOutsideForm: false,
-    });
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupControlDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
     assert.equal(result.formRetriesUsed, 0);
   } finally {
     await page.close();
@@ -523,11 +526,20 @@ test("fill_form: a plain postcode field with no dealer-search widget on the page
     // never silently omitted, which previously made "the flow never activated" indistinguishable
     // from "it activated and every step came back false".
     assert.deepEqual(result.formDealerSearchDiagnostics, {
-      postcodeSearchTriggered: false,
+      customerPostcodeFieldDetected: true,
+      dealerLookupFieldDetected: false,
+      dealerLookupFieldEvidence: "",
+      dealerLookupControlDetected: false,
+      dealerLookupControlEvidence: "",
+      dealerLookupTriggered: false,
+      dealerLookupOutcome: "not_applicable",
+      locationSuggestionsDetected: false,
+      locationSuggestionSelected: false,
       dealerResultsDetected: false,
+      dealerAutoPopulated: false,
       dealerSelected: false,
-      dealerSelectionVerified: false,
-      dealerResultsDetectedOutsideForm: false,
+      dealerValueVerified: false,
+      dealerVerificationEvidence: "",
     });
   } finally {
     await page.close();
@@ -552,7 +564,7 @@ test("fill_form: a role=\"radio\" dealer widget that commits via aria-checked (n
 
     assert.equal(result.success, true);
     assert.equal(result.formFillOutcome, "submitted");
-    assert.equal(result.formDealerSearchDiagnostics?.dealerSelectionVerified, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
     assert.equal(result.formRetriesUsed, 0);
   } finally {
     await page.close();
@@ -561,7 +573,7 @@ test("fill_form: a role=\"radio\" dealer widget that commits via aria-checked (n
   }
 });
 
-test("fill_form: no dealer results found never fabricates a selection, retries the search, and reports form_validation_failed with the site's own error text", async () => {
+test("fill_form: no dealer results found retries the lookup bounded, then never clicks submit at all (never submit with an unverified dealer dependency)", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -577,13 +589,15 @@ test("fill_form: no dealer results found never fabricates a selection, retries t
 
     assert.equal(result.success, false);
     assert.equal(result.formFillOutcome, "form_validation_failed");
-    assert.equal(result.formDealerSearchDiagnostics?.postcodeSearchTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
     assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, false);
     assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, false);
     assert.equal(result.formPostSubmitDiagnostics?.submitCanceled, true);
-    assert.ok(result.formPostSubmitDiagnostics?.postSubmitValidationMessages.some((m) => m.includes("No dealer selected")));
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+    assert.equal(result.formPostSubmitDiagnostics?.preSubmitReadinessPassed, false);
+    assert.ok(result.formPostSubmitDiagnostics?.preSubmitReadinessFailures.includes("dealer_dependency_unresolved"));
     assert.equal(result.formRetriesUsed, 2);
-    assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /dealer search/);
+    assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /dealer-lookup retries/);
   } finally {
     await page.close();
     await browser.close();
@@ -591,7 +605,7 @@ test("fill_form: no dealer results found never fabricates a selection, retries t
   }
 });
 
-test("fill_form: a clicked dealer result the widget never visibly commits is reported unverified, not treated as a successful selection", async () => {
+test("fill_form: a clicked dealer result the widget never visibly commits is retried bounded, then never clicks submit at all", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -609,8 +623,110 @@ test("fill_form: a clicked dealer result the widget never visibly commits is rep
     assert.equal(result.formFillOutcome, "form_validation_failed");
     assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, true);
     assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
-    assert.equal(result.formDealerSearchDiagnostics?.dealerSelectionVerified, false);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+    assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
     assert.equal(result.formRetriesUsed, 2);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: two postcode-purpose fields on the same form are judged independently -- only the dealer-locator one (with its own adjacent OK control) triggers the lookup, and it auto-populates generically", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-two-postcode-fields-auto-populate.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    // The plain customer-address postcode was filled as ordinary text ...
+    assert.ok(result.formFieldsFilled?.includes("postcode"));
+    // ... while the dealer-locator postcode/city went through dealer_search instead, even
+    // though neither field's own label carries any dealer-specific vocabulary.
+    assert.equal(result.formDealerSearchDiagnostics?.customerPostcodeFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupControlDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "auto_populated");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerAutoPopulated, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerResultsDetected, false);
+
+    const addressPostcode = await page.evaluate(() => (document.getElementById("address-postcode") as HTMLInputElement).value);
+    assert.equal(addressPostcode, "SW1A 1AA");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a trigger using only 'select' vocabulary first reveals a location suggestion, then the real dealer list after selecting it", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-suggestion-then-list.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.locationSuggestionsDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.locationSuggestionSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: Oui/Non radio consent groups with no matchable label text are discovered generically, resolved, and a conditionally-revealed third group is caught by the rescan", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-consent-groups-conditional.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formConsentDiagnostics?.consentGroupsInitiallyVisible, 2);
+    assert.equal(result.formConsentDiagnostics?.consentGroupsCompleted, 3);
+    assert.ok((result.formConsentDiagnostics?.conditionalConsentGroupsRevealed ?? 0) >= 1);
+    assert.ok(result.formConsentDiagnostics?.consentGroupDiagnostics.every((g) => g.resolved));
+
+    const checked = await page.evaluate(() => ({
+      a: (document.querySelector('input[name="consentA"]:checked') as HTMLInputElement | null)?.value,
+      b: (document.querySelector('input[name="consentB"]:checked') as HTMLInputElement | null)?.value,
+      c: (document.querySelector('input[name="consentC"]:checked') as HTMLInputElement | null)?.value,
+    }));
+    assert.equal(checked.a, "no");
+    assert.equal(checked.b, "no");
+    assert.equal(checked.c, "no");
   } finally {
     await page.close();
     await browser.close();

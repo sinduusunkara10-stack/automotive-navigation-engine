@@ -139,7 +139,7 @@ export interface Settling {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.36.0";
+  schemaVersion: "1.37.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -163,7 +163,7 @@ export interface TaskRequest {
   safety: Safety;
   /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
   settling?: Settling;
-  outputSchemaVersion: "1.38.0";
+  outputSchemaVersion: "1.39.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

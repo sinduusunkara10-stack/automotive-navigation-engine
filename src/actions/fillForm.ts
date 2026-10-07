@@ -11,6 +11,15 @@ import { detectPageLanguage } from "../forms/fieldMapper.js";
 import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
 import { resolveMarket, type SupportedLanguage } from "../forms/testData.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
+import { resolveConsentGroups } from "../forms/consentGroups.js";
+import {
+  dealerScopeFor,
+  matchesLookupTriggerVocabulary,
+  resolveDealerLookup,
+  tagAndFindLookupTriggers,
+  triggerByIndex,
+  type DealerLookupOutcome,
+} from "./dealerLookup.js";
 import {
   computeFormScore,
   resolveAmbiguousFormSelection,
@@ -49,21 +58,31 @@ const SUCCESS_TEXT_MARKERS = [
 
 const SUBMIT_TEXT_MARKERS = ["submit", "send", "soumettre", "envoyer", "senden", "versturen", "invia", "inviare", "enviar", "wyslij", "wyślij"];
 
-/** Generic, language-agnostic vocabulary for the trigger that runs a postcode/dealer search -- never a brand-specific selector. */
-const SEARCH_TEXT_MARKERS = ["search", "go", "find", "ok", "zoeken", "suchen", "rechercher", "cercar", "buscar", "szukaj", "pesquisar"];
-
-/** Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a `dealer_search` decision drives. See docs/architecture.md. */
+/**
+ * Diagnostics for the generic postcode/city -> lookup -> (auto-populate | suggestion | dealer
+ * list) -> verify flow a `dealer_search` decision drives. Always present (with explicit
+ * false/empty defaults) whenever a submit was attempted, even when no field was ever mapped to
+ * the dealer_search decision -- see EMPTY_DEALER_SEARCH_DIAGNOSTICS.
+ */
 export interface DealerSearchDiagnostics {
-  postcodeSearchTriggered: boolean;
+  /** A plain (non-dealer) postcode-purpose field was also present on the chosen form -- e.g. a customer-address postcode, distinct from the dealer-lookup postcode/city field. */
+  customerPostcodeFieldDetected: boolean;
+  /** A field was identified as serving the dealer-lookup purpose (by keyword match or by structural adjacency to a lookup control). */
+  dealerLookupFieldDetected: boolean;
+  dealerLookupFieldEvidence: string;
+  /** The dealer-lookup field had its own structurally-adjacent lookup control (not just a keyword match with no control found). */
+  dealerLookupControlDetected: boolean;
+  dealerLookupControlEvidence: string;
+  dealerLookupTriggered: boolean;
+  dealerLookupOutcome: "auto_populated" | "suggestion_selected" | "dealer_selected" | "unresolved" | "not_applicable";
+  locationSuggestionsDetected: boolean;
+  locationSuggestionSelected: boolean;
   dealerResultsDetected: boolean;
+  dealerAutoPopulated: boolean;
   dealerSelected: boolean;
-  dealerSelectionVerified: boolean;
-  /**
-   * Diagnostic only -- never used to select or click. Checked only when dealerResultsDetected
-   * is false, so a future live run can tell "no results anywhere" apart from "the widget's
-   * results render outside the <form> boundary, where waitForDealerResult never looks".
-   */
-  dealerResultsDetectedOutsideForm: boolean;
+  dealerValueVerified: boolean;
+  dealerVerificationEvidence: string;
+  dealerLookupFailureReason?: string;
 }
 
 /** Post-submit validation evidence, read fresh (after re-tagging) so a field revealed only after a dynamic widget interaction is never invisible to it. */
@@ -74,11 +93,20 @@ export interface PostSubmitDiagnostics {
 }
 
 const EMPTY_DEALER_SEARCH_DIAGNOSTICS: DealerSearchDiagnostics = {
-  postcodeSearchTriggered: false,
+  customerPostcodeFieldDetected: false,
+  dealerLookupFieldDetected: false,
+  dealerLookupFieldEvidence: "",
+  dealerLookupControlDetected: false,
+  dealerLookupControlEvidence: "",
+  dealerLookupTriggered: false,
+  dealerLookupOutcome: "not_applicable",
+  locationSuggestionsDetected: false,
+  locationSuggestionSelected: false,
   dealerResultsDetected: false,
+  dealerAutoPopulated: false,
   dealerSelected: false,
-  dealerSelectionVerified: false,
-  dealerResultsDetectedOutsideForm: false,
+  dealerValueVerified: false,
+  dealerVerificationEvidence: "",
 };
 
 export interface ExecuteFillFormParams {
@@ -115,6 +143,7 @@ interface RawFieldDescriptor {
   isPlaceholderMimicry: boolean;
   isPreselected?: boolean;
   options?: { value: string; label: string }[];
+  dealerLookupTriggerIndex?: string;
 }
 
 /**
@@ -331,49 +360,45 @@ function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
     isPlaceholderMimicry: raw.isPlaceholderMimicry,
     isPreselected: raw.isPreselected,
     options: raw.options,
+    dealerLookupTriggerIndex: raw.dealerLookupTriggerIndex,
   };
+}
+
+/**
+ * Combines tagAndReadFields with the separate lookup-trigger tagging pass (dealerLookup.ts),
+ * resolving each field's own dealerLookupTriggerIndex by structural adjacency -- never a form-
+ * wide flag, since a form can have two postcode-purpose fields (a plain customer-address postcode
+ * and a dealer-locator postcode/city) sharing identical label vocabulary.
+ */
+async function tagAndReadFieldsWithDealerLookup(form: Locator): Promise<RawFieldDescriptor[]> {
+  const raw = await tagAndReadFields(form);
+  const triggers = await tagAndFindLookupTriggers(form);
+  const triggerByFieldId = new Map<string, string>();
+  for (const trigger of triggers) {
+    if (trigger.adjacentFieldId && matchesLookupTriggerVocabulary(trigger.text) && !triggerByFieldId.has(trigger.adjacentFieldId)) {
+      triggerByFieldId.set(trigger.adjacentFieldId, trigger.triggerIndex);
+    }
+  }
+  return raw.map((field) => ({ ...field, dealerLookupTriggerIndex: triggerByFieldId.get(String(field.index)) }));
 }
 
 async function fieldByIndex(form: Locator, index: string): Promise<Locator> {
   return form.locator(`[${FIELD_INDEX_ATTR}="${index}"]`);
 }
 
-/** Generic, accessibility-based dealer-result candidates -- never a brand-specific selector. */
-const DEALER_RESULT_SELECTOR = '[role="radio"], input[type="radio"], [role="option"]';
-
-async function findSearchTrigger(form: Locator): Promise<Locator | null> {
-  for (const marker of SEARCH_TEXT_MARKERS) {
-    const byRole = form.getByRole("button", { name: new RegExp(marker, "i") }).first();
-    if ((await byRole.count()) > 0) return byRole;
-  }
-  return null;
-}
-
-async function waitForDealerResult(form: Locator): Promise<Locator | null> {
-  const results = form.locator(DEALER_RESULT_SELECTOR);
-  try {
-    await results.first().waitFor({ state: "visible", timeout: 3000 });
-  } catch {
-    return null;
-  }
-  return (await results.count()) > 0 ? results.first() : null;
-}
-
-/**
- * Clicking a result doesn't by itself prove the widget's own JS committed the selection (e.g.
- * a hidden "selected dealer id" field it still has to write) -- check the result's own
- * selected/checked state after a short settle. `aria-checked` is the correct ARIA state for a
- * `role="radio"` widget, `aria-selected` for `role="option"`; both are checked generically
- * since the result could be either.
- */
-async function verifyDealerSelectionCommitted(page: Page, option: Locator): Promise<boolean> {
-  await page.waitForTimeout(150);
-  return option
-    .evaluate(
-      (el: Element) =>
-        (el as HTMLInputElement).checked === true || el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
-    )
-    .catch(() => false);
+function dealerOutcomeToDiagnostics(outcome: DealerLookupOutcome): Partial<DealerSearchDiagnostics> {
+  return {
+    dealerLookupTriggered: outcome.dealerLookupTriggered,
+    dealerLookupOutcome: outcome.dealerLookupOutcome,
+    locationSuggestionsDetected: outcome.locationSuggestionsDetected,
+    locationSuggestionSelected: outcome.locationSuggestionSelected,
+    dealerResultsDetected: outcome.dealerResultsDetected,
+    dealerAutoPopulated: outcome.dealerAutoPopulated,
+    dealerSelected: outcome.dealerSelected,
+    dealerValueVerified: outcome.dealerValueVerified,
+    dealerVerificationEvidence: outcome.dealerVerificationEvidence,
+    dealerLookupFailureReason: outcome.dealerLookupFailureReason,
+  };
 }
 
 async function applyDecision(
@@ -381,7 +406,7 @@ async function applyDecision(
   form: Locator,
   plannedField: PlannedField,
   hasCountryCodeSelector: boolean,
-): Promise<{ key?: string; dealerSearch?: DealerSearchDiagnostics }> {
+): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome }> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
   switch (plannedField.decision.kind) {
     case "fill_text":
@@ -409,38 +434,11 @@ async function applyDecision(
       return { key: plannedField.matchedField };
     case "dealer_search": {
       await field.fill(plannedField.decision.postcode);
-      const trigger = await findSearchTrigger(form);
-      if (trigger) {
-        await trigger.click();
-      } else {
-        await field.press("Enter");
-      }
-      const dealerOption = await waitForDealerResult(form);
-      const dealerResultsDetected = dealerOption !== null;
-      let dealerSelected = false;
-      let dealerSelectionVerified = false;
-      if (dealerOption) {
-        await dealerOption.click();
-        dealerSelected = true;
-        dealerSelectionVerified = await verifyDealerSelectionCommitted(page, dealerOption);
-      }
-      const dealerResultsDetectedOutsideForm = dealerResultsDetected
-        ? false
-        : await page
-            .locator(DEALER_RESULT_SELECTOR)
-            .count()
-            .then((count) => count > 0)
-            .catch(() => false);
-      return {
-        key: "dealerSearch",
-        dealerSearch: {
-          postcodeSearchTriggered: true,
-          dealerResultsDetected,
-          dealerSelected,
-          dealerSelectionVerified,
-          dealerResultsDetectedOutsideForm,
-        },
-      };
+      const triggerIndex = plannedField.decision.triggerIndex;
+      const trigger = triggerIndex ? await triggerByIndex(form, triggerIndex) : null;
+      const scope = await dealerScopeFor(form, plannedField.descriptor.id);
+      const outcome = await resolveDealerLookup(page, scope, trigger, field);
+      return { key: "dealerSearch", dealerLookup: outcome };
     }
     default:
       return {};
@@ -570,26 +568,20 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const candidateEvidence: {
     index: number;
     hasCountryCodeSelector: boolean;
-    hasDealerSearchWidget: boolean;
+    dealerSearchWidgetDetected: boolean;
     textSignals: FormTextSignals;
     score: ReturnType<typeof computeFormScore>;
   }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
     const hasCountryCodeSelectorCandidate = (await candidate.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
-    // Structural, generic dealer-widget detection (a search trigger plus an accessible
-    // selectable-result container) -- never label text, which a dealer-search postcode field
-    // very often shares with a plain postcode field. See fillPlan.ts's hasDealerSearchWidget.
-    const hasDealerSearchWidgetCandidate =
-      (await findSearchTrigger(candidate)) !== null && (await candidate.locator(DEALER_RESULT_SELECTOR).count()) > 0;
-    const raw = await tagAndReadFields(candidate);
+    const raw = await tagAndReadFieldsWithDealerLookup(candidate);
     const descriptors = raw.map(toDescriptor);
-    const plan = buildFillPlan(descriptors, {
-      language,
-      market,
-      hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
-      hasDealerSearchWidget: hasDealerSearchWidgetCandidate,
-    });
+    // Structural, generic, per-field dealer-lookup detection (see dealerLookup.ts) -- never a
+    // form-wide flag, since a form can have two postcode-purpose fields (a plain customer-
+    // address postcode and a dealer-locator postcode/city) sharing identical label vocabulary.
+    const dealerSearchWidgetDetectedCandidate = descriptors.some((d) => Boolean(d.dealerLookupTriggerIndex));
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
     const actionableFieldCount = scorePlan(plan);
     const formSignals = await gatherFormSignals(candidate);
 
@@ -611,7 +603,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     candidateEvidence.push({
       index: i,
       hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
-      hasDealerSearchWidget: hasDealerSearchWidgetCandidate,
+      dealerSearchWidgetDetected: dealerSearchWidgetDetectedCandidate,
       textSignals,
       score: computeFormScore({
         journeyContext,
@@ -666,7 +658,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         fieldsDiscovered: 0,
         requiredFieldsDetected: 0,
         requiredFieldsFilled: 0,
-        dealerSearchWidgetDetected: chosenEvidence.hasDealerSearchWidget,
+        dealerSearchWidgetDetected: chosenEvidence.dealerSearchWidgetDetected,
         unmappedRequiredFieldIds: [],
         skippedFieldReasons: [],
         fieldDiagnostics: [],
@@ -680,17 +672,16 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const form = forms.nth(selection.chosenIndex);
   const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
-  const hasDealerSearchWidget = chosenEvidence.hasDealerSearchWidget;
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
   let retries = 0;
-  let dealerSearchDiagnostics: DealerSearchDiagnostics | undefined;
+  let dealerLookupOutcome: DealerLookupOutcome | undefined;
 
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
-    const raw = await tagAndReadFields(form);
+    const raw = await tagAndReadFieldsWithDealerLookup(form);
     const descriptors = raw.map(toDescriptor).filter((d) => !onlyIndices || onlyIndices.has(d.id));
-    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector, hasDealerSearchWidget });
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
     const filledIds = new Set<string>();
 
     const needingClaude = plan.filter((p) => p.decision.kind === "needs_claude");
@@ -716,7 +707,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         continue;
       }
       const outcome = await applyDecision(page, form, plannedField, hasCountryCodeSelector);
-      if (outcome.dealerSearch) dealerSearchDiagnostics = outcome.dealerSearch;
+      if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
       if (outcome.key) {
         fieldsFilled.add(outcome.key);
         filledIds.add(plannedField.descriptor.id);
@@ -727,8 +718,46 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
 
+  const dealerFieldPlanned = initialPlan.find((p) => p.matchedField === "dealerSearch");
+  const customerPostcodeFieldPlanned = initialPlan.find((p) => p.matchedField === "postcode" && p.decision.kind === "fill_text");
+  const dealerFieldHasAdjacentControl =
+    dealerFieldPlanned !== undefined && dealerFieldPlanned.decision.kind === "dealer_search" && Boolean(dealerFieldPlanned.decision.triggerIndex);
+  const dealerDiscoveryDiagnostics = {
+    customerPostcodeFieldDetected: Boolean(customerPostcodeFieldPlanned),
+    dealerLookupFieldDetected: Boolean(dealerFieldPlanned),
+    dealerLookupFieldEvidence: dealerFieldPlanned
+      ? `field "${dealerFieldPlanned.descriptor.label || dealerFieldPlanned.descriptor.id}" matched the dealer-lookup postcode/city purpose`
+      : "",
+    dealerLookupControlDetected: dealerFieldHasAdjacentControl,
+    dealerLookupControlEvidence: dealerFieldPlanned
+      ? dealerFieldHasAdjacentControl
+        ? "a structurally-adjacent lookup control (generic search/find/go/ok/select/choose vocabulary) was found next to this field"
+        : "the field matched dealer-lookup vocabulary directly; no adjacent lookup control was structurally found, falling back to Enter"
+      : "",
+  };
+
+  // Resolve every currently-visible consent radio group (see forms/consentGroups.ts) before
+  // computing final discovery diagnostics -- a consent question is very often expressed as
+  // Oui/Non-style radios whose own option labels carry no matchable keyword at all, so this never
+  // goes through the per-field matchLeadFormField pipeline above.
+  const consentResult = await resolveConsentGroups(page, form, language, fieldByIndex);
+
+  // Consent selections (or the dealer lookup) can generically reveal new required text/select
+  // fields -- one bounded catch-up pass, filling only fields not already resolved, so a field a
+  // widget only reveals after an earlier interaction is never invisible to the readiness gate.
+  const rawAfterConsent = await tagAndReadFieldsWithDealerLookup(form);
+  const descriptorsAfterConsent = rawAfterConsent.map(toDescriptor);
+  const newlyRequiredIds = new Set(
+    descriptorsAfterConsent.filter((d) => d.required && d.visible && !initialFilledIds.has(d.id)).map((d) => d.id),
+  );
+  let finalFilledIds = initialFilledIds;
+  if (newlyRequiredIds.size > 0) {
+    const { filledIds: catchUpFilledIds } = await fillAllRequired(newlyRequiredIds);
+    finalFilledIds = new Set([...initialFilledIds, ...catchUpFilledIds]);
+  }
+
   const requiredFields = initialPlan.filter((p) => p.descriptor.required && p.descriptor.visible);
-  const requiredFieldsFilled = requiredFields.filter((p) => initialFilledIds.has(p.descriptor.id)).length;
+  const requiredFieldsFilled = requiredFields.filter((p) => finalFilledIds.has(p.descriptor.id)).length;
   const actionableFields = initialPlan.filter((p) => p.decision.kind !== "skip");
   const formDiscoveryDiagnostics = {
     formsOnPage,
@@ -736,8 +765,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     fieldsDiscovered: initialPlan.length,
     requiredFieldsDetected: requiredFields.length,
     requiredFieldsFilled,
-    dealerSearchWidgetDetected: hasDealerSearchWidget,
-    unmappedRequiredFieldIds: requiredFields.filter((p) => !initialFilledIds.has(p.descriptor.id)).map((p) => p.descriptor.id),
+    dealerSearchWidgetDetected: dealerDiscoveryDiagnostics.dealerLookupFieldDetected,
+    unmappedRequiredFieldIds: requiredFields.filter((p) => !finalFilledIds.has(p.descriptor.id)).map((p) => p.descriptor.id),
     skippedFieldReasons: initialPlan
       .filter((p): p is PlannedField & { decision: { kind: "skip"; reason: string } } => p.decision.kind === "skip")
       .map((p) => ({ id: p.descriptor.id, reason: p.decision.reason })),
@@ -754,10 +783,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           : "empty") as "empty" | "has_value" | "placeholder_mimicry",
       matchedField: p.matchedField,
       decision: p.decision.kind,
-      filled: initialFilledIds.has(p.descriptor.id),
+      filled: finalFilledIds.has(p.descriptor.id),
     })),
     ...formSelectionDiagnostics,
   };
+
+  function buildDealerSearchDiagnostics(): DealerSearchDiagnostics {
+    return {
+      ...EMPTY_DEALER_SEARCH_DIAGNOSTICS,
+      ...dealerDiscoveryDiagnostics,
+      ...(dealerLookupOutcome ? dealerOutcomeToDiagnostics(dealerLookupOutcome) : {}),
+    };
+  }
 
   // Safety: never submit having filled nothing. The chosen form's fieldActionabilityScore
   // (computed at selection time, before any fill attempt) and the actual post-fill-attempt
@@ -768,7 +805,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   if (
     formSelectionDiagnostics.fieldActionabilityScore === 0 ||
     actionableFields.length === 0 ||
-    initialFilledIds.size === 0 ||
+    finalFilledIds.size === 0 ||
     (requiredFields.length > 0 && requiredFieldsFilled === 0)
   ) {
     return {
@@ -781,6 +818,69 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     };
   }
 
+  // "Never submit when the page indicates a dealer-selection step but no dealer selection has
+  // been verified" -- rather than submitting anyway and retrying afterwards (the old, user-
+  // rejected behaviour that let a site's own client-side cancellation reach production), the
+  // dealer lookup itself is retried, bounded, BEFORE Submit is ever clicked. Only once it
+  // verifies (or the bound is exhausted, in which case Submit is never clicked at all) does
+  // control reach the readiness gate below.
+  while (
+    dealerLookupOutcome !== undefined &&
+    dealerLookupOutcome.dealerLookupTriggered &&
+    !dealerLookupOutcome.dealerValueVerified &&
+    retries < MAX_RETRIES
+  ) {
+    retries += 1;
+    await rerunDealerSearch();
+  }
+
+  // Generic pre-submit readiness gate (see the "Required implementation" spec this follows):
+  // submit is allowed only when every required text/select field resolved, the dealer dependency
+  // (if any) is resolved and verified, and every currently-visible required consent group is
+  // resolved. A failure here means submit is never clicked at all.
+  const unresolvedRequiredFinal = descriptorsAfterConsent.filter((d) => d.required && d.visible && !finalFilledIds.has(d.id));
+  const dealerDependencyUnresolved =
+    dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified;
+  const preSubmitReadinessFailures: string[] = [];
+  if (unresolvedRequiredFinal.length > 0) {
+    preSubmitReadinessFailures.push(`unresolved_required_fields:${unresolvedRequiredFinal.map((d) => d.id).join(",")}`);
+  }
+  if (dealerDependencyUnresolved) {
+    preSubmitReadinessFailures.push("dealer_dependency_unresolved");
+  }
+  if (consentResult.unresolvedRequiredConsentGroups.length > 0) {
+    preSubmitReadinessFailures.push(`unresolved_required_consent_groups:${consentResult.unresolvedRequiredConsentGroups.join(",")}`);
+  }
+  const preSubmitReadinessPassed = preSubmitReadinessFailures.length === 0;
+
+  if (!preSubmitReadinessPassed) {
+    return {
+      success: false,
+      formFillOutcome: "form_validation_failed",
+      formRetriesUsed: retries,
+      formValidationMissingFields: unresolvedRequiredFinal.map((d) => d.id),
+      formFieldsFilled: [...fieldsFilled],
+      formMarketDetected: market,
+      formLanguageDetected: language,
+      formClaudeCallUsed: claudeCallUsed,
+      formDiscoveryDiagnostics,
+      formDealerSearchDiagnostics: buildDealerSearchDiagnostics(),
+      formConsentDiagnostics: consentResult,
+      formPostSubmitDiagnostics: {
+        submitCanceled: true,
+        invalidFieldIds: unresolvedRequiredFinal.map((d) => d.id),
+        nativeValidationMessages: {},
+        postSubmitValidationMessages: [],
+        retryDecision: dealerDependencyUnresolved
+          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified`
+          : "not retried: submit was never attempted, the pre-submit readiness gate failed",
+        preSubmitReadinessPassed: false,
+        preSubmitReadinessFailures,
+        submitAttempted: false,
+      },
+    };
+  }
+
   const submitControl = await findSubmitControl(form);
   if (!submitControl) {
     return { success: false, error: "no_submit_control_found", formDiscoveryDiagnostics };
@@ -790,13 +890,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const beforeUrl = page.url();
 
   async function rerunDealerSearch(): Promise<void> {
-    const raw = await tagAndReadFields(form);
+    const raw = await tagAndReadFieldsWithDealerLookup(form);
     const descriptors = raw.map(toDescriptor);
-    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector, hasDealerSearchWidget });
+    const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
     const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
     if (!dealerField) return;
     const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector);
-    if (outcome.dealerSearch) dealerSearchDiagnostics = outcome.dealerSearch;
+    if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
   }
 
   async function attemptSubmit(): Promise<{ postSubmit: PostSubmitDiagnostics; succeeded: boolean; afterUrl: string }> {
@@ -828,7 +928,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // re-fill. With neither, a retry would just resubmit the exact same state, so it's refused
   // rather than burning the bounded retry budget pretending to fix something.
   while (!attempt.succeeded && retries < MAX_RETRIES) {
-    const dealerUncommitted = dealerSearchDiagnostics !== undefined && !dealerSearchDiagnostics.dealerSelectionVerified;
+    const dealerUncommitted = dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified;
     const correctiveActionAvailable = dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0;
 
     if (!correctiveActionAvailable) {
@@ -839,7 +939,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     retries += 1;
     if (dealerUncommitted) {
       await rerunDealerSearch();
-      retryDecision = `retried ${retries}/${MAX_RETRIES}: re-ran the dealer search/select/verify flow after an uncommitted selection`;
+      retryDecision = `retried ${retries}/${MAX_RETRIES}: re-ran the dealer lookup/select/verify flow after an uncommitted selection`;
     } else {
       await fillAllRequired(new Set(attempt.postSubmit.invalidFieldIds));
       retryDecision = `retried ${retries}/${MAX_RETRIES}: re-read live validation state and re-filled ${attempt.postSubmit.invalidFieldIds.join(", ")}`;
@@ -852,13 +952,16 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // with explicit false defaults rather than being silently omitted from the serialized
   // response, which previously made "the dealer flow never activated" indistinguishable from
   // "it activated and every step came back false".
-  const formDealerSearchDiagnostics = dealerSearchDiagnostics ?? EMPTY_DEALER_SEARCH_DIAGNOSTICS;
+  const formDealerSearchDiagnostics = buildDealerSearchDiagnostics();
   const formPostSubmitDiagnostics = {
     submitCanceled: !attempt.succeeded,
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
     nativeValidationMessages: attempt.postSubmit.nativeValidationMessages,
     postSubmitValidationMessages: attempt.postSubmit.postSubmitValidationMessages,
     retryDecision,
+    preSubmitReadinessPassed: true,
+    preSubmitReadinessFailures: [] as string[],
+    submitAttempted: true,
   };
 
   if (!attempt.succeeded) {
@@ -873,6 +976,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
       formDealerSearchDiagnostics,
+      formConsentDiagnostics: consentResult,
       formPostSubmitDiagnostics,
     };
   }
@@ -891,6 +995,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formClaudeCallUsed: claudeCallUsed,
     formDiscoveryDiagnostics,
     formDealerSearchDiagnostics,
+    formConsentDiagnostics: consentResult,
     formPostSubmitDiagnostics,
   };
 }

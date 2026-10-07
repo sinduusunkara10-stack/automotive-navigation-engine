@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis</title>
+  </head>
+  <body>
+    <h1>Demande de devis</h1>
+    <form id="lead-form">
+      <label for="first-name">Prénom</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nom</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">E-mail</label>
+      <input type="email" id="email" name="email" required />
+
+      <p>Souhaitez-vous recevoir nos communications personnalisées ?</p>
+      <label><input type="radio" name="consentA" value="yes" id="consentA-yes" /> Oui</label>
+      <label><input type="radio" name="consentA" value="no" id="consentA-no" /> Non</label>
+
+      <p>Souhaitez-vous bénéficier des offres de nos partenaires ?</p>
+      <label><input type="radio" name="consentB" value="yes" id="consentB-yes" /> Oui</label>
+      <label><input type="radio" name="consentB" value="no" id="consentB-no" /> Non</label>
+
+      <div id="conditional-consent" hidden>
+        <p>Acceptez-vous le partage avec des tiers sélectionnés ?</p>
+        <label><input type="radio" name="consentC" value="yes" id="consentC-yes" /> Oui</label>
+        <label><input type="radio" name="consentC" value="no" id="consentC-no" /> Non</label>
+      </div>
+
+      <div id="confirmation" style="display: none">Merci ! Nous vous recontacterons.</div>
+      <button type="submit" id="submit-lead">Valider</button>
+    </form>
+    <script>
+      // Neither consent group carries required/aria-required -- real sites routinely enforce
+      // this only via their own JS, never the HTML attribute -- and every option is labelled
+      // only "Oui"/"Non", so the field-level keyword matcher (which only ever reads a field's
+      // own label) can never identify these at all. Selecting consentA reveals a THIRD,
+      // conditional group that must also be resolved before Valider commits.
+      document.getElementById("consentA-yes").addEventListener("change", () => {
+        document.getElementById("conditional-consent").hidden = false;
+      });
+      document.getElementById("consentA-no").addEventListener("change", () => {
+        document.getElementById("conditional-consent").hidden = false;
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const allChecked = ["consentA", "consentB", "consentC"].every(
+          (name) => document.querySelector(`input[name="${name}"]:checked`) !== null,
+        );
+        if (!allChecked) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

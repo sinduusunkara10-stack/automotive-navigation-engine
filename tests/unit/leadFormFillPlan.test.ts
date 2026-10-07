@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { planField, type FormFieldDescriptor, type FillPlanContext } from "../../src/forms/fillPlan.js";
 
-const CTX: FillPlanContext = { language: "en", market: "UK", hasCountryCodeSelector: false, hasDealerSearchWidget: false };
+const CTX: FillPlanContext = { language: "en", market: "UK", hasCountryCodeSelector: false };
 
 function field(overrides: Partial<FormFieldDescriptor>): FormFieldDescriptor {
   return {
@@ -104,19 +104,26 @@ test("fill rules: a dealer-search field is filled with the market postcode and f
   assert.deepEqual(result.decision, { kind: "dealer_search", postcode: "SW1A 1AA" });
 });
 
-test("fill rules: a plainly-labelled postcode field is upgraded to dealer_search when the form structurally has a dealer-search widget", () => {
-  const withWidget: FillPlanContext = { ...CTX, hasDealerSearchWidget: true };
-  const result = planField(field({ label: "Postcode" }), withWidget);
+test("fill rules: a plainly-labelled postcode field is upgraded to dealer_search when IT SPECIFICALLY has a structurally-adjacent lookup control", () => {
+  const withTrigger = field({ label: "Postcode", dealerLookupTriggerIndex: "trigger-0" });
+  const result = planField(withTrigger, CTX);
   assert.deepEqual(result, {
-    descriptor: field({ label: "Postcode" }),
+    descriptor: withTrigger,
     matchedField: "dealerSearch",
-    decision: { kind: "dealer_search", postcode: "SW1A 1AA" },
+    decision: { kind: "dealer_search", postcode: "SW1A 1AA", triggerIndex: "trigger-0" },
   });
 });
 
-test("fill rules: a plainly-labelled postcode field stays a plain fill_text when no dealer-search widget is structurally detected", () => {
+test("fill rules: a plainly-labelled postcode field stays a plain fill_text when it has no structurally-adjacent lookup control", () => {
   const result = planField(field({ label: "Postcode" }), CTX);
   assert.deepEqual(result.decision, { kind: "fill_text", field: "postcode", value: "SW1A 1AA" });
+});
+
+test("fill rules: two postcode-purpose fields on the same form are judged independently -- only the one with its own adjacent lookup control is upgraded", () => {
+  const customerPostcode = field({ id: "0", label: "Code postal" });
+  const dealerPostcode = field({ id: "1", label: "CP ou ville", dealerLookupTriggerIndex: "trigger-3" });
+  assert.deepEqual(planField(customerPostcode, CTX).decision, { kind: "fill_text", field: "postcode", value: "SW1A 1AA" });
+  assert.deepEqual(planField(dealerPostcode, CTX).decision, { kind: "dealer_search", postcode: "SW1A 1AA", triggerIndex: "trigger-3" });
 });
 
 test("fill rules: landline vs mobile use the right per-market value, national vs international by country-code-selector presence", () => {
