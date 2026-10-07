@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Find stock near you</title>
+  </head>
+  <body>
+    <div id="location-gate">
+      <h1>Find stock near you</h1>
+      <label for="gate-postcode">Enter your postcode</label>
+      <input type="text" id="gate-postcode" name="gatePostcode" />
+      <button
+        type="button"
+        id="gate-continue"
+        onclick="document.getElementById('location-gate').style.display='none'; document.getElementById('stock-results').style.display='block';"
+      >
+        Continue
+      </button>
+    </div>
+    <div id="stock-results" style="display: none">
+      <h2>Stock results</h2>
+      <form id="lead-form" method="get" action="/lead-form-thank-you.html">
+        <label for="first-name">First name</label>
+        <input type="text" id="first-name" name="firstName" required />
+        <label for="last-name">Last name</label>
+        <input type="text" id="last-name" name="lastName" required />
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required />
+        <label for="form-postcode">Postcode</label>
+        <input type="text" id="form-postcode" name="postcode" required />
+        <button type="submit" id="submit-lead">Submit</button>
+      </form>
+    </div>
+  </body>
+</html>

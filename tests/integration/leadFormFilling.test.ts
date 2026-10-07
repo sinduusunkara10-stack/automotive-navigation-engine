@@ -1010,3 +1010,149 @@ test("fill_form: a dependent select that only gains real options after an earlie
     await close();
   }
 });
+
+test("fill_form: a basic location/postcode gate outside any form is detected, filled, and passed before the no-form-found check", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/location-gate-basic.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.error, "no_form_found");
+    assert.deepEqual(result.formLocationGateDiagnostics, {
+      locationGateDetected: true,
+      locationGateInputFilled: true,
+      locationGateSuggestionsDetected: false,
+      locationGateSuggestionSelected: false,
+      locationGateRadiusControlDetected: false,
+      locationGateRadiusControlResolved: false,
+      locationGateContinueControlFound: true,
+      locationGateContinueClicked: true,
+      locationGatePassed: true,
+    });
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a location gate with no gate at all reports formLocationGateDiagnostics with every flag false", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-url-success.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.deepEqual(result.formLocationGateDiagnostics, {
+      locationGateDetected: false,
+      locationGateInputFilled: false,
+      locationGateSuggestionsDetected: false,
+      locationGateSuggestionSelected: false,
+      locationGateRadiusControlDetected: false,
+      locationGateRadiusControlResolved: false,
+      locationGateContinueControlFound: false,
+      locationGateContinueClicked: false,
+      locationGatePassed: false,
+    });
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a location gate requiring a selected suggestion before Continue works is only passed once a suggestion is selected", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/location-gate-suggestions.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.error, "no_form_found");
+    assert.equal(result.formLocationGateDiagnostics?.locationGateDetected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGateSuggestionsDetected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGateSuggestionSelected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGatePassed, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a location gate with a search-radius select only passes once the radius is resolved to a valid option", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/location-gate-radius.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.error, "no_form_found");
+    assert.equal(result.formLocationGateDiagnostics?.locationGateDetected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGateRadiusControlDetected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGateRadiusControlResolved, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGatePassed, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: a location gate and a lead form on the same page never share fields -- the gate's own postcode input is never confused with the form's own postcode field", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/location-gate-with-lead-form.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formLocationGateDiagnostics?.locationGateDetected, true);
+    assert.equal(result.formLocationGateDiagnostics?.locationGatePassed, true);
+    const url = new URL(result.resultingUrl!);
+    assert.equal(url.searchParams.get("postcode"), "SW1A 1AA");
+    assert.equal(url.searchParams.get("firstName"), "Test");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

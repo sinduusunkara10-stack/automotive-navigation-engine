@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Find stock near you</title>
+  </head>
+  <body>
+    <h1>Find stock near you</h1>
+    <div id="location-gate">
+      <label for="gate-postcode">Enter your location</label>
+      <input type="text" id="gate-postcode" name="gatePostcode" oninput="document.getElementById('gate-suggestions').style.display='block';" />
+      <ul id="gate-suggestions" role="listbox" style="display: none">
+        <li
+          role="option"
+          tabindex="0"
+          onclick="document.getElementById('gate-suggestions').style.display='none'; document.getElementById('gate-postcode').dataset.confirmed='true';"
+        >
+          SW1A 1AA, London
+        </li>
+      </ul>
+      <button
+        type="button"
+        id="gate-continue"
+        onclick="if (document.getElementById('gate-postcode').dataset.confirmed === 'true') { document.getElementById('location-gate').style.display='none'; document.getElementById('stock-results').style.display='block'; }"
+      >
+        Continue
+      </button>
+    </div>
+    <div id="stock-results" style="display: none">
+      <h2>Stock results</h2>
+    </div>
+  </body>
+</html>
