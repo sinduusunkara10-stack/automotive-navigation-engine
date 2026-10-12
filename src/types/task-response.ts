@@ -483,6 +483,83 @@ export interface ActionResult {
     }[];
   };
   /**
+   * Opt-in, investigation-only evidence for a `fill_form` action -- present only when the
+   * engine process has FORM_DISCOVERY_DIAGNOSTIC=1 set (see src/diagnostics/
+   * formDiscoveryDiagnostic.ts). Absent whenever that env var is unset; never affects
+   * form-selection scoring, thresholds, or fill/submit behaviour, which are computed
+   * identically either way. Exists so a form_discovery_failed (or any fill_form) run is
+   * diagnosable from the API response alone, without reproducing it or reading a local file.
+   * Never carries typed field values, email addresses, phone numbers, or other submitted
+   * personal data -- only structural/positional/scoring evidence.
+   */
+  formDiscoveryDebug?: {
+    enabled: true;
+    runId: string;
+    taskId: string;
+    capturedAt: string;
+    pageUrl: string;
+    pageTitle: string;
+    captureStage: string;
+    activeSurfaceKind: string;
+    activeSurfaceId: string | null;
+    journeyContext: {
+      objective: string | null;
+      activeMilestoneTexts: string[];
+      /** The value actually fed into form-selection scoring at this call -- identical to lastClickLabelAtCapture by construction (both read state.lastClickLabel at the same point). */
+      previousActionLabel: string | null;
+      lastClickLabelAtCapture: string | null;
+      /** The accessible name of the most recent click whose dispatch was classified interactionOutcome "NAVIGATION" (see RunState.journeyAnchorCtaLabel) -- a best-effort "what CTA actually got us to this page" signal, independent of lastClickLabel's overwrite-on-every-click behaviour. */
+      journeyAnchorCtaLabel: string | null;
+      /** True when previousActionLabel still equals journeyAnchorCtaLabel (the navigating CTA's own label was not clobbered by a later, non-navigating click before fill_form ran); false, with replacementLabel set, when it was. Absent when journeyAnchorCtaLabel itself was never recorded (no navigating click observed yet this run). */
+      ctaPreserved?: boolean;
+      replacementLabel?: string | null;
+    };
+    candidates: {
+      index: number;
+      id: string | null;
+      name: string | null;
+      className: string | null;
+      action: string | null;
+      visible: boolean;
+      boundingBox: { x: number; y: number; width: number; height: number };
+      /** Best-effort, generic: this form (or an ancestor) sits inside what looks like an overlay/drawer/modal container (fixed/absolute/sticky positioning with a raised stacking context, or a role=dialog/aria-modal ancestor) -- not a precise match against the engine's own in_document surface tracking, which fill_form does not have access to. */
+      withinOverlayLikeContainer: boolean;
+      fieldsInSubtree: number;
+      fieldsAssociatedViaFormAttribute: number;
+      totalEffectiveFieldCount: number;
+      journeyRelevanceScore: number;
+      visibilityProminenceScore: number;
+      fieldActionabilityScore: number;
+      totalFormScore: number;
+      fields: {
+        tag: string;
+        type: string | null;
+        id: string | null;
+        name: string | null;
+        placeholder: string | null;
+        label: string | null;
+        required: boolean;
+        visible: boolean;
+        disabled: boolean;
+        readonly: boolean;
+        closestFormIndex: number | null;
+        formAttr: string | null;
+        boundingBox: { x: number; y: number; width: number; height: number };
+      }[];
+    }[];
+    selection: {
+      selectedFormIndex: number | null;
+      runnerUpIndex: number | null;
+      runnerUpScore: number | null;
+      adoptThreshold: number;
+      rejectThreshold: number;
+      ambiguityMargin: number;
+      belowConfidenceThreshold: boolean;
+      ambiguous: boolean;
+      rejectionReason: string;
+    };
+  };
+  /**
    * Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a
    * `dealer_search` decision drives -- present (with explicit false defaults) whenever a
    * submit was attempted, even if no field was ever mapped to the `dealerSearch` decision, so
@@ -1590,7 +1667,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.43.0";
+  schemaVersion: "1.44.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

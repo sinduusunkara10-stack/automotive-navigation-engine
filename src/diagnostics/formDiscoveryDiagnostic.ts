@@ -1,190 +1,276 @@
 import type { Page } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ActionResult, ActiveSurfaceInfo } from "../types/task-response.js";
+import type { FormJourneyContext, FormScoreBreakdown } from "../forms/formRelevance.js";
+import { FORM_SELECTION_ADOPT_THRESHOLD, FORM_SELECTION_REJECT_THRESHOLD } from "../forms/formRelevance.js";
 
 /**
- * TEMPORARY, investigation-only instrumentation (not part of the wire contract, not wired
- * into ActionResult/schemas). Gated entirely behind FORM_DISCOVERY_DIAGNOSTIC=1 so a normal
- * run's behavior and output are byte-for-byte unchanged when the flag is unset. Exists only
- * to capture frame/shadow-DOM/field evidence from the next real run against a page where
- * fill_form reports form_discovery_failed with fieldsDiscovered: 0, since this sandbox's
- * network policy cannot reach arbitrary external sites to capture that evidence directly.
- * Remove this file and its two call sites in actions/fillForm.ts once the real root cause is
- * confirmed from a captured report.
+ * Opt-in, investigation-only form-discovery evidence (see ActionResult.formDiscoveryDebug in
+ * types/task-response.ts and schemas/task-response.schema.json). Gated entirely behind
+ * FORM_DISCOVERY_DIAGNOSTIC=1 so a normal run's behavior and response shape are byte-for-byte
+ * unchanged when the flag is unset -- never reads or writes anything that affects
+ * form-selection scoring, thresholds, or fill/submit logic, all of which are computed
+ * identically either way, before this module is ever consulted.
+ *
+ * Primary exposure channel is the API response itself (ActionResult.formDiscoveryDebug),
+ * reaching whatever reads the task's actions (e.g. an n8n "Extract Navigation Result" node)
+ * without needing filesystem access to the engine's container. Two concise log lines are also
+ * emitted so Render's log viewer can confirm the flag was read and a payload was built, without
+ * needing to inspect the response at all. The local JSON file remains as an optional backup
+ * only -- never the only channel.
  */
-export const FORM_DISCOVERY_DIAGNOSTIC_ENABLED = process.env.FORM_DISCOVERY_DIAGNOSTIC === "1";
-
-interface FrameFieldSnapshot {
-  url: string;
-  isMainFrame: boolean;
-  sameOriginAsMain: boolean;
-  formCount: number;
-  inputCount: number;
-  selectCount: number;
-  textareaCount: number;
-  forms: {
-    index: number;
-    id: string | null;
-    className: string | null;
-    name: string | null;
-    action: string | null;
-    visible: boolean;
-    fieldCountInsideSubtree: number;
-  }[];
-  shadowHostCount: number;
-  openShadowRootControlCount: number;
+/** Read live (never cached at import time) so a test can toggle process.env.FORM_DISCOVERY_DIAGNOSTIC within one process; production behavior is identical to a frozen const, since this is called at most a few times per fill_form action. */
+export function isFormDiscoveryDiagnosticEnabled(): boolean {
+  return process.env.FORM_DISCOVERY_DIAGNOSTIC === "1";
 }
 
-interface FieldDetail {
+/** Emits once per fill_form call, only when enabled -- proves the env var was read at runtime. */
+export function logFormDiscoveryDiagnosticEnabled(params: { runId: string; taskId: string }): void {
+  if (!isFormDiscoveryDiagnosticEnabled()) return;
+  // eslint-disable-next-line no-console
+  console.log(`FORM_DISCOVERY_DIAGNOSTIC_ENABLED runId=${params.runId} taskId=${params.taskId}`);
+}
+
+/** Emits once per captured payload, only when enabled -- never prints typed field values or other submitted personal data. */
+export function logFormDiscoveryDiagnosticEmitted(params: { runId: string; taskId: string; failureReason: string }): void {
+  if (!isFormDiscoveryDiagnosticEnabled()) return;
+  // eslint-disable-next-line no-console
+  console.log(`FORM_DISCOVERY_DIAGNOSTIC_EMITTED runId=${params.runId} taskId=${params.taskId} failureReason=${params.failureReason}`);
+}
+
+interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface DebugField {
   tag: string;
   type: string | null;
-  name: string | null;
   id: string | null;
+  name: string | null;
   placeholder: string | null;
   label: string | null;
   required: boolean;
+  visible: boolean;
   disabled: boolean;
   readonly: boolean;
+  closestFormIndex: number | null;
   formAttr: string | null;
-  closestFormId: string | null;
-  boundingBox: { x: number; y: number; w: number; h: number };
+  boundingBox: BoundingBox;
+}
+
+interface DebugCandidate {
+  index: number;
+  id: string | null;
+  name: string | null;
+  className: string | null;
+  action: string | null;
   visible: boolean;
-}
-
-async function snapshotFrame(page: Page): Promise<FrameFieldSnapshot[]> {
-  const mainFrame = page.mainFrame();
-  const mainOrigin = new URL(page.url()).origin;
-  const out: FrameFieldSnapshot[] = [];
-  for (const frame of page.frames()) {
-    try {
-      const data = await frame.evaluate(() => {
-        function visible(el: Element): boolean {
-          const r = el.getBoundingClientRect();
-          const style = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-        }
-        const forms = Array.from(document.querySelectorAll("form"));
-        const shadowHosts = Array.from(document.querySelectorAll<HTMLElement>("*")).filter((el) => el.shadowRoot !== null);
-        let openShadowRootControlCount = 0;
-        for (const host of shadowHosts) {
-          openShadowRootControlCount += host.shadowRoot!.querySelectorAll("input, select, textarea").length;
-        }
-        return {
-          url: location.href,
-          formCount: forms.length,
-          inputCount: document.querySelectorAll("input").length,
-          selectCount: document.querySelectorAll("select").length,
-          textareaCount: document.querySelectorAll("textarea").length,
-          forms: forms.map((f, i) => ({
-            index: i,
-            id: f.id || null,
-            className: f.className || null,
-            name: f.getAttribute("name"),
-            action: f.getAttribute("action"),
-            visible: visible(f),
-            fieldCountInsideSubtree: f.querySelectorAll("input, select, textarea").length,
-          })),
-          shadowHostCount: shadowHosts.length,
-          openShadowRootControlCount,
-        };
-      });
-      let frameOrigin: string | null = null;
-      try {
-        frameOrigin = new URL(frame.url()).origin;
-      } catch {
-        frameOrigin = null;
-      }
-      out.push({
-        ...data,
-        isMainFrame: frame === mainFrame,
-        sameOriginAsMain: frameOrigin === mainOrigin,
-      });
-    } catch (e) {
-      out.push({
-        url: frame.url(),
-        isMainFrame: frame === mainFrame,
-        sameOriginAsMain: false,
-        formCount: -1,
-        inputCount: -1,
-        selectCount: -1,
-        textareaCount: -1,
-        forms: [],
-        shadowHostCount: -1,
-        openShadowRootControlCount: -1,
-        // @ts-expect-error -- diagnostic-only field, not part of the typed shape above
-        error: String(e),
-      });
-    }
-  }
-  return out;
-}
-
-async function fieldDetail(page: Page): Promise<FieldDetail[]> {
-  return page.evaluate(() => {
-    function visible(el: Element): boolean {
-      const r = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-    }
-    const els = Array.from(document.querySelectorAll("input, select, textarea")) as (HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)[];
-    return els.map((el) => {
-      const label =
-        (el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.textContent?.trim()) ||
-        el.closest("label")?.textContent?.trim() ||
-        null;
-      const r = el.getBoundingClientRect();
-      return {
-        tag: el.tagName.toLowerCase(),
-        type: el.getAttribute("type"),
-        name: el.getAttribute("name"),
-        id: el.id || null,
-        placeholder: el.getAttribute("placeholder"),
-        label: label ?? null,
-        required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
-        disabled: (el as HTMLInputElement).disabled ?? false,
-        readonly: (el as HTMLInputElement).readOnly ?? false,
-        formAttr: el.getAttribute("form"),
-        closestFormId: el.closest("form")?.id || (el.closest("form") ? "(form,no-id)" : null),
-        boundingBox: { x: r.x, y: r.y, w: r.width, h: r.height },
-        visible: visible(el),
-      };
-    });
-  });
+  boundingBox: BoundingBox;
+  withinOverlayLikeContainer: boolean;
+  fieldsInSubtree: number;
+  fieldsAssociatedViaFormAttribute: number;
+  totalEffectiveFieldCount: number;
+  fields: DebugField[];
 }
 
 /**
- * Captures one labeled evidence snapshot (frames + field detail) and appends it to an
- * in-memory report; call captureFormDiscoveryDiagnostic multiple times across the run
- * (entry, post-settle, pre-return) then call writeFormDiscoveryDiagnosticReport once at the end.
+ * One rich, self-contained DOM read per candidate form (by document-order index, matching how
+ * fillForm.ts's own `forms.nth(i)` addresses it) -- bounding box, visibility, an id/name/class/
+ * action identity, a generic overlay/drawer/modal-container heuristic (fixed/absolute/sticky
+ * positioning with a raised stacking context, or a role=dialog/aria-modal ancestor -- this
+ * module has no access to the engine's own in_document surface tracking, so this is a
+ * best-effort generic substitute, not a precise match against it), and full field evidence for
+ * every input/select/textarea either inside the form's own DOM subtree or elsewhere on the page
+ * with a `form="<this form's id>"` attribute (deduplicated by element identity). Never reads a
+ * field's current value.
  */
-export interface FormDiscoveryDiagnosticReport {
-  url: string;
-  startedAt: string;
-  snapshots: { label: string; at: string; frames: FrameFieldSnapshot[] }[];
-  finalFieldDetail?: FieldDetail[];
-  extra?: Record<string, unknown>;
+async function captureCandidateDebug(page: Page, index: number): Promise<DebugCandidate> {
+  // Every "helper" below is deliberately inlined with no named function/const declaration of
+  // its own (duplicated at each use site instead) -- a named helper called by name from inside
+  // a page.evaluate callback is wrapped in a dev-time __name(...) call by this repo's tsx/
+  // esbuild toolchain, which is missing at browser-serialize time and throws
+  // "ReferenceError: __name is not defined" (a recurring, documented repo-wide gotcha).
+  return page.evaluate((idx) => {
+    const forms = Array.from(document.querySelectorAll("form"));
+    const form = forms[idx];
+    if (!form) {
+      return {
+        index: idx,
+        id: null,
+        name: null,
+        className: null,
+        action: null,
+        visible: false,
+        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+        withinOverlayLikeContainer: false,
+        fieldsInSubtree: 0,
+        fieldsAssociatedViaFormAttribute: 0,
+        totalEffectiveFieldCount: 0,
+        fields: [],
+      };
+    }
+
+    const subtreeFields = Array.from(form.querySelectorAll("input, select, textarea"));
+    const formAttrFields =
+      form.id && typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? Array.from(document.querySelectorAll(`input[form="${CSS.escape(form.id)}"], select[form="${CSS.escape(form.id)}"], textarea[form="${CSS.escape(form.id)}"]`)).filter(
+            (el) => !subtreeFields.includes(el),
+          )
+        : [];
+    const allFields = [...subtreeFields, ...formAttrFields];
+
+    const formRect = form.getBoundingClientRect();
+    const formStyle = getComputedStyle(form);
+    const formVisible = formRect.width > 0 && formRect.height > 0 && formStyle.visibility !== "hidden" && formStyle.display !== "none";
+
+    let overlayNode: Element | null = form;
+    let withinOverlay = false;
+    while (overlayNode && overlayNode !== document.body) {
+      if (overlayNode.getAttribute("role") === "dialog" || overlayNode.getAttribute("aria-modal") === "true" || overlayNode.tagName === "DIALOG") {
+        withinOverlay = true;
+        break;
+      }
+      const ancestorStyle = getComputedStyle(overlayNode);
+      const z = Number(ancestorStyle.zIndex);
+      if ((ancestorStyle.position === "fixed" || ancestorStyle.position === "sticky") && ancestorStyle.zIndex !== "auto" && !Number.isNaN(z) && z > 0) {
+        withinOverlay = true;
+        break;
+      }
+      overlayNode = overlayNode.parentElement;
+    }
+
+    return {
+      index: idx,
+      id: form.id || null,
+      name: form.getAttribute("name"),
+      className: form.className || null,
+      action: form.getAttribute("action"),
+      visible: formVisible,
+      boundingBox: { x: formRect.x, y: formRect.y, width: formRect.width, height: formRect.height },
+      withinOverlayLikeContainer: withinOverlay,
+      fieldsInSubtree: subtreeFields.length,
+      fieldsAssociatedViaFormAttribute: formAttrFields.length,
+      totalEffectiveFieldCount: allFields.length,
+      fields: allFields.map((el) => {
+        const inputEl = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+        const id = inputEl.id || null;
+        const label = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim()) || el.closest("label")?.textContent?.trim() || null;
+        const closestForm = el.closest("form");
+        const fieldRect = el.getBoundingClientRect();
+        const fieldStyle = getComputedStyle(el);
+        const fieldVisible = fieldRect.width > 0 && fieldRect.height > 0 && fieldStyle.visibility !== "hidden" && fieldStyle.display !== "none";
+        return {
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute("type"),
+          id,
+          name: el.getAttribute("name"),
+          placeholder: el.getAttribute("placeholder"),
+          label,
+          required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
+          visible: fieldVisible,
+          disabled: Boolean((inputEl as HTMLInputElement).disabled),
+          readonly: Boolean((inputEl as HTMLInputElement).readOnly),
+          closestFormIndex: closestForm ? forms.indexOf(closestForm) : null,
+          formAttr: el.getAttribute("form"),
+          boundingBox: { x: fieldRect.x, y: fieldRect.y, width: fieldRect.width, height: fieldRect.height },
+        };
+      }),
+    };
+  }, index);
 }
 
-export function createFormDiscoveryDiagnosticReport(url: string): FormDiscoveryDiagnosticReport {
-  return { url, startedAt: new Date().toISOString(), snapshots: [] };
+export interface BuildFormDiscoveryDebugParams {
+  page: Page;
+  taskId: string;
+  journeyContext: FormJourneyContext | undefined;
+  currentLastClickLabel: string | undefined;
+  activeSurfaceInfo: ActiveSurfaceInfo | undefined;
+  captureStage: string;
+  candidateIndexes: number[];
+  /** Per-candidate score, keyed by the same index as candidateIndexes, from the already-computed candidateEvidence in fillForm.ts (never recomputed here). */
+  scoresByIndex: Map<number, FormScoreBreakdown>;
+  selection: {
+    selectedFormIndex: number | null;
+    runnerUpIndex: number | null;
+    runnerUpScore: number | null;
+    belowConfidenceThreshold: boolean;
+    ambiguous: boolean;
+    rejectionReason: string;
+  };
 }
 
-export async function captureFormDiscoverySnapshot(page: Page, report: FormDiscoveryDiagnosticReport, label: string): Promise<void> {
-  if (!FORM_DISCOVERY_DIAGNOSTIC_ENABLED) return;
-  const frames = await snapshotFrame(page);
-  report.snapshots.push({ label, at: new Date().toISOString(), frames });
+/** Builds the full ActionResult.formDiscoveryDebug payload -- a pure read, no production-behavior side effects. */
+export async function buildFormDiscoveryDebug(params: BuildFormDiscoveryDebugParams): Promise<NonNullable<ActionResult["formDiscoveryDebug"]>> {
+  const { page, taskId, journeyContext, currentLastClickLabel, activeSurfaceInfo, captureStage, candidateIndexes, scoresByIndex, selection } = params;
+
+  const candidates = await Promise.all(
+    candidateIndexes.map(async (index) => {
+      const debug = await captureCandidateDebug(page, index);
+      const score = scoresByIndex.get(index);
+      return {
+        ...debug,
+        journeyRelevanceScore: score?.journeyRelevanceScore ?? 0,
+        visibilityProminenceScore: score?.visibilityProminenceScore ?? 0,
+        fieldActionabilityScore: score?.fieldActionabilityScore ?? 0,
+        totalFormScore: score?.totalFormScore ?? 0,
+      };
+    }),
+  );
+
+  const anchorLabel = journeyContext?.previousActionLabel ?? null;
+  const anchorCta = journeyContext?.journeyAnchorCtaLabel ?? null;
+  const ctaPreservedPart =
+    anchorCta !== null
+      ? anchorLabel === anchorCta
+        ? { ctaPreserved: true as const }
+        : { ctaPreserved: false as const, replacementLabel: anchorLabel }
+      : {};
+
+  return {
+    enabled: true,
+    runId: taskId,
+    taskId,
+    capturedAt: new Date().toISOString(),
+    pageUrl: page.url(),
+    pageTitle: await page.title().catch(() => ""),
+    captureStage,
+    activeSurfaceKind: activeSurfaceInfo?.kind ?? "main",
+    activeSurfaceId: activeSurfaceInfo?.identity ?? null,
+    journeyContext: {
+      objective: journeyContext?.objective ?? null,
+      activeMilestoneTexts: journeyContext?.activeMilestoneTexts ?? [],
+      previousActionLabel: anchorLabel,
+      lastClickLabelAtCapture: currentLastClickLabel ?? null,
+      journeyAnchorCtaLabel: anchorCta,
+      ...ctaPreservedPart,
+    },
+    candidates,
+    selection: {
+      selectedFormIndex: selection.selectedFormIndex,
+      runnerUpIndex: selection.runnerUpIndex,
+      runnerUpScore: selection.runnerUpScore,
+      adoptThreshold: FORM_SELECTION_ADOPT_THRESHOLD,
+      rejectThreshold: FORM_SELECTION_REJECT_THRESHOLD,
+      ambiguityMargin: 0.1,
+      belowConfidenceThreshold: selection.belowConfidenceThreshold,
+      ambiguous: selection.ambiguous,
+      rejectionReason: selection.rejectionReason,
+    },
+  };
 }
 
-export async function finalizeFormDiscoveryDiagnostic(
-  page: Page,
-  report: FormDiscoveryDiagnosticReport,
-  extra?: Record<string, unknown>,
-): Promise<void> {
-  if (!FORM_DISCOVERY_DIAGNOSTIC_ENABLED) return;
-  report.finalFieldDetail = await fieldDetail(page).catch(() => []);
-  report.extra = extra;
-  const dir = join(process.cwd(), "diagnostics", "form-discovery");
-  await mkdir(dir, { recursive: true });
-  const file = join(dir, `${Date.now()}.json`);
-  await writeFile(file, JSON.stringify(report, null, 2), "utf8");
+/** Optional local-file backup only -- never the primary exposure channel (see ActionResult.formDiscoveryDebug above). Failures here are swallowed; they must never affect the action's own result. */
+export async function writeFormDiscoveryDebugBackup(debug: NonNullable<ActionResult["formDiscoveryDebug"]>): Promise<void> {
+  if (!isFormDiscoveryDiagnosticEnabled()) return;
+  try {
+    const dir = join(process.cwd(), "diagnostics", "form-discovery");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `${Date.now()}.json`), JSON.stringify(debug, null, 2), "utf8");
+  } catch {
+    // Optional backup only -- never fail or affect the action's own result.
+  }
 }

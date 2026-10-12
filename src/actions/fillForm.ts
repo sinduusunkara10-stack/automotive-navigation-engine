@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
-import type { ActionExecutorResult } from "../types/task-response.js";
+import type { ActionExecutorResult, ActiveSurfaceInfo } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -24,10 +24,11 @@ import {
   type DealerLookupOutcome,
 } from "./dealerLookup.js";
 import {
-  captureFormDiscoverySnapshot,
-  createFormDiscoveryDiagnosticReport,
-  finalizeFormDiscoveryDiagnostic,
-  FORM_DISCOVERY_DIAGNOSTIC_ENABLED,
+  buildFormDiscoveryDebug,
+  isFormDiscoveryDiagnosticEnabled,
+  logFormDiscoveryDiagnosticEmitted,
+  logFormDiscoveryDiagnosticEnabled,
+  writeFormDiscoveryDebugBackup,
 } from "../diagnostics/formDiscoveryDiagnostic.js";
 import {
   computeFormScore,
@@ -35,6 +36,7 @@ import {
   selectBestForm,
   type FormCandidate,
   type FormJourneyContext,
+  type FormScoreBreakdown,
   type FormSelectionAmbiguityResolver,
   type FormTextSignals,
   type FormVisibilityProminenceSignals,
@@ -159,6 +161,10 @@ export interface ExecuteFillFormParams {
   journeyContext?: FormJourneyContext;
   /** Optional, injected once per run -- see forms/formRelevance.ts's FormSelectionAmbiguityResolver. No caller configures one yet; its absence just means the ambiguous band fails closed. */
   selectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
+  /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts) -- never read by scoring/selection/fill logic. */
+  taskId?: string;
+  /** Diagnostic-only -- the pre-dispatch observation's own activeSurface. */
+  activeSurfaceInfo?: ActiveSurfaceInfo;
 }
 
 /** Where a field's `required: true` came from -- see RawFieldDescriptor.requiredEvidence below. */
@@ -645,8 +651,51 @@ function scorePlan(plan: PlannedField[]): number {
 }
 
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
-  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver } = params;
+  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo } = params;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
+  const diagnosticRunId = taskId ?? "unknown";
+  logFormDiscoveryDiagnosticEnabled({ runId: diagnosticRunId, taskId: diagnosticRunId });
+
+  /**
+   * Builds and logs the opt-in formDiscoveryDebug payload (see src/diagnostics/
+   * formDiscoveryDiagnostic.ts) for one exit point, a no-op when the env var is unset. Never
+   * throws into the caller -- a diagnostic failure must never turn a real result into an error.
+   */
+  async function emitDiagnostic(
+    captureStage: string,
+    candidateIndexes: number[],
+    scoresByIndex: Map<number, FormScoreBreakdown>,
+    selection: {
+      selectedFormIndex: number | null;
+      runnerUpIndex: number | null;
+      runnerUpScore: number | null;
+      belowConfidenceThreshold: boolean;
+      ambiguous: boolean;
+      rejectionReason: string;
+    },
+  ): Promise<ActionExecutorResult["formDiscoveryDebug"]> {
+    if (!isFormDiscoveryDiagnosticEnabled()) return undefined;
+    try {
+      const debug = await buildFormDiscoveryDebug({
+        page,
+        taskId: diagnosticRunId,
+        journeyContext,
+        currentLastClickLabel: journeyContext.previousActionLabel,
+        activeSurfaceInfo,
+        captureStage,
+        candidateIndexes,
+        scoresByIndex,
+        selection,
+      });
+      logFormDiscoveryDiagnosticEmitted({ runId: diagnosticRunId, taskId: diagnosticRunId, failureReason: captureStage });
+      await writeFormDiscoveryDebugBackup(debug);
+      return debug;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("FORM_DISCOVERY_DIAGNOSTIC_BUILD_FAILED", e);
+      return undefined;
+    }
+  }
 
   if (await detectCaptchaOnPage(page)) {
     return { success: false, formFillOutcome: "blocked_captcha" };
@@ -665,14 +714,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // being given the chance to pass it).
   const locationGateOutcome: LocationGateOutcome = await resolveLocationGate(page, market, marketDataFor(market).postcode, language);
 
-  const diagReport = FORM_DISCOVERY_DIAGNOSTIC_ENABLED ? createFormDiscoveryDiagnosticReport(page.url()) : undefined;
-  if (diagReport) await captureFormDiscoverySnapshot(page, diagReport, "fill_form_entry");
-
   const forms = page.locator("form");
   const formsOnPage = await forms.count();
   if (formsOnPage === 0) {
-    if (diagReport) await finalizeFormDiscoveryDiagnostic(page, diagReport, { outcome: "no_form_found" });
-    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome };
+    const formDiscoveryDebug = await emitDiagnostic("no_form_found", [], new Map(), {
+      selectedFormIndex: null,
+      runnerUpIndex: null,
+      runnerUpScore: null,
+      belowConfidenceThreshold: false,
+      ambiguous: false,
+      rejectionReason: "no <form> element on the page",
+    });
+    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome, formDiscoveryDebug };
   }
 
   /**
@@ -693,8 +746,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     dealerSearchWidgetDetected: boolean;
     textSignals: FormTextSignals;
     score: ReturnType<typeof computeFormScore>;
-    /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts): the real per-candidate field count, independent of what a form_discovery_failed branch below reports. */
+    /** The real per-candidate field count, independent of what a form_discovery_failed branch below reports -- see the misleading-reporting fix below. */
     realFieldsDiscovered: number;
+    /** The real per-candidate count of visible, required fields -- same reporting-accuracy fix. */
+    realRequiredFieldsDetected: number;
   }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
@@ -730,6 +785,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       dealerSearchWidgetDetected: dealerSearchWidgetDetectedCandidate,
       textSignals,
       realFieldsDiscovered: descriptors.length,
+      realRequiredFieldsDetected: descriptors.filter((d) => d.required && d.visible).length,
       score: computeFormScore({
         journeyContext,
         textSignals,
@@ -772,29 +828,35 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // never guessed away, and a selection below the confidence threshold is never filled or
   // submitted at all -- "do not submit when confidence is below a defined threshold".
   if (selection.belowConfidenceThreshold || selection.ambiguous) {
-    if (diagReport) {
-      await captureFormDiscoverySnapshot(page, diagReport, "pre_return_below_confidence_or_ambiguous");
-      await finalizeFormDiscoveryDiagnostic(page, diagReport, {
-        outcome: "form_discovery_failed:below_confidence_or_ambiguous",
+    const runnerUp = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebug = await emitDiagnostic(
+      "form_discovery_failed:below_confidence_or_ambiguous",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
         selectedFormIndex: selection.chosenIndex,
-        candidateEvidence: candidateEvidence.map((c) => ({
-          index: c.index,
-          realFieldsDiscovered: c.realFieldsDiscovered,
-          score: c.score,
-        })),
-      });
-    }
+        runnerUpIndex: runnerUp?.index ?? null,
+        runnerUpScore: runnerUp?.totalFormScore ?? null,
+        belowConfidenceThreshold: selection.belowConfidenceThreshold,
+        ambiguous: selection.ambiguous,
+        rejectionReason: selection.selectedFormReason,
+      },
+    );
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
       formMarketDetected: market,
       formLanguageDetected: language,
       formLocationGateDiagnostics: locationGateOutcome,
+      formDiscoveryDebug,
       formDiscoveryDiagnostics: {
         formsOnPage,
         selectedFormIndex: selection.chosenIndex,
-        fieldsDiscovered: 0,
-        requiredFieldsDetected: 0,
+        // Corrected reporting: the candidate's real discovered/required-field counts, not a
+        // hard-coded 0 -- selection being rejected (belowConfidenceThreshold/ambiguous) never
+        // implies the candidate had no fields; it means no fill/submit was attempted on it.
+        fieldsDiscovered: chosenEvidence.realFieldsDiscovered,
+        requiredFieldsDetected: chosenEvidence.realRequiredFieldsDetected,
         requiredFieldsFilled: 0,
         dealerSearchWidgetDetected: chosenEvidence.dealerSearchWidgetDetected,
         unmappedRequiredFieldIds: [],
@@ -988,13 +1050,27 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     finalFilledIds.size === 0 ||
     (requiredFields.length > 0 && requiredFieldsFilled === 0)
   ) {
-    if (diagReport) {
-      await captureFormDiscoverySnapshot(page, diagReport, "pre_return_zero_actionable_or_filled");
-      await finalizeFormDiscoveryDiagnostic(page, diagReport, {
-        outcome: "form_discovery_failed:zero_actionable_or_filled",
-        formDiscoveryDiagnostics,
-      });
-    }
+    const runnerUpZero = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebug = await emitDiagnostic(
+      "form_discovery_failed:zero_actionable_or_filled",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
+        selectedFormIndex: selection.chosenIndex,
+        runnerUpIndex: runnerUpZero?.index ?? null,
+        runnerUpScore: runnerUpZero?.totalFormScore ?? null,
+        belowConfidenceThreshold: false,
+        ambiguous: false,
+        rejectionReason:
+          formSelectionDiagnostics.fieldActionabilityScore === 0
+            ? "selected form's fieldActionabilityScore is 0"
+            : actionableFields.length === 0
+              ? "zero actionable fields in the fill plan"
+              : finalFilledIds.size === 0
+                ? "zero fields were actually filled"
+                : "required fields were detected but none were filled",
+      },
+    );
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
@@ -1003,6 +1079,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formLocationGateDiagnostics: locationGateOutcome,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
+      formDiscoveryDebug,
     };
   }
 
@@ -1175,6 +1252,20 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   };
 
   if (!attempt.succeeded) {
+    const runnerUpValidation = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebugValidation = await emitDiagnostic(
+      attempt.postSubmit.validationCauseObserved ? "form_validation_failed" : "validation_cause_not_observed",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
+        selectedFormIndex: selection.chosenIndex,
+        runnerUpIndex: runnerUpValidation?.index ?? null,
+        runnerUpScore: runnerUpValidation?.totalFormScore ?? null,
+        belowConfidenceThreshold: false,
+        ambiguous: false,
+        rejectionReason: "selected and filled, but the site's own submit validation cancelled it",
+      },
+    );
     return {
       success: false,
       // A cancelled submission whose cause this engine could actually observe (a native/aria
@@ -1193,10 +1284,26 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formDealerSearchDiagnostics,
       formConsentDiagnostics: consentResult,
       formPostSubmitDiagnostics,
+      formDiscoveryDebug: formDiscoveryDebugValidation,
     };
   }
 
   await captureAnalyticsPhase(page, captures, stepIndex + 1, captureModules);
+
+  const runnerUpSuccess = selection.rejectedFormsAndReasons[0];
+  const formDiscoveryDebugSuccess = await emitDiagnostic(
+    "submitted",
+    candidateEvidence.map((c) => c.index),
+    new Map(candidateEvidence.map((c) => [c.index, c.score])),
+    {
+      selectedFormIndex: selection.chosenIndex,
+      runnerUpIndex: runnerUpSuccess?.index ?? null,
+      runnerUpScore: runnerUpSuccess?.totalFormScore ?? null,
+      belowConfidenceThreshold: false,
+      ambiguous: false,
+      rejectionReason: "not rejected -- selected, filled, and submitted successfully",
+    },
+  );
 
   return {
     success: true,
@@ -1213,5 +1320,6 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formDealerSearchDiagnostics,
     formConsentDiagnostics: consentResult,
     formPostSubmitDiagnostics,
+    formDiscoveryDebug: formDiscoveryDebugSuccess,
   };
 }

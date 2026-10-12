@@ -54,6 +54,8 @@ export interface FormJourneyContext {
   activeMilestoneTexts?: string[];
   /** The previous step's clicked control's own accessible name, when the previous action was a click -- see RunState.lastClickLabel. */
   previousActionLabel?: string;
+  /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts) -- never read by scoreJourneyRelevance or any other scoring logic below. See RunState.journeyAnchorCtaLabel. */
+  journeyAnchorCtaLabel?: string;
 }
 
 /** Text evidence read off a single candidate form and the page around it -- destination/page title, headings, the form's own heading/attributes, and its submit control's text. */

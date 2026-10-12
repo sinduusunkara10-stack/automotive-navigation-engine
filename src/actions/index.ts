@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionExecutorResult, ActionResult, Captures } from "../types/task-response.js";
+import type { ActionExecutorResult, ActionResult, ActiveSurfaceInfo, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
 import type { ActionTimingOut, ClickProgressSignal } from "./click.js";
@@ -44,6 +44,10 @@ export interface DispatchParams {
   formJourneyContext?: FormJourneyContext;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
   formSelectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
+  /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts), only meaningful for a `fill_form` action -- never read by scoring/selection/fill logic. */
+  taskId?: string;
+  /** Diagnostic-only, only meaningful for a `fill_form` action -- the pre-dispatch observation's own activeSurface. */
+  activeSurfaceInfo?: ActiveSurfaceInfo;
 }
 
 function safePageUrl(page: Page): string | undefined {
@@ -110,6 +114,8 @@ async function dispatchByType(params: DispatchParams): Promise<ActionExecutorRes
     unmappedFieldResolver,
     formJourneyContext,
     formSelectionAmbiguityResolver,
+    taskId,
+    activeSurfaceInfo,
   } = params;
   switch (action.type) {
     case "click":
@@ -157,6 +163,8 @@ async function dispatchByType(params: DispatchParams): Promise<ActionExecutorRes
         unmappedFieldResolver,
         journeyContext: formJourneyContext,
         selectionAmbiguityResolver: formSelectionAmbiguityResolver,
+        taskId,
+        activeSurfaceInfo,
       });
     case "stop_success":
       return executeStopSuccess();
