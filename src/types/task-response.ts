@@ -417,7 +417,7 @@ export interface ActionResult {
       | "restoration_failed";
   };
   /** Lead-form filling (Phase 1, see docs/architecture.md "Lead-form filling"): present only on a `fill_form` action's result. */
-  formFillOutcome?: "submitted" | "form_validation_failed" | "blocked_captcha" | "form_discovery_failed";
+  formFillOutcome?: "submitted" | "form_validation_failed" | "validation_cause_not_observed" | "blocked_captcha" | "form_discovery_failed";
   /** Generic field keys this fill_form action wrote a value into -- never the raw value itself. */
   formFieldsFilled?: string[];
   /** Number of validation-triggered re-fill-and-resubmit cycles performed, bounded at 2. */
@@ -501,6 +501,9 @@ export interface ActionResult {
     dealerValueVerified: boolean;
     dealerVerificationEvidence: string;
     dealerLookupFailureReason?: string;
+    /** More than one field on the chosen form matched the generic "postcode" purpose and more than one remained a plain fill_text decision (never upgraded to dealer_search) -- a generic defense-in-depth signal, independent of dealerLookupFieldDetected, that typed postcode text alone must never be read as a resolved dealer dependency. */
+    multiplePostcodeFieldsUnresolved: boolean;
+    multiplePostcodeFieldsEvidence: string;
   };
   /**
    * Generic radio-group consent discovery/resolution diagnostics (see forms/consentGroups.ts) --
@@ -564,6 +567,14 @@ export interface ActionResult {
     nativeValidationMessages: Record<string, string>;
     /** Visible validation/error text found in the form (role="alert", aria-live, or a generic error/invalid-feedback class) after the last submit attempt. */
     postSubmitValidationMessages: string[];
+    /** Field ids carrying aria-invalid="true" after the last submit attempt, independent of whether they were already flagged required. */
+    ariaInvalidFieldIds: string[];
+    /** Non-empty hidden-input values on the form after the last submit attempt, keyed by name/id -- often the only visible trace of an unresolved dependent widget once a submit is cancelled. */
+    hiddenFieldValues: Record<string, string>;
+    /** Dealer/location widget scopes showing at least one accessible selectable result but none checked/selected after the last submit attempt. */
+    unresolvedDependentControlIds: string[];
+    /** False only when none of invalidFieldIds/ariaInvalidFieldIds/postSubmitValidationMessages/nativeValidationMessages/unresolvedDependentControlIds produced any evidence -- the cancellation's cause could not be observed. See formFillOutcome "validation_cause_not_observed". */
+    validationCauseObserved: boolean;
     /** Human-readable explanation of whether a retry was attempted and why (or why not). */
     retryDecision: string;
     /** False only when the generic pre-submit readiness gate (required fields, dealer dependency, required consent groups) failed and Submit was never clicked at all. */
@@ -1553,7 +1564,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.41.0";
+  schemaVersion: "1.42.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
