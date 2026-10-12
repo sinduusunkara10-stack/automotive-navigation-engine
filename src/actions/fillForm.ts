@@ -14,6 +14,8 @@ import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import { resolveConsentGroups } from "../forms/consentGroups.js";
 import {
+  DEALER_RESULT_SELECTOR,
+  DEALER_SCOPE_ATTR,
   dealerScopeFor,
   matchesLookupTriggerVocabulary,
   resolveDealerLookup,
@@ -85,13 +87,39 @@ export interface DealerSearchDiagnostics {
   dealerValueVerified: boolean;
   dealerVerificationEvidence: string;
   dealerLookupFailureReason?: string;
+  /**
+   * True when more than one field on the chosen form matched the generic "postcode" purpose and
+   * more than one of them remained a plain fill_text decision (never upgraded to dealer_search).
+   * A genuine detection failure (trigger-to-field association never fires) and an ambiguous
+   * double-postcode layout look identical from requiredFieldsFilled alone -- entering the same
+   * postcode text into two fields must never, by itself, be read as "the dealer dependency is
+   * resolved". This is a generic defense-in-depth signal independent of the structural detection
+   * above: it fires even when dealerLookupFieldDetected is false, which is exactly the case a
+   * detection miss produces.
+   */
+  multiplePostcodeFieldsUnresolved: boolean;
+  multiplePostcodeFieldsEvidence: string;
 }
 
-/** Post-submit validation evidence, read fresh (after re-tagging) so a field revealed only after a dynamic widget interaction is never invisible to it. */
+/**
+ * Post-submit validation evidence, read fresh (after re-tagging) so a field revealed only after a
+ * dynamic widget interaction is never invisible to it. invalidFieldIds/nativeValidationMessages/
+ * postSubmitValidationMessages are native/visible constraint-validation evidence; the fields below
+ * extend that to evidence a site's own JS can leave with no native validation message at all --
+ * see validationCauseObserved.
+ */
 export interface PostSubmitDiagnostics {
   invalidFieldIds: string[];
   nativeValidationMessages: Record<string, string>;
   postSubmitValidationMessages: string[];
+  /** Field ids carrying aria-invalid="true" after the last submit attempt, independent of whether tagAndReadFields' own requiredness evidence flagged them (findInvalidFieldIds only looks at fields it already believes are required). */
+  ariaInvalidFieldIds: string[];
+  /** Non-empty hidden-input values on the form after the last submit attempt, keyed by name/id -- e.g. a dealer/location widget's own "committed selection" field, which is often the only visible trace of an unresolved dependency once a submit is cancelled. */
+  hiddenFieldValues: Record<string, string>;
+  /** DEALER_SCOPE_ATTR-tagged widget scopes (see dealerLookup.ts) that show at least one accessible selectable result but none of them ended up checked/selected -- an unresolved dependent control, independent of whatever this run's own dealerLookupOutcome already tracked (this is a direct DOM re-scan, not a memory of what resolveDealerLookup saw earlier). */
+  unresolvedDependentControlIds: string[];
+  /** False only when none of the signals above (native/aria-invalid, visible validation text, or an unresolved dependent control) produced any evidence at all -- i.e. the submission was cancelled for a reason this engine could not observe. formFillOutcome then reports "validation_cause_not_observed" instead of "form_validation_failed", so a genuinely silent cancellation is never misreported as a diagnosed validation failure. */
+  validationCauseObserved: boolean;
 }
 
 const EMPTY_DEALER_SEARCH_DIAGNOSTICS: DealerSearchDiagnostics = {
@@ -109,6 +137,8 @@ const EMPTY_DEALER_SEARCH_DIAGNOSTICS: DealerSearchDiagnostics = {
   dealerSelected: false,
   dealerValueVerified: false,
   dealerVerificationEvidence: "",
+  multiplePostcodeFieldsUnresolved: false,
+  multiplePostcodeFieldsEvidence: "",
 };
 
 export interface ExecuteFillFormParams {
@@ -516,7 +546,62 @@ async function collectPostSubmitDiagnostics(form: Locator): Promise<PostSubmitDi
       return nodes.map((n) => n.textContent?.trim() ?? "").filter((t) => t.length > 0);
     })
     .catch(() => []);
-  return { invalidFieldIds, nativeValidationMessages, postSubmitValidationMessages };
+  const ariaInvalidFieldIds = await form
+    .evaluate((formEl: HTMLFormElement, attr: string) => {
+      const found: string[] = [];
+      Array.from(formEl.querySelectorAll(`[${attr}]`)).forEach((el) => {
+        if (el.getAttribute("aria-invalid") === "true") found.push(el.getAttribute(attr) ?? "");
+      });
+      return found;
+    }, FIELD_INDEX_ATTR)
+    .catch(() => []);
+  const hiddenFieldValues = await form
+    .evaluate((formEl: HTMLFormElement) => {
+      const values: Record<string, string> = {};
+      Array.from(formEl.querySelectorAll('input[type="hidden"]')).forEach((el, i) => {
+        const value = (el as HTMLInputElement).value;
+        if (value.trim().length > 0) values[el.getAttribute("name") || el.getAttribute("id") || `hidden-${i}`] = value;
+      });
+      return values;
+    })
+    .catch(() => ({}));
+  const unresolvedDependentControlIds = await form
+    .evaluate(
+      (formEl: HTMLFormElement, attrs: { scopeAttr: string; resultSelector: string }) => {
+        const unresolved: string[] = [];
+        Array.from(formEl.querySelectorAll(`[${attrs.scopeAttr}]`)).forEach((scope) => {
+          const scopedResults = Array.from(scope.querySelectorAll(attrs.resultSelector));
+          if (scopedResults.length === 0) return;
+          const committed = scopedResults.some(
+            (resultEl) =>
+              (resultEl as HTMLInputElement).checked === true ||
+              resultEl.getAttribute("aria-checked") === "true" ||
+              resultEl.getAttribute("aria-selected") === "true",
+          );
+          if (!committed) unresolved.push(scope.getAttribute(attrs.scopeAttr) ?? "");
+        });
+        return unresolved;
+      },
+      { scopeAttr: DEALER_SCOPE_ATTR, resultSelector: DEALER_RESULT_SELECTOR },
+    )
+    .catch(() => []);
+
+  const validationCauseObserved =
+    invalidFieldIds.length > 0 ||
+    ariaInvalidFieldIds.length > 0 ||
+    postSubmitValidationMessages.length > 0 ||
+    Object.keys(nativeValidationMessages).length > 0 ||
+    unresolvedDependentControlIds.length > 0;
+
+  return {
+    invalidFieldIds,
+    nativeValidationMessages,
+    postSubmitValidationMessages,
+    ariaInvalidFieldIds,
+    hiddenFieldValues,
+    unresolvedDependentControlIds,
+    validationCauseObserved,
+  };
 }
 
 async function detectCaptchaOnPage(page: Page): Promise<boolean> {
@@ -781,6 +866,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const customerPostcodeFieldPlanned = initialPlan.find((p) => p.matchedField === "postcode" && p.decision.kind === "fill_text");
   const dealerFieldHasAdjacentControl =
     dealerFieldPlanned !== undefined && dealerFieldPlanned.decision.kind === "dealer_search" && Boolean(dealerFieldPlanned.decision.triggerIndex);
+  // Safety net, independent of the structural detection above: if structural detection missed a
+  // real dealer-lookup field (e.g. the trigger/field association never fired), it is very likely
+  // that more than one field still matched the generic "postcode" purpose and stayed a plain
+  // fill_text decision -- a real customer-address postcode plus the missed dealer-locator one.
+  // Typed postcode text alone must never be read as a resolved dealer dependency.
+  const plainPostcodeFieldsPlanned = initialPlan.filter((p) => p.matchedField === "postcode" && p.decision.kind === "fill_text");
+  const multiplePostcodeFieldsUnresolved = plainPostcodeFieldsPlanned.length > 1;
   const dealerDiscoveryDiagnostics = {
     customerPostcodeFieldDetected: Boolean(customerPostcodeFieldPlanned),
     dealerLookupFieldDetected: Boolean(dealerFieldPlanned),
@@ -792,6 +884,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       ? dealerFieldHasAdjacentControl
         ? "a structurally-adjacent lookup control (generic search/find/go/ok/select/choose vocabulary) was found next to this field"
         : "the field matched dealer-lookup vocabulary directly; no adjacent lookup control was structurally found, falling back to Enter"
+      : "",
+    multiplePostcodeFieldsUnresolved,
+    multiplePostcodeFieldsEvidence: multiplePostcodeFieldsUnresolved
+      ? `${plainPostcodeFieldsPlanned.length} fields (${plainPostcodeFieldsPlanned.map((p) => p.descriptor.id).join(",")}) matched the postcode purpose and none was upgraded to dealer_search -- a dependent-location dependency cannot be ruled out from typed postcode text alone`
       : "",
   };
 
@@ -908,6 +1004,9 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   if (dealerDependencyUnresolved) {
     preSubmitReadinessFailures.push("dealer_dependency_unresolved");
   }
+  if (multiplePostcodeFieldsUnresolved) {
+    preSubmitReadinessFailures.push(`multiple_postcode_fields_unresolved:${plainPostcodeFieldsPlanned.map((p) => p.descriptor.id).join(",")}`);
+  }
   if (consentResult.unresolvedRequiredConsentGroups.length > 0) {
     preSubmitReadinessFailures.push(`unresolved_required_consent_groups:${consentResult.unresolvedRequiredConsentGroups.join(",")}`);
   }
@@ -932,9 +1031,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         invalidFieldIds: unresolvedRequiredFinal.map((d) => d.id),
         nativeValidationMessages: {},
         postSubmitValidationMessages: [],
+        ariaInvalidFieldIds: [],
+        hiddenFieldValues: {},
+        unresolvedDependentControlIds: [],
+        validationCauseObserved: true,
         retryDecision: dealerDependencyUnresolved
           ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified`
-          : "not retried: submit was never attempted, the pre-submit readiness gate failed",
+          : multiplePostcodeFieldsUnresolved
+            ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
+            : "not retried: submit was never attempted, the pre-submit readiness gate failed",
         preSubmitReadinessPassed: false,
         preSubmitReadinessFailures,
         submitAttempted: false,
@@ -970,7 +1075,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     // submitted, so reading post-submit diagnostics from it here would just be evaluating
     // against a gone/unrelated element until Playwright's default action timeout gives up.
     const postSubmit: PostSubmitDiagnostics = urlChanged
-      ? { invalidFieldIds: [], nativeValidationMessages: {}, postSubmitValidationMessages: [] }
+      ? {
+          invalidFieldIds: [],
+          nativeValidationMessages: {},
+          postSubmitValidationMessages: [],
+          ariaInvalidFieldIds: [],
+          hiddenFieldValues: {},
+          unresolvedDependentControlIds: [],
+          validationCauseObserved: true,
+        }
       : await collectPostSubmitDiagnostics(form);
     const hasConfirmationText = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await detectConfirmationText(page));
     const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || hasConfirmationText);
@@ -1019,6 +1132,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
     nativeValidationMessages: attempt.postSubmit.nativeValidationMessages,
     postSubmitValidationMessages: attempt.postSubmit.postSubmitValidationMessages,
+    ariaInvalidFieldIds: attempt.postSubmit.ariaInvalidFieldIds,
+    hiddenFieldValues: attempt.postSubmit.hiddenFieldValues,
+    unresolvedDependentControlIds: attempt.postSubmit.unresolvedDependentControlIds,
+    validationCauseObserved: attempt.postSubmit.validationCauseObserved,
     retryDecision,
     preSubmitReadinessPassed: true,
     preSubmitReadinessFailures: [] as string[],
@@ -1028,7 +1145,11 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   if (!attempt.succeeded) {
     return {
       success: false,
-      formFillOutcome: "form_validation_failed",
+      // A cancelled submission whose cause this engine could actually observe (a native/aria
+      // invalid field, visible validation text, or an unresolved dependent control it can point
+      // to) is reported as "form_validation_failed"; one with no such evidence at all must never
+      // be reported the same way -- that would claim a diagnosed cause where none exists.
+      formFillOutcome: attempt.postSubmit.validationCauseObserved ? "form_validation_failed" : "validation_cause_not_observed",
       formRetriesUsed: retries,
       formValidationMissingFields: attempt.postSubmit.invalidFieldIds,
       formFieldsFilled: [...fieldsFilled],
