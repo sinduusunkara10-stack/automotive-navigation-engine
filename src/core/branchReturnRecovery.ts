@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult, Captures, Observation } from "../types/task-response.js";
+import type { ActionExecutorResult, Captures, Observation } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { buildObservation } from "../observation/observationBuilder.js";
 import { computeDecisionPointFingerprint } from "./routeMemory.js";
@@ -207,7 +207,7 @@ export interface CheckpointReconstructionResult {
   outcome: CheckpointReconstructionOutcome;
   finalLiveVerificationOutcome: "restored" | "unverified" | "restore_failed";
   observation?: Observation;
-  navigateActionResult?: ActionResult;
+  navigateActionResult?: ActionExecutorResult;
 }
 
 /**

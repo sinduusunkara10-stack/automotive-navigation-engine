@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import type { ActionResult } from "../types/task-response.js";
+import type { ActionExecutorResult, ActionResult } from "../types/task-response.js";
 
 const BLANK_STATE_URL = "about:blank";
 
@@ -58,7 +58,7 @@ async function safeTitle(page: Page): Promise<string | undefined> {
  * resulting about:blank/content-free page the same way, regardless of whether Playwright
  * itself threw.
  */
-export async function executeGoBack(page: Page, timeoutMs: number): Promise<ActionResult> {
+export async function executeGoBack(page: Page, timeoutMs: number): Promise<ActionExecutorResult> {
   const urlBeforeGoBack = page.url();
 
   if (urlBeforeGoBack === BLANK_STATE_URL) {

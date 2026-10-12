@@ -42,7 +42,7 @@ function decisionStepLog(overrides: Partial<StepLog> = {}): StepLog {
     observation: OBSERVATION,
     decision: "Continue is the only visible path toward the objective (Claude confidence 0.70)",
     selectedAction: { type: "click", target: "el-0" },
-    actionResult: { success: true },
+    actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
     progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
     ...overrides,
   };
@@ -56,7 +56,7 @@ function maxStepsStopLog(overrides: Partial<StepLog> = {}): StepLog {
     observation: { ...OBSERVATION, interactiveElements: [] },
     decision: "Hard limit reached before another action could be taken.",
     selectedAction: { type: "stop_failure" },
-    actionResult: { success: true },
+    actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
     progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
     safetyFlags: ["max_steps"],
     ...overrides,

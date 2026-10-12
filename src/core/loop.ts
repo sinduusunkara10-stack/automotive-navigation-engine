@@ -485,7 +485,7 @@ export async function runStep(params: {
         ? "Container memory circuit breaker threshold reached before another action could be taken."
         : "Hard limit reached before another action could be taken.",
       selectedAction: forcedAction,
-      actionResult: { success: true },
+      actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
       successCriteria: task.successCriteria,
       safetyFlags: [breachReason],
@@ -926,7 +926,7 @@ export async function runStep(params: {
               `"${branch.candidateLabel}" ended (${branch.result}), even after live re-observation` +
               `${reconstruction?.attempted ? " and checkpoint reconstruction" : ""}; stopping.`,
             selectedAction: forcedAction,
-            actionResult: { success: true },
+            actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
             satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
             successCriteria: task.successCriteria,
             safetyFlags: ["branch_restore_failed"],
@@ -963,7 +963,12 @@ export async function runStep(params: {
                   ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
                   ...(result.reason ? { reason: result.reason } : {}),
                 });
-                const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+                const returnResult: ActionResult = {
+                  success: result.restored,
+                  resultingUrl: result.parentUrl,
+                  error: result.reason,
+                  interactionOutcome: result.restored ? "NAVIGATION" : "NO_OBSERVABLE_CHANGE",
+                };
                 return returnResult;
               })()
             : await dispatchAction({
@@ -1207,7 +1212,12 @@ export async function runStep(params: {
         decision:
           "Skipped a reasoning call: the element that intercepted the previous attempt still blocks the same target.",
         selectedAction: forcedAction,
-        actionResult: { success: false, staleTarget: true, error: "persistent_blocker_signature_unchanged" },
+        actionResult: {
+          success: false,
+          staleTarget: true,
+          error: "persistent_blocker_signature_unchanged",
+          interactionOutcome: "NO_OBSERVABLE_CHANGE",
+        },
         satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
         successCriteria: task.successCriteria,
         safetyFlags: ["persistent_blocker_detected"],
@@ -1945,7 +1955,12 @@ export async function runStep(params: {
             ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
             ...(result.reason ? { reason: result.reason } : {}),
           });
-          const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+          const returnResult: ActionResult = {
+                  success: result.restored,
+                  resultingUrl: result.parentUrl,
+                  error: result.reason,
+                  interactionOutcome: result.restored ? "NAVIGATION" : "NO_OBSERVABLE_CHANGE",
+                };
           return returnResult;
         })()
       : await dispatchAction({

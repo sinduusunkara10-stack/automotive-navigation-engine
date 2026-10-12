@@ -1,6 +1,6 @@
 import type { Frame, Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult, Captures } from "../types/task-response.js";
+import type { ActionResult, ActionExecutorResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import {
   captureInteractionSnapshot,
@@ -341,7 +341,7 @@ async function resolveUnactionableClick(params: {
   /** Set only when this click produced a popup/new-context event -- see popupCapture.ts. Merged verbatim into the returned ActionResult either way. */
   openedNewContext?: boolean;
   observedNewContext?: boolean;
-}): Promise<ActionResult> {
+}): Promise<ActionExecutorResult> {
   const {
     page,
     targetElementId,
@@ -514,7 +514,7 @@ async function resolveUnactionableClick(params: {
  * same generic destinationUrl fallback is attempted on the tracked page, since there is
  * nothing else the engine could otherwise observe changing.
  */
-export async function executeClick(params: ExecuteClickParams): Promise<ActionResult> {
+export async function executeClick(params: ExecuteClickParams): Promise<ActionExecutorResult> {
   const {
     page,
     action,

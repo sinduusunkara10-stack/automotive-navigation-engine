@@ -185,6 +185,15 @@ export interface SettleDiagnostic {
   reason: "quiet_window" | "ceiling_reached";
 }
 
+/**
+ * What every action executor itself returns (actions/click.ts, navigate.ts, goBack.ts,
+ * scroll.ts, wait.ts, capture.ts, fillForm.ts, stop*.ts): every ActionResult field except
+ * interactionOutcome, which actions/index.ts's dispatchAction computes once, uniformly, for
+ * every action type after the specific executor returns (see ActionResult.interactionOutcome's
+ * own doc comment) -- no individual executor decides or sets it itself.
+ */
+export type ActionExecutorResult = Omit<ActionResult, "interactionOutcome">;
+
 export interface ActionResult {
   success: boolean;
   error?: string;
@@ -573,6 +582,23 @@ export interface ActionResult {
     /** False only when the pre-submit readiness gate failed and Submit was never clicked. */
     submitAttempted: boolean;
   };
+  /**
+   * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets
+   * exactly one of these three values, computed identically regardless of action type --
+   * dispatchAction (actions/index.ts) takes a page-wide interactive-element/dialog/panel
+   * snapshot (observation/observationBuilder.ts's captureInteractionSnapshot, the same generic
+   * primitive click.ts already uses for its own before/after diffing) immediately before and
+   * after every dispatched action, never gated by, or aware of, which action type ran.
+   * "NAVIGATION": the action's resultingUrl differs from the URL observed before dispatch.
+   * "IN_PAGE_STATE_CHANGE": no navigation, but classifyObservedSurfaceChange found a
+   * structural change (a dialog/panel appeared or changed, or the interactive-element
+   * inventory grew) between the before/after snapshots.
+   * "NO_OBSERVABLE_CHANGE": neither -- including every action never dispatched to the page at
+   * all (stop_success/stop_blocked/stop_failure, and the engine's own forced/synthetic
+   * terminal steps in core/loop.ts), for which this is always the correct value since nothing
+   * was ever attempted against the page.
+   */
+  interactionOutcome: "NAVIGATION" | "IN_PAGE_STATE_CHANGE" | "NO_OBSERVABLE_CHANGE";
 }
 
 export interface Progress {
@@ -1553,7 +1579,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.41.0";
+  schemaVersion: "1.42.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

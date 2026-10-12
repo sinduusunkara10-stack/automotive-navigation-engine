@@ -1,5 +1,5 @@
 import type { Page } from "playwright";
-import type { ActionResult, Captures } from "../types/task-response.js";
+import type { ActionResult, ActionExecutorResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { capturePageVisit } from "../capture-modules/pageVisits.js";
 import { capturePageMetadata } from "../capture-modules/pageMetadata.js";
@@ -13,7 +13,7 @@ export async function executeCapture(
   captures: Captures,
   stepIndex: number,
   captureModules: CaptureModuleName[],
-): Promise<ActionResult> {
+): Promise<ActionExecutorResult> {
   if (captureModules.includes("page_visits")) {
     const visit = await capturePageVisit(page, stepIndex);
     captures.page_visits = [...(captures.page_visits ?? []), visit];

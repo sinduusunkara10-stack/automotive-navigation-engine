@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult, Captures } from "../types/task-response.js";
+import type { ActionResult, ActionExecutorResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { checkNavigationAllowed } from "../safety/index.js";
 import { robustGoto } from "../core/robustNavigation.js";
@@ -28,7 +28,7 @@ export interface ExecuteNavigateParams {
  * domcontentloaded) is treated as success and recorded as a warning diagnostic, mirroring
  * the engine's initial-navigation recovery behaviour, rather than as an action failure.
  */
-export async function executeNavigate(params: ExecuteNavigateParams): Promise<ActionResult> {
+export async function executeNavigate(params: ExecuteNavigateParams): Promise<ActionExecutorResult> {
   const { page, action, allowedDomains, timeoutMs, captures, stepIndex, captureModules, settleCeilingMs } = params;
 
   if (!action.target) {
