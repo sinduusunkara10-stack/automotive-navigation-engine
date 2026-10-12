@@ -192,3 +192,97 @@ export function attachGa4NetworkCapture(
   page.on("request", handler);
   return () => page.off("request", handler);
 }
+
+/**
+ * Resource Timing fallback snapshot: a GA4 hit fired as a GET-style pixel (`new
+ * Image().src = ...`, the common cross-browser-compatible beacon shape) before
+ * attachGa4NetworkCapture's own listener was attached -- most plausibly a destination
+ * document's own page-load beacon, fired from an inline <head>/<body> script during initial
+ * parse, before this engine's popup-adoption code can run on the Node side (see
+ * popupCapture.ts's adoptOrCapturePopup) -- is otherwise permanently lost: Playwright's
+ * request listener never replays a request that completed before it was registered. The
+ * browser's own Resource Timing buffer (`performance.getEntriesByType("resource")`) already
+ * records every such load for the lifetime of the page, independent of any listener, so this
+ * reads it directly as a one-shot, best-effort recovery pass -- mirroring the existing
+ * window.dataLayer snapshot fallback this same gap already has (see dataLayer.ts's
+ * captureDataLayer) for the one evidence type that previously had no equivalent. Only
+ * recovers a GET request (no body is available via this API, matching the existing
+ * GET-only caveat the live listener already has for postDataParams) and never a
+ * `navigator.sendBeacon()` POST, which this browser API does not expose either way -- a
+ * strict improvement over the previous all-or-nothing reliance on listener-attach timing,
+ * never a weakening of what the live listener already captures.
+ */
+async function readGa4ResourceTimingUrls(page: Page): Promise<string[]> {
+  return page
+    .evaluate((collectPath) => {
+      try {
+        return performance
+          .getEntriesByType("resource")
+          .map((entry) => entry.name)
+          .filter((name) => {
+            try {
+              return new URL(name).pathname.endsWith(collectPath);
+            } catch {
+              return false;
+            }
+          });
+      } catch {
+        return [];
+      }
+    }, GA4_COLLECT_PATH)
+    .catch(() => []);
+}
+
+export async function captureGa4FromResourceTiming(
+  page: Page,
+  stepIndex: number,
+  context: Ga4NetworkCaptureContext = {},
+): Promise<Ga4NetworkEventCapture[]> {
+  const urls = await readGa4ResourceTimingUrls(page);
+  const timestamp = new Date().toISOString();
+  const entries: Ga4NetworkEventCapture[] = [];
+  for (const rawUrl of urls) {
+    let url: URL;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      continue;
+    }
+    const params: Record<string, string> = {};
+    for (const [key, value] of url.searchParams.entries()) {
+      params[key] = value;
+    }
+    const measurementId = firstDefined([params], MEASUREMENT_ID_PARAM);
+    const consentState = extractConsentState([params]);
+    entries.push({
+      stepIndex,
+      requestUrl: rawUrl,
+      timestamp,
+      method: "GET",
+      ...(Object.keys(params).length > 0 ? { params } : {}),
+      ...(measurementId ? { measurementId } : {}),
+      ...(consentState ? { consentState } : {}),
+      source: context.forcedSource ?? "main_frame",
+      ...(context.contextId ? { contextId: context.contextId } : {}),
+    });
+  }
+  return entries;
+}
+
+/**
+ * Merges a captureGa4FromResourceTiming snapshot into captures.ga4_network_events,
+ * skipping any requestUrl the live listener already captured (exact-match dedupe -- each
+ * GA4 hit's own query string, including its event name, is part of its URL, so two
+ * genuinely distinct hits never collide here). Bounded the same way the live listener
+ * bounds its own appends.
+ */
+export function mergeGa4ResourceTimingSnapshot(captures: Captures, snapshot: Ga4NetworkEventCapture[]): void {
+  const alreadyCaptured = new Set((captures.ga4_network_events ?? []).map((entry) => entry.requestUrl));
+  for (const entry of snapshot) {
+    if (alreadyCaptured.has(entry.requestUrl)) {
+      continue;
+    }
+    captures.ga4_network_events = appendBounded(captures.ga4_network_events ?? [], entry, MAX_GA4_NETWORK_EVENTS);
+    alreadyCaptured.add(entry.requestUrl);
+  }
+}
