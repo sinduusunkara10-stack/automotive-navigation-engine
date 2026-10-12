@@ -24,6 +24,12 @@ import {
   type DealerLookupOutcome,
 } from "./dealerLookup.js";
 import {
+  captureFormDiscoverySnapshot,
+  createFormDiscoveryDiagnosticReport,
+  finalizeFormDiscoveryDiagnostic,
+  FORM_DISCOVERY_DIAGNOSTIC_ENABLED,
+} from "../diagnostics/formDiscoveryDiagnostic.js";
+import {
   computeFormScore,
   resolveAmbiguousFormSelection,
   selectBestForm,
@@ -659,9 +665,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // being given the chance to pass it).
   const locationGateOutcome: LocationGateOutcome = await resolveLocationGate(page, market, marketDataFor(market).postcode, language);
 
+  const diagReport = FORM_DISCOVERY_DIAGNOSTIC_ENABLED ? createFormDiscoveryDiagnosticReport(page.url()) : undefined;
+  if (diagReport) await captureFormDiscoverySnapshot(page, diagReport, "fill_form_entry");
+
   const forms = page.locator("form");
   const formsOnPage = await forms.count();
   if (formsOnPage === 0) {
+    if (diagReport) await finalizeFormDiscoveryDiagnostic(page, diagReport, { outcome: "no_form_found" });
     return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome };
   }
 
@@ -683,6 +693,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     dealerSearchWidgetDetected: boolean;
     textSignals: FormTextSignals;
     score: ReturnType<typeof computeFormScore>;
+    /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts): the real per-candidate field count, independent of what a form_discovery_failed branch below reports. */
+    realFieldsDiscovered: number;
   }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
@@ -717,6 +729,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
       dealerSearchWidgetDetected: dealerSearchWidgetDetectedCandidate,
       textSignals,
+      realFieldsDiscovered: descriptors.length,
       score: computeFormScore({
         journeyContext,
         textSignals,
@@ -759,6 +772,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // never guessed away, and a selection below the confidence threshold is never filled or
   // submitted at all -- "do not submit when confidence is below a defined threshold".
   if (selection.belowConfidenceThreshold || selection.ambiguous) {
+    if (diagReport) {
+      await captureFormDiscoverySnapshot(page, diagReport, "pre_return_below_confidence_or_ambiguous");
+      await finalizeFormDiscoveryDiagnostic(page, diagReport, {
+        outcome: "form_discovery_failed:below_confidence_or_ambiguous",
+        selectedFormIndex: selection.chosenIndex,
+        candidateEvidence: candidateEvidence.map((c) => ({
+          index: c.index,
+          realFieldsDiscovered: c.realFieldsDiscovered,
+          score: c.score,
+        })),
+      });
+    }
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
@@ -963,6 +988,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     finalFilledIds.size === 0 ||
     (requiredFields.length > 0 && requiredFieldsFilled === 0)
   ) {
+    if (diagReport) {
+      await captureFormDiscoverySnapshot(page, diagReport, "pre_return_zero_actionable_or_filled");
+      await finalizeFormDiscoveryDiagnostic(page, diagReport, {
+        outcome: "form_discovery_failed:zero_actionable_or_filled",
+        formDiscoveryDiagnostics,
+      });
+    }
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
