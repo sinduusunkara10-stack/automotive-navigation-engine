@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
-import type { ActionResult } from "../types/task-response.js";
+import type { ActionExecutorResult } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -638,7 +638,7 @@ function scorePlan(plan: PlannedField[]): number {
   return plan.filter((p) => p.decision.kind !== "skip").length;
 }
 
-export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionResult> {
+export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
   const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver } = params;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
 

@@ -1,9 +1,11 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult, Captures } from "../types/task-response.js";
+import type { ActionExecutorResult, ActionResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { SurfaceAdoptionRequest } from "../capture-modules/popupCapture.js";
-import type { ActionTimingOut } from "./click.js";
+import type { ActionTimingOut, ClickProgressSignal } from "./click.js";
+import type { InteractionSnapshot } from "../observation/observationBuilder.js";
+import { captureInteractionSnapshot, classifyObservedSurfaceChange } from "../observation/observationBuilder.js";
 import { executeClick } from "./click.js";
 import { executeScroll } from "./scroll.js";
 import { executeWait } from "./wait.js";
@@ -34,6 +36,8 @@ export interface DispatchParams {
   surfaceAdoption?: SurfaceAdoptionRequest;
   /** Only meaningful for a `click` action -- see ExecuteClickParams.timingOut in actions/click.ts. */
   timingOut?: ActionTimingOut;
+  /** Only meaningful for a `click` action -- see ExecuteClickParams.progressSignal in actions/click.ts. */
+  progressSignal?: ClickProgressSignal;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
   unmappedFieldResolver?: UnmappedFieldResolver;
   /** Only meaningful for a `fill_form` action -- see ExecuteFillFormParams in actions/fillForm.ts. */
@@ -42,7 +46,53 @@ export interface DispatchParams {
   formSelectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
 }
 
-export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
+function safePageUrl(page: Page): string | undefined {
+  try {
+    return page.url();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Generic interaction-outcome classification (schemaVersion 1.42.0): computed once here for
+ * every action type, never gated by, or aware of, which action ran -- the same before/after
+ * interactive-element/dialog/panel snapshot diff actions/click.ts already uses for its own
+ * surfaceChangeDetected/surfaceChangeType, applied uniformly at the dispatch level instead of
+ * only for clicks. A stop_* action, or any other result whose resultingUrl/page URL never
+ * moves and whose snapshot never changes, is NO_OBSERVABLE_CHANGE -- the correct value for an
+ * action that was never meant to touch the page at all.
+ */
+async function classifyInteractionOutcome(params: {
+  page: Page;
+  urlBeforeDispatch: string;
+  snapshotBeforeDispatch: InteractionSnapshot | undefined;
+  result: ActionExecutorResult;
+}): Promise<ActionResult["interactionOutcome"]> {
+  const { page, urlBeforeDispatch, snapshotBeforeDispatch, result } = params;
+  const urlAfterDispatch = result.resultingUrl ?? safePageUrl(page) ?? urlBeforeDispatch;
+  if (urlAfterDispatch !== urlBeforeDispatch) {
+    return "NAVIGATION";
+  }
+  if (!snapshotBeforeDispatch) {
+    return "NO_OBSERVABLE_CHANGE";
+  }
+  const snapshotAfterDispatch = await captureInteractionSnapshot(page).catch(() => undefined);
+  if (!snapshotAfterDispatch) {
+    return "NO_OBSERVABLE_CHANGE";
+  }
+  const assessment = classifyObservedSurfaceChange(snapshotBeforeDispatch, snapshotAfterDispatch);
+  // Deliberately broader than assessment.type alone: type stays "none" below
+  // MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE (2, observationBuilder.ts) to avoid a
+  // false-positive *dialog/panel* classification, but assessment.newElementCount is always
+  // the raw count regardless of type -- the same ungated newElementCount > 0 check
+  // actions/click.ts's own ClickProgressSignal already uses to avoid exactly this PR #85
+  // dead-end regression (a single-element in-place reveal, e.g. Continue -> Add to Cart,
+  // must count as a real state change here too, not just internally to the reasoning loop).
+  return assessment.type !== "none" || assessment.newElementCount > 0 ? "IN_PAGE_STATE_CHANGE" : "NO_OBSERVABLE_CHANGE";
+}
+
+async function dispatchByType(params: DispatchParams): Promise<ActionExecutorResult> {
   const {
     page,
     action,
@@ -56,6 +106,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     settleCeilingMs,
     surfaceAdoption,
     timingOut,
+    progressSignal,
     unmappedFieldResolver,
     formJourneyContext,
     formSelectionAmbiguityResolver,
@@ -73,6 +124,7 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
         reObservationAttempted,
         knownDestinationUrl,
         timingOut,
+        progressSignal,
         settleCeilingMs,
         surfaceAdoption,
       });
@@ -117,4 +169,18 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
       throw new Error(`Unhandled action type: ${String(exhaustiveCheck)}`);
     }
   }
+}
+
+export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
+  const { page } = params;
+  const urlBeforeDispatch = safePageUrl(page) ?? "";
+  const snapshotBeforeDispatch = await captureInteractionSnapshot(page).catch(() => undefined);
+  const result = await dispatchByType(params);
+  const interactionOutcome = await classifyInteractionOutcome({
+    page,
+    urlBeforeDispatch,
+    snapshotBeforeDispatch,
+    result,
+  });
+  return { ...result, interactionOutcome };
 }

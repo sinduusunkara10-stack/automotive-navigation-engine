@@ -1,6 +1,6 @@
 import type { Frame, Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult, Captures } from "../types/task-response.js";
+import type { ActionResult, ActionExecutorResult, Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import {
   captureInteractionSnapshot,
@@ -101,10 +101,25 @@ export interface ExecuteClickParams {
    * resolves; every other action type leaves it untouched.
    */
   timingOut?: ActionTimingOut;
+  /**
+   * CTA-reveal dead-end fix: a mutable out-param (same convention as `timingOut` above)
+   * this executor writes `newInteractiveElementCount` into when a successful, non-
+   * navigating click's own before/after snapshot diff found new on-screen interactive
+   * elements (e.g. a "Continue" that expands its own panel to reveal "Add to cart", with no
+   * URL/title change) -- never part of the JSON-serializable ActionResult/wire contract, to
+   * avoid a schema/outputSchemaVersion bump for what is purely internal progress bookkeeping
+   * (see core/state.ts's RunState.resolveLastActionProgress, the only consumer). core/loop.ts
+   * reads it back once dispatchAction resolves and threads it into state.recordAction.
+   */
+  progressSignal?: ClickProgressSignal;
 }
 
 export interface ActionTimingOut {
   physicalClickDispatchedAt?: string;
+}
+
+export interface ClickProgressSignal {
+  newInteractiveElementCount?: number;
 }
 
 type ClickErrorCategory =
@@ -326,7 +341,7 @@ async function resolveUnactionableClick(params: {
   /** Set only when this click produced a popup/new-context event -- see popupCapture.ts. Merged verbatim into the returned ActionResult either way. */
   openedNewContext?: boolean;
   observedNewContext?: boolean;
-}): Promise<ActionResult> {
+}): Promise<ActionExecutorResult> {
   const {
     page,
     targetElementId,
@@ -499,7 +514,7 @@ async function resolveUnactionableClick(params: {
  * same generic destinationUrl fallback is attempted on the tracked page, since there is
  * nothing else the engine could otherwise observe changing.
  */
-export async function executeClick(params: ExecuteClickParams): Promise<ActionResult> {
+export async function executeClick(params: ExecuteClickParams): Promise<ActionExecutorResult> {
   const {
     page,
     action,
@@ -513,6 +528,7 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
     settleCeilingMs,
     surfaceAdoption,
     timingOut,
+    progressSignal,
   } = params;
 
   if (!action.target) {
@@ -755,6 +771,9 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
               recoverable: true,
               stoppedRun: false,
             });
+          }
+          if (progressSignal && observedSurfaceChange.newElementCount > 0) {
+            progressSignal.newInteractiveElementCount = observedSurfaceChange.newElementCount;
           }
           return {
             success: true,
@@ -1010,6 +1029,9 @@ export async function executeClick(params: ExecuteClickParams): Promise<ActionRe
         : reportableSurfaceChangeType === "layer_panel_appeared"
           ? "settled_panel"
           : undefined;
+    if (progressSignal && observedSurfaceChange.newElementCount > 0) {
+      progressSignal.newInteractiveElementCount = observedSurfaceChange.newElementCount;
+    }
     return {
       success: true,
       resultingUrl: safePageUrl(page) ?? urlBeforeClick,

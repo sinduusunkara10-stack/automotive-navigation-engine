@@ -16,7 +16,7 @@ import { GA4_ACTION_WINDOW_MS } from "../capture-modules/ga4NetworkEvents.js";
 import { waitForActionWindowQuietPeriod } from "../capture-modules/actionWindowSettle.js";
 import { readConsentStorageEvidence } from "../capture-modules/consentEvidence.js";
 import { computeCaptureHealth, classifyActionAnalyticsCapture } from "../capture-modules/analyticsCaptureClassification.js";
-import type { ActionTimingOut } from "../actions/click.js";
+import type { ActionTimingOut, ClickProgressSignal } from "../actions/click.js";
 import { buildJourneyPathEntry } from "../capture-modules/journeyPath.js";
 import { classifyActionFailure, recordDiagnosticError, attachErrorCapture } from "../capture-modules/errors.js";
 import { captureHostContextSnapshot } from "../capture-modules/hostContext.js";
@@ -485,7 +485,7 @@ export async function runStep(params: {
         ? "Container memory circuit breaker threshold reached before another action could be taken."
         : "Hard limit reached before another action could be taken.",
       selectedAction: forcedAction,
-      actionResult: { success: true },
+      actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
       satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
       successCriteria: task.successCriteria,
       safetyFlags: [breachReason],
@@ -926,7 +926,7 @@ export async function runStep(params: {
               `"${branch.candidateLabel}" ended (${branch.result}), even after live re-observation` +
               `${reconstruction?.attempted ? " and checkpoint reconstruction" : ""}; stopping.`,
             selectedAction: forcedAction,
-            actionResult: { success: true },
+            actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
             satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
             successCriteria: task.successCriteria,
             safetyFlags: ["branch_restore_failed"],
@@ -963,7 +963,12 @@ export async function runStep(params: {
                   ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
                   ...(result.reason ? { reason: result.reason } : {}),
                 });
-                const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+                const returnResult: ActionResult = {
+                  success: result.restored,
+                  resultingUrl: result.parentUrl,
+                  error: result.reason,
+                  interactionOutcome: result.restored ? "NAVIGATION" : "NO_OBSERVABLE_CHANGE",
+                };
                 return returnResult;
               })()
             : await dispatchAction({
@@ -1207,7 +1212,12 @@ export async function runStep(params: {
         decision:
           "Skipped a reasoning call: the element that intercepted the previous attempt still blocks the same target.",
         selectedAction: forcedAction,
-        actionResult: { success: false, staleTarget: true, error: "persistent_blocker_signature_unchanged" },
+        actionResult: {
+          success: false,
+          staleTarget: true,
+          error: "persistent_blocker_signature_unchanged",
+          interactionOutcome: "NO_OBSERVABLE_CHANGE",
+        },
         satisfiedCriteriaIds: [...state.satisfiedCriteriaIds],
         successCriteria: task.successCriteria,
         safetyFlags: ["persistent_blocker_detected"],
@@ -1840,6 +1850,9 @@ export async function runStep(params: {
   // See ActionTimingOut's own doc comment (actions/click.ts) for why this is a mutable
   // out-param rather than a field threaded through every one of executeClick's own returns.
   const clickTimingOut: ActionTimingOut = {};
+  // See ClickProgressSignal's own doc comment (actions/click.ts): CTA-reveal dead-end fix,
+  // kept out of the JSON-serializable ActionResult for the same reason as clickTimingOut.
+  const clickProgressSignal: ClickProgressSignal = {};
 
   // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
   // adoption"): built fresh for every click dispatch (the only action type a popup/new-tab
@@ -1942,7 +1955,12 @@ export async function runStep(params: {
             ...(result.parentUrl ? { pageUrl: result.parentUrl } : {}),
             ...(result.reason ? { reason: result.reason } : {}),
           });
-          const returnResult: ActionResult = { success: result.restored, resultingUrl: result.parentUrl, error: result.reason };
+          const returnResult: ActionResult = {
+                  success: result.restored,
+                  resultingUrl: result.parentUrl,
+                  error: result.reason,
+                  interactionOutcome: result.restored ? "NAVIGATION" : "NO_OBSERVABLE_CHANGE",
+                };
           return returnResult;
         })()
       : await dispatchAction({
@@ -1961,6 +1979,7 @@ export async function runStep(params: {
               : undefined,
           surfaceAdoption: surfaceAdoptionRequest,
           timingOut: isClick ? clickTimingOut : undefined,
+          progressSignal: isClick ? clickProgressSignal : undefined,
           // Multi-form journey-relevance selection (see forms/formRelevance.ts): built only for
           // fill_form, from evidence the engine already has -- the objective, the currently-
           // unsatisfied required milestones' own descriptions, and the previous step's clicked
@@ -2256,7 +2275,12 @@ export async function runStep(params: {
     }
   }
 
-  state.recordAction(effectiveAction, { url: observation.url, title: observation.title }, actionResult.surfaceChangeType);
+  state.recordAction(
+    effectiveAction,
+    { url: observation.url, title: observation.title },
+    actionResult.surfaceChangeType,
+    clickProgressSignal.newInteractiveElementCount,
+  );
   if (isClick && clickedCtaAccessibleName) {
     state.lastClickLabel = clickedCtaAccessibleName;
   }

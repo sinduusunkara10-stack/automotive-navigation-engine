@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SelectedAction } from "../types/actions.js";
-import type { ActionResult } from "../types/task-response.js";
+import type { ActionExecutorResult, ActionResult } from "../types/task-response.js";
 import { DIALOG_SELECTOR } from "../observation/observationBuilder.js";
 
 /**
@@ -36,7 +36,7 @@ function findScrollableDialogCenter(selector: string): { x: number; y: number } 
   return undefined;
 }
 
-export async function executeScroll(page: Page, action: SelectedAction): Promise<ActionResult> {
+export async function executeScroll(page: Page, action: SelectedAction): Promise<ActionExecutorResult> {
   const deltaY = typeof action.params?.deltaY === "number" ? action.params.deltaY : 400;
   try {
     const dialogScrollPoint = await page.evaluate(findScrollableDialogCenter, DIALOG_SELECTOR).catch(() => undefined);

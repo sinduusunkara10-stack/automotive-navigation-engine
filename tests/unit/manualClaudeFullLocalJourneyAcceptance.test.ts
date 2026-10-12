@@ -40,7 +40,7 @@ function step(overrides: Partial<StepLog> = {}): StepLog {
     },
     decision: "Continue is the only visible path toward the objective.",
     selectedAction: { type: "click", target: "el-0" },
-    actionResult: { success: true, resultingUrl: `${BASE_URL}/step2.html` },
+    actionResult: { success: true, resultingUrl: `${BASE_URL}/step2.html`, interactionOutcome: "NAVIGATION" },
     progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
     ...overrides,
   };
@@ -52,7 +52,7 @@ function successSteps(): StepLog[] {
       stepIndex: 0,
       currentUrl: `${BASE_URL}/start.html`,
       selectedAction: { type: "click", target: "el-0" },
-      actionResult: { success: true, resultingUrl: `${BASE_URL}/step2.html` },
+      actionResult: { success: true, resultingUrl: `${BASE_URL}/step2.html`, interactionOutcome: "NAVIGATION" },
     }),
     step({
       stepIndex: 1,
@@ -66,7 +66,7 @@ function successSteps(): StepLog[] {
         ],
       },
       selectedAction: { type: "click", target: "el-1" },
-      actionResult: { success: true, resultingUrl: `${BASE_URL}/success.html` },
+      actionResult: { success: true, resultingUrl: `${BASE_URL}/success.html`, interactionOutcome: "NAVIGATION" },
       progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
     }),
     step({
@@ -78,7 +78,7 @@ function successSteps(): StepLog[] {
         interactiveElements: [],
       },
       selectedAction: { type: "stop_success" },
-      actionResult: { success: true },
+      actionResult: { success: true, interactionOutcome: "NO_OBSERVABLE_CHANGE" },
       progress: { satisfiedCriteriaIds: ["reached_success_page"], estimatedCompletion: 1 },
     }),
   ];
@@ -86,7 +86,7 @@ function successSteps(): StepLog[] {
 
 function successResult(overrides: Partial<TaskResponse> = {}): TaskResponse {
   return {
-    schemaVersion: "1.42.0",
+    schemaVersion: "1.43.0",
     taskId: "claude-full-local-journey",
     status: "success",
     startUrl: `${BASE_URL}/start.html`,

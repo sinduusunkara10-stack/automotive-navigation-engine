@@ -719,8 +719,13 @@ export class RunState {
     action: SelectedAction,
     observationBefore: { url: string; title: string },
     surfaceChangeType?: string,
+    newInteractiveElementCount?: number,
   ): void {
-    this.actionHistory.push({ ...action, ...(surfaceChangeType ? { surfaceChangeType } : {}) });
+    this.actionHistory.push({
+      ...action,
+      ...(surfaceChangeType ? { surfaceChangeType } : {}),
+      ...(newInteractiveElementCount ? { newInteractiveElementCount } : {}),
+    });
     this.stepCount += 1;
     if (action.type === "go_back") {
       this.backtrackCount += 1;
@@ -754,6 +759,13 @@ export class RunState {
    * repeated action identity alone. A no-op once already resolved, and permanently a no-op
    * for a run's very last action, since no further observation is ever taken to compare
    * against.
+   *
+   * CTA-reveal dead-end fix: a url/title diff alone misses the "Continue expands this same
+   * panel's own CTA inventory, e.g. revealing Add to Cart" case -- no navigation, no title
+   * change, yet the click plainly advanced the journey. RecordedAction.
+   * newInteractiveElementCount (set from the click's own before/after interactive-element
+   * snapshot diff -- see actions/click.ts) is generic, structural evidence of exactly that,
+   * so it counts as progress too, independent of the url/title check.
    */
   resolveLastActionProgress(url: string, title: string): void {
     const before = this.lastActionObservationBefore;
@@ -764,7 +776,7 @@ export class RunState {
     if (!last || last.observedProgress !== undefined) {
       return;
     }
-    const progressed = url !== before.url || title !== before.title;
+    const progressed = url !== before.url || title !== before.title || Boolean(last.newInteractiveElementCount);
     last.observedProgress = progressed;
   }
 

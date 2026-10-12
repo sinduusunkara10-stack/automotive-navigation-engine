@@ -2,7 +2,12 @@ import type { Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import type { ConsentInteractionPolicy, SurfaceAdoptionDomainPolicy } from "../types/task-request.js";
-import { attachGa4NetworkCapture, type Ga4NetworkCaptureContext } from "./ga4NetworkEvents.js";
+import {
+  attachGa4NetworkCapture,
+  captureGa4FromResourceTiming,
+  mergeGa4ResourceTimingSnapshot,
+  type Ga4NetworkCaptureContext,
+} from "./ga4NetworkEvents.js";
 import { attachDataLayerPushCapture, captureDataLayer, type DataLayerPushCaptureContext } from "./dataLayer.js";
 import { popupContextId, MAIN_CONTEXT_ID } from "./captureContext.js";
 import { POPUP_ADOPTION_WINDOW_MS } from "../config/captureLimits.js";
@@ -404,6 +409,12 @@ export async function adoptPopupForCapture(
         captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), entry];
       }
     }
+    if (wantsGa4) {
+      const ga4Snapshot = await captureGa4FromResourceTiming(popup, stepIndex, { contextId, forcedSource: "popup_context" }).catch(
+        () => [],
+      );
+      mergeGa4ResourceTimingSnapshot(captures, ga4Snapshot);
+    }
   } finally {
     detachGa4?.();
     detachPush?.();
@@ -626,6 +637,21 @@ export async function adoptOrCapturePopup(params: {
     // point, under the popup_context tag) and every later in-tab click's evidence share one
     // continuous, gap-free listener -- never detached and re-attached at all.
     retagPopupContextCaptureAsMain(earlyCapture);
+    // Destination-load evidence recovery: unlike window.dataLayer (persistent in-page state
+    // a later per-step snapshot naturally re-reads), a GA4 pixel fired before
+    // attachPopupContextCapture's listener could attach -- plausible for an inline
+    // <head>/<body> script that fires during this document's own initial parse, before this
+    // engine's adoption code even runs on the Node side -- has no later opportunity to be
+    // observed once missed. One best-effort Resource Timing snapshot, taken right after
+    // adoption settles, closes that gap the same way captureDataLayer's own snapshot already
+    // closes it for dataLayer (see captureGa4FromResourceTiming's own doc comment) --
+    // generic, GA4-protocol-level, never brand/site-specific.
+    if (captureModules.includes("ga4_network_events")) {
+      const ga4Snapshot = await captureGa4FromResourceTiming(popup, stepIndex, earlyCapture.ga4Context ?? { contextId: MAIN_CONTEXT_ID }).catch(
+        () => [],
+      );
+      mergeGa4ResourceTimingSnapshot(captures, ga4Snapshot);
+    }
     return {
       observed: false,
       adoptedPage: popup,
