@@ -166,7 +166,7 @@ class AsyncDialogProvider implements ReasoningProvider {
 
 function buildTask(params: { startUrl: string; maxBacktracks?: number }): TaskRequest {
   return {
-    schemaVersion: "1.44.0",
+    schemaVersion: "1.45.0",
     taskId: "route-progress-classification",
     objective: "Exercise the configured controls; this suite only inspects routeMemory context, never final status.",
     startUrl: params.startUrl,
@@ -182,7 +182,7 @@ function buildTask(params: { startUrl: string; maxBacktracks?: number }): TaskRe
     captureModules: ["errors"],
     limits: { maxSteps: 8, maxBacktracks: params.maxBacktracks ?? 1, maxRepeatedActions: 5 },
     safety: { allowedActions: ["click", "go_back", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.46.0",
+    outputSchemaVersion: "1.47.0",
   };
 }
 

@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "playwright";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
 export const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
@@ -24,9 +24,25 @@ const DEALER_BASELINE_CANDIDATE_ATTR = "data-nav-engine-dealer-baseline-candidat
 
 /** Bounded, not unbounded -- a live production lookup can legitimately take longer than a fixed
  * 3s (confirmed by a live run where it never resolved in 3s+600ms at all), but this still caps
- * total wait rather than polling forever. */
+ * total wait rather than polling forever. Applied independently to EACH stage (location
+ * suggestions, dealer results) -- never once across the whole flow -- so a slow dealer stage
+ * can never be starved by time already spent waiting on the location stage, and vice versa. */
 export const DEALER_RESULT_WAIT_TIMEOUT_MS = 6000;
+/** Granted once per stage, only when a generic loading indicator (see LOADING_INDICATOR_SELECTOR)
+ * is observed still active right at that stage's base timeout -- never granted speculatively. */
+export const DEALER_STAGE_WAIT_EXTENSION_MS = 3000;
+/** Hard ceiling per stage, inclusive of any extension -- a stage can never wait longer than this
+ * regardless of what the page does, so the engine cannot stall indefinitely on a dealer widget. */
+export const DEALER_STAGE_WAIT_MAX_MS = DEALER_RESULT_WAIT_TIMEOUT_MS + DEALER_STAGE_WAIT_EXTENSION_MS;
 export const DEALER_RESULT_POLL_INTERVAL_MS = 250;
+/** Short, bounded check for a suggestion list appearing entirely on its own -- from typing alone,
+ * with no trigger click or keyboard action yet -- run once right after the field is filled and
+ * before deciding whether to activate a trigger at all. */
+export const DEALER_AUTO_APPEAR_CHECK_MS = 1200;
+/** Generic, accessibility-based "the page is still working on this" signal -- never a brand's own
+ * spinner class or loading text. Used only to decide whether a stage's wait has earned one bounded
+ * extension, never to wait indefinitely. */
+const LOADING_INDICATOR_SELECTOR = '[aria-busy="true"], [role="progressbar"], [role="status"]';
 
 /**
  * Generic, language-agnostic vocabulary for a lookup/selection trigger -- "search"/"find"/"go"/
@@ -169,7 +185,15 @@ export async function tagAndFindLookupTriggers(form: Locator, collectDebug = fal
     ) => {
       const submitEls = new Set(Array.from(formEl.querySelectorAll('button[type="submit"], input[type="submit"]')));
       const candidates = Array.from(formEl.querySelectorAll('button, input[type="button"], [role="button"]')) as HTMLElement[];
-      const fieldEls = Array.from(formEl.querySelectorAll(`[${attrs.fieldAttr}]`)) as HTMLElement[];
+      // A hidden <input type="hidden"> is tagged as a field (tagAndReadFields tags every
+      // input/select/textarea unconditionally, for other purposes such as the dealer-identifier
+      // diagnostics) but can never be the target of a user-facing lookup trigger -- it has no
+      // visual presence at all, and browsers collapse it to a zero/degenerate bounding rect that
+      // can otherwise score an accidentally-better ancestor-hop/pixel-distance match than the
+      // real, visible field a trigger is actually adjacent to.
+      const fieldEls = (Array.from(formEl.querySelectorAll(`[${attrs.fieldAttr}]`)) as HTMLElement[]).filter(
+        (el) => !(el instanceof HTMLInputElement && el.type === "hidden"),
+      );
       const results: { triggerIndex: string; text: string; adjacentFieldId: string | null }[] = [];
       const pairDebug: {
         triggerIndex: string;
@@ -437,14 +461,118 @@ async function firstNewCandidate(scope: Locator): Promise<Locator | null> {
   return null;
 }
 
+interface StagePollResult {
+  authoritative: Locator | null;
+  generic: Locator | null;
+  timedOut: boolean;
+  extended: boolean;
+  loadingIndicatorObserved: boolean;
+}
+
+/**
+ * One state-machine stage's bounded, adaptive wait -- never a single fixed-delay waitFor. Checks
+ * the authoritative ARIA/native-radio selector first (unchanged priority) and a brand-new generic
+ * candidate second, every poll interval, stopping the instant either appears. If neither has
+ * appeared by `baseTimeoutMs` and a generic loading indicator is still visibly active in scope,
+ * grants exactly one bounded extension (never more, never unbounded) up to `maxTimeoutMs` total.
+ */
+async function pollForStageResult(page: Page, scope: Locator, baseTimeoutMs: number, extensionMs: number, maxTimeoutMs: number): Promise<StagePollResult> {
+  const start = Date.now();
+  let deadline = start + baseTimeoutMs;
+  let extended = false;
+  let loadingIndicatorObserved = false;
+  // Excludes anything this resolution has already clicked/selected -- without this, an
+  // already-selected radio/option from an earlier stage would keep matching the authoritative
+  // selector forever and look like a brand-new dealer-results stage every time it's re-checked.
+  const authoritativeLocator = scope.locator(`:is(${DEALER_RESULT_SELECTOR}):not([${DEALER_ALREADY_ACTIVATED_ATTR}])`);
+
+  while (true) {
+    if (await authoritativeLocator.first().isVisible().catch(() => false)) {
+      return { authoritative: authoritativeLocator.first(), generic: null, timedOut: false, extended, loadingIndicatorObserved };
+    }
+    const candidate = await firstNewCandidate(scope);
+    if (candidate) {
+      return { authoritative: null, generic: candidate, timedOut: false, extended, loadingIndicatorObserved };
+    }
+    if (Date.now() >= deadline) {
+      if (!extended && Date.now() < start + maxTimeoutMs) {
+        const stillLoading = await scope.locator(LOADING_INDICATOR_SELECTOR).first().isVisible().catch(() => false);
+        if (stillLoading) {
+          loadingIndicatorObserved = true;
+          extended = true;
+          deadline = Math.min(start + maxTimeoutMs, Date.now() + extensionMs);
+          continue;
+        }
+      }
+      return { authoritative: null, generic: null, timedOut: true, extended, loadingIndicatorObserved };
+    }
+    await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
+  }
+}
+
+/** A short, bounded, non-extending check -- used both for "did a dropdown appear entirely on its
+ * own" (Pattern A/D) and for "did ArrowDown alone already reveal something" (Pattern E), neither
+ * of which should ever justify the full per-stage extension logic. */
+async function quickPoll(page: Page, scope: Locator, timeoutMs: number): Promise<StagePollResult> {
+  return pollForStageResult(page, scope, timeoutMs, 0, timeoutMs);
+}
+
+/** Marks the control already used to activate the lookup (a trigger click, or the field itself
+ * for a keyboard-only activation) so a later confirm-control search never re-selects it. */
+const DEALER_ALREADY_ACTIVATED_ATTR = "data-nav-engine-dealer-already-activated";
+
+/**
+ * Freezes a Locator to a stable ElementHandle pointing at the exact node found right now.
+ * Required before marking or clicking anything this module tracks across a DOM mutation: a
+ * Locator is a lazy, re-resolving selector, not a fixed reference -- re-running a selector that
+ * itself excludes "already activated" elements (every authoritative/candidate locator here does)
+ * after marking an element would make that very query stop matching the element it just marked,
+ * and re-running a selector after the widget's own JS has swapped the matched node out for a
+ * different one (a suggestion replaced by the real dealer result) would silently operate on
+ * whatever now happens to occupy that same query position instead.
+ */
+async function freeze(locator: Locator): Promise<ElementHandle<SVGElement | HTMLElement> | null> {
+  return locator.elementHandle({ timeout: 500 }).catch(() => null);
+}
+
+async function markAlreadyActivated(handle: ElementHandle<SVGElement | HTMLElement>): Promise<void> {
+  await handle.evaluate((el, attr) => el.setAttribute(attr, "1"), DEALER_ALREADY_ACTIVATED_ATTR).catch(() => {});
+}
+
+/**
+ * After a location/postcode suggestion has been selected, some widgets (Pattern C) still require
+ * an explicit OK/search/confirm control -- distinct from whichever control (if any) opened the
+ * suggestion list in the first place -- before dealer results appear at all. Looked for only among
+ * vocabulary-matched, visible, enabled controls already structurally scoped to this widget; never
+ * re-clicks a control already marked as used. Returns a frozen handle (see freeze()), not a
+ * Locator, since the caller marks it before clicking.
+ */
+async function findUnclickedConfirmControl(scope: Locator): Promise<ElementHandle<SVGElement | HTMLElement> | null> {
+  const candidates = scope.locator(`:is(button, input[type="button"], input[type="submit"], [role="button"]):not([${DEALER_ALREADY_ACTIVATED_ATTR}])`);
+  const count = await candidates.count().catch(() => 0);
+  for (let i = 0; i < count; i += 1) {
+    const candidate = candidates.nth(i);
+    const visible = await candidate.isVisible().catch(() => false);
+    if (!visible) continue;
+    const enabled = await candidate.isEnabled().catch(() => false);
+    if (!enabled) continue;
+    const text = await candidate.evaluate((el) => el.textContent ?? el.getAttribute("aria-label") ?? el.getAttribute("value") ?? "").catch(() => "");
+    if (matchesLookupTriggerVocabulary(text)) return freeze(candidate);
+  }
+  return null;
+}
+
 /**
  * A clicked result doesn't by itself prove the widget's own JS committed the selection (e.g. a
  * hidden "selected dealer id" field it still has to write) -- check the result's own selected/
  * checked state after a short settle. `aria-checked` is the correct ARIA state for `role="radio"`,
  * `aria-selected` for `role="option"`; both are checked generically since the result could be
- * either.
+ * either. Takes a frozen handle, never a Locator -- a selection is very often the widget's own
+ * cue to replace that exact element (e.g. a location suggestion swapped out for the real dealer
+ * result), and evaluating a still-lazy Locator whose node is already gone would otherwise fall
+ * back to Playwright's own ~30s default actionability wait before any .catch ever sees it.
  */
-async function verifyDealerSelectionCommitted(page: Page, option: Locator): Promise<boolean> {
+async function verifyDealerSelectionCommitted(page: Page, option: ElementHandle<SVGElement | HTMLElement>): Promise<boolean> {
   await page.waitForTimeout(150);
   return option
     .evaluate(
@@ -462,8 +590,17 @@ async function verifyDealerSelectionCommitted(page: Page, option: Locator): Prom
  * result's own text (which could be a real postcode/city/dealer name entered or returned by the
  * live site) -- identity is reported positionally/structurally only.
  */
+export type DealerLookupEvent =
+  | "dispatch_input_change_blur"
+  | "click_trigger"
+  | "press_arrowdown"
+  | "press_enter"
+  | "click_location_suggestion"
+  | "click_confirm_control"
+  | "click_dealer_result";
+
 export interface DealerLookupExecutionTrace {
-  eventsDispatched: ("click_trigger" | "press_enter")[];
+  eventsDispatched: DealerLookupEvent[];
   waitCondition: string;
   waitTimeoutMs: number;
   waitOutcome: "resolved" | "timed_out";
@@ -476,6 +613,23 @@ export interface DealerLookupExecutionTrace {
    * new, visible, generically-clickable element appeared within the dealer-widget scope after
    * the trigger fired, and that element was used as the selected result instead. */
   genericCandidateFallbackUsed: boolean;
+  /** True when a location/postcode suggestion list was already visible, entirely on its own,
+   * before any trigger click or keyboard action was attempted (Pattern A/D). */
+  autoDropdownDetected: boolean;
+  /** True when a distinct OK/search/confirm control (never the same element twice) was found
+   * and clicked after a location suggestion was selected, before polling for dealer results
+   * (Pattern C). */
+  confirmControlClicked: boolean;
+  /** Which bounded stage actually ran out of time, or null if every stage that ran resolved
+   * within its own bound (whether or not a dealer was ultimately verified). */
+  timedOutStage: "location_suggestions" | "dealer_results" | null;
+  /** True when a generic loading indicator (aria-busy/role=progressbar/role=status) was still
+   * visibly active in scope right at a stage's base timeout, justifying its one bounded
+   * extension. */
+  loadingIndicatorObservedAtTimeout: boolean;
+  /** True when a stage's wait was actually extended past its base bound because of an observed
+   * loading indicator -- still capped by that stage's own hard maximum. */
+  stageWaitExtended: boolean;
 }
 
 export interface DealerLookupOutcome {
@@ -492,170 +646,317 @@ export interface DealerLookupOutcome {
   executionTrace: DealerLookupExecutionTrace;
 }
 
+const DEALER_WAIT_CONDITION = `${DEALER_RESULT_SELECTOR} visible within scope, or a new generic result candidate within scope`;
+
 /**
- * State-driven dealer resolution: fill the postcode/city value is the caller's job (this only
- * activates the lookup and inspects what happens), then inspects the resulting state rather than
- * assuming one fixed shape --
- *   1. a selectable result list (radio/option) appears -> select the first, verify it commits;
- *      if it never commits, give the page a moment in case that first list was itself only a
- *      location-suggestion stage and a second, real dealer list replaces it, then retry once;
- *   2. no selectable list appears at all, but the widget's own scoped text materially changed ->
- *      treat as auto-populated (the generic "placeholder/label replaced by real dealer content"
- *      signal -- never a specific brand's placeholder string);
- *   3. neither -> dealer_lookup_unresolved, and the caller must never submit on this basis alone.
- * Never requires a result element to already exist in the DOM before the trigger is activated --
- * on a real site the result container is routinely created only after the click.
+ * Generic multi-stage state machine covering every postcode/location/dealer interaction sequence
+ * this engine has evidence for -- fill the postcode/city value is the caller's job (this only
+ * activates the lookup and inspects what happens):
+ *   0. AUTO-DROPDOWN CHECK -- a short, bounded, non-extending look for a suggestion list that
+ *      appeared entirely on its own from typing alone, before any trigger click or keyboard
+ *      action is attempted (Pattern A/D). Only when nothing appears does the widget get
+ *      activated at all.
+ *   1. ACTIVATION -- click the structurally-associated trigger if one exists; otherwise try
+ *      ArrowDown (the standard combobox "open the menu" key) and, if that alone reveals nothing,
+ *      Enter (Pattern E). A trigger is never clicked twice, and the field/trigger used is marked
+ *      so it can never be mistaken for a *result* later.
+ *   2. LOCATION SUGGESTIONS -- an independently bounded, adaptive poll (never a single fixed
+ *      delay) for the authoritative ARIA/native-radio selector or a generic fallback candidate.
+ *   3. LOCATION SELECTION -- select the first result; verify via its own committed state or a
+ *      scoped text change.
+ *   4. CONFIRM-CONTROL RESCAN -- only if a dealer-results widget hasn't already appeared, look
+ *      for a distinct, not-yet-clicked OK/search/confirm control and activate it (Pattern C).
+ *   5. DEALER RESULTS -- a second, independently bounded, adaptive poll for the dealer list.
+ *   6. DEALER SELECTION -- select and verify the dealer, or recognise it auto-populated with no
+ *      further selectable result (Pattern D), or that nothing further ever came and the stage-1
+ *      selection already *was* the dealer (Pattern B's single-widget case).
+ * Every bounded wait is independent per stage, adaptive (polls frequently, stops the instant the
+ * expected state appears), and grants at most one bounded extension when a generic loading
+ * indicator is still visibly active at its own base timeout -- never unbounded. Never requires a
+ * result element to already exist before activation -- on a real site the result container is
+ * routinely created only afterward.
  */
 export async function resolveDealerLookup(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
   const baselineText = await safeInnerText(scope);
-  const eventDispatched: "click_trigger" | "press_enter" = trigger ? "click_trigger" : "press_enter";
-
-  // Marked before the trigger fires so a bounded poll can later tell "a brand-new result
-  // element appeared" apart from "an element that was already on the page before the lookup
-  // ran" without racy before/after count-diffing.
   await markBaselineCandidates(scope);
 
-  if (trigger) {
-    await trigger.click().catch(() => {});
-  } else {
-    await field.press("Enter").catch(() => {});
-  }
+  // Never rely solely on Playwright's own implicit fill() behaviour -- some widgets only react
+  // to blur, not input/change.
+  await field
+    .evaluate((el: Element) => {
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    })
+    .catch(() => {});
+  await field.blur().catch(() => {});
+  const eventsDispatched: DealerLookupEvent[] = ["dispatch_input_change_blur"];
 
-  const resultLocator = scope.locator(DEALER_RESULT_SELECTOR);
-  let resultsAppeared = false;
-  let genericCandidate: Locator | null = null;
-  const waitTimeoutMs = DEALER_RESULT_WAIT_TIMEOUT_MS;
-  const deadline = Date.now() + waitTimeoutMs;
-  // Adaptive, bounded poll: the authoritative ARIA/native-radio selector is checked every
-  // interval first (unchanged priority over the generic fallback), and only once neither it
-  // nor a brand-new generic candidate has shown up does the loop give up -- never a single
-  // fixed-delay waitFor, since real lookup widgets vary widely in how long they take to render.
-  while (Date.now() < deadline) {
-    if (await resultLocator.first().isVisible().catch(() => false)) {
-      resultsAppeared = true;
-      break;
-    }
-    const candidate = await firstNewCandidate(scope);
-    if (candidate) {
-      genericCandidate = candidate;
-      break;
-    }
-    await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
-  }
-  const suggestionCount = await resultLocator.count().catch(() => 0);
+  // Stage 0: did a suggestion list appear entirely on its own?
+  let stage1 = await quickPoll(page, scope, DEALER_AUTO_APPEAR_CHECK_MS);
+  const autoDropdownDetected = Boolean(stage1.authoritative || stage1.generic);
 
-  if (resultsAppeared) {
-    const first = resultLocator.first();
-    await first.click().catch(() => {});
-    let verified = await verifyDealerSelectionCommitted(page, first);
-    let suggestionSelected = false;
-    let secondStageSuggestionCount: number | null = null;
-
-    if (!verified) {
-      // Possibly a two-stage widget: the first list was a location/geocoding suggestion, not
-      // the dealer itself -- give the page a moment to replace it with the real dealer list,
-      // then retry the same select-and-verify once.
-      await page.waitForTimeout(500);
-      const secondResult = scope.locator(DEALER_RESULT_SELECTOR);
-      const secondCount = await secondResult.count().catch(() => 0);
-      secondStageSuggestionCount = secondCount;
-      if (secondCount > 0) {
-        suggestionSelected = true;
-        const second = secondResult.first();
-        await second.click().catch(() => {});
-        verified = await verifyDealerSelectionCommitted(page, second);
+  if (!autoDropdownDetected) {
+    if (trigger) {
+      // Freeze and mark BEFORE clicking, never after -- a click that causes the widget's own JS
+      // to swap the trigger out of the DOM would otherwise make a lazily-re-resolving locator
+      // mark whatever element happens to occupy that same position afterward instead, which can
+      // be a freshly-appeared result the next stage must still be free to select.
+      const triggerHandle = await freeze(trigger);
+      if (triggerHandle) {
+        await markAlreadyActivated(triggerHandle);
+        await triggerHandle.click().catch(() => {});
+      } else {
+        await trigger.click().catch(() => {});
+      }
+      eventsDispatched.push("click_trigger");
+    } else {
+      await field.press("ArrowDown").catch(() => {});
+      eventsDispatched.push("press_arrowdown");
+      const afterArrowDown = await quickPoll(page, scope, 300);
+      if (afterArrowDown.authoritative || afterArrowDown.generic) {
+        stage1 = afterArrowDown;
+      } else {
+        await field.press("Enter").catch(() => {});
+        eventsDispatched.push("press_enter");
       }
     }
-
-    return {
-      dealerLookupTriggered: true,
-      dealerLookupOutcome: verified ? "dealer_selected" : "unresolved",
-      locationSuggestionsDetected: true,
-      locationSuggestionSelected: suggestionSelected,
-      dealerResultsDetected: true,
-      dealerAutoPopulated: false,
-      dealerSelected: true,
-      dealerValueVerified: verified,
-      dealerVerificationEvidence: verified
-        ? "selected_result_carries_checked_or_aria_checked_or_aria_selected_state"
-        : "no_committed_state_detected_on_selected_result",
-      dealerLookupFailureReason: verified ? undefined : "selectable_result_found_but_commit_state_never_verified",
-      executionTrace: {
-        eventsDispatched: [eventDispatched],
-        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-        waitTimeoutMs,
-        waitOutcome: "resolved",
-        suggestionsDetected: true,
-        suggestionCount,
-        selectedSuggestionIdentity: "result[0]",
-        secondStageSuggestionCount,
-        genericCandidateFallbackUsed: false,
-      },
-    };
+    if (!stage1.authoritative && !stage1.generic) {
+      stage1 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS);
+    }
   }
 
-  if (genericCandidate) {
-    await genericCandidate.click().catch(() => {});
-    const committed = await verifyDealerSelectionCommitted(page, genericCandidate);
-    const afterGenericClickText = await safeInnerText(scope);
-    const scopeTextChanged =
-      afterGenericClickText.trim().length > 0 && afterGenericClickText.trim() !== baselineText.trim();
-    const verified = committed || scopeTextChanged;
+  const suggestionCount = await scope.locator(DEALER_RESULT_SELECTOR).count().catch(() => 0);
+
+  if (!stage1.authoritative && !stage1.generic) {
+    // Nothing selectable ever appeared for the location/postcode stage. Fall back to a scoped
+    // text-change signal (auto-populate with no selectable result at all), else unresolved --
+    // the caller must never submit on either basis alone when unresolved.
+    await page.waitForTimeout(600);
+    const afterText = await safeInnerText(scope);
+    const changed = afterText.trim().length > 0 && afterText.trim() !== baselineText.trim() && afterText.trim().length > baselineText.trim().length;
+
+    if (changed) {
+      return {
+        dealerLookupTriggered: true,
+        dealerLookupOutcome: "auto_populated",
+        locationSuggestionsDetected: false,
+        locationSuggestionSelected: false,
+        dealerResultsDetected: false,
+        dealerAutoPopulated: true,
+        dealerSelected: false,
+        dealerValueVerified: true,
+        dealerVerificationEvidence: "dealer_lookup_scope_text_changed_after_trigger_with_no_selectable_result",
+        executionTrace: {
+          eventsDispatched,
+          waitCondition: DEALER_WAIT_CONDITION,
+          waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
+          waitOutcome: "timed_out",
+          suggestionsDetected: false,
+          suggestionCount,
+          selectedSuggestionIdentity: null,
+          secondStageSuggestionCount: null,
+          genericCandidateFallbackUsed: false,
+          autoDropdownDetected,
+          confirmControlClicked: false,
+          timedOutStage: "location_suggestions",
+          loadingIndicatorObservedAtTimeout: stage1.loadingIndicatorObserved,
+          stageWaitExtended: stage1.extended,
+        },
+      };
+    }
 
     return {
       dealerLookupTriggered: true,
-      dealerLookupOutcome: "suggestion_selected",
-      locationSuggestionsDetected: true,
-      locationSuggestionSelected: true,
-      dealerResultsDetected: verified,
-      dealerAutoPopulated: false,
-      dealerSelected: verified,
-      dealerValueVerified: verified,
-      dealerVerificationEvidence: verified
-        ? "generic_candidate_selected_and_committed_or_scope_state_changed"
-        : "generic_candidate_selected_but_no_committed_state_detected",
-      dealerLookupFailureReason: verified ? undefined : "generic_candidate_selected_but_commit_state_never_verified",
-      executionTrace: {
-        eventsDispatched: [eventDispatched],
-        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope, or a new generic result candidate within scope`,
-        waitTimeoutMs,
-        waitOutcome: "resolved",
-        suggestionsDetected: true,
-        suggestionCount,
-        selectedSuggestionIdentity: "generic_candidate[0]",
-        secondStageSuggestionCount: null,
-        genericCandidateFallbackUsed: true,
-      },
-    };
-  }
-
-  await page.waitForTimeout(600);
-  const afterText = await safeInnerText(scope);
-  const trimmedBefore = baselineText.trim();
-  const trimmedAfter = afterText.trim();
-  const changed = trimmedAfter.length > 0 && trimmedAfter !== trimmedBefore && trimmedAfter.length > trimmedBefore.length;
-
-  if (changed) {
-    return {
-      dealerLookupTriggered: true,
-      dealerLookupOutcome: "auto_populated",
+      dealerLookupOutcome: "unresolved",
       locationSuggestionsDetected: false,
       locationSuggestionSelected: false,
       dealerResultsDetected: false,
-      dealerAutoPopulated: true,
+      dealerAutoPopulated: false,
       dealerSelected: false,
-      dealerValueVerified: true,
-      dealerVerificationEvidence: "dealer_lookup_scope_text_changed_after_trigger_with_no_selectable_result",
+      dealerValueVerified: false,
+      dealerVerificationEvidence: "no_change_detected_in_dealer_lookup_scope",
+      dealerLookupFailureReason: "no_selectable_result_and_no_text_change_within_timeout",
       executionTrace: {
-        eventsDispatched: [eventDispatched],
-        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-        waitTimeoutMs,
+        eventsDispatched,
+        waitCondition: DEALER_WAIT_CONDITION,
+        waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
         waitOutcome: "timed_out",
         suggestionsDetected: false,
         suggestionCount,
         selectedSuggestionIdentity: null,
         secondStageSuggestionCount: null,
         genericCandidateFallbackUsed: false,
+        autoDropdownDetected,
+        confirmControlClicked: false,
+        timedOutStage: "location_suggestions",
+        loadingIndicatorObservedAtTimeout: stage1.loadingIndicatorObserved,
+        stageWaitExtended: stage1.extended,
+      },
+    };
+  }
+
+  // Stage 1: select the location/postcode suggestion.
+  const stage1Result = stage1.authoritative ?? stage1.generic!;
+  const stage1WasGeneric = !stage1.authoritative;
+  // Freeze, then mark, then click, in that order -- see the trigger-click comment above for why
+  // marking must happen before clicking, and the freeze() doc comment for why a frozen handle
+  // (not the original lazily-re-resolving Locator) is required for both: marking through the
+  // same self-excluding Locator would make it stop matching the very element it just marked,
+  // and selecting a suggestion routinely replaces it in-place with the real dealer result (the
+  // exact shape this stage exists to handle), which a stale Locator would otherwise re-resolve to.
+  const stage1Handle = await freeze(stage1Result);
+  if (stage1Handle) {
+    await markAlreadyActivated(stage1Handle);
+    await stage1Handle.click().catch(() => {});
+  } else {
+    await stage1Result.click().catch(() => {});
+  }
+  eventsDispatched.push("click_location_suggestion");
+  const stage1Committed = stage1Handle ? await verifyDealerSelectionCommitted(page, stage1Handle) : false;
+  const afterSelectText = await safeInnerText(scope);
+  const stage1TextChanged = afterSelectText.trim().length > 0 && afterSelectText.trim() !== baselineText.trim();
+  const stage1Verified = stage1Committed || stage1TextChanged;
+
+  // Re-baseline so this stage's own elements never register as "new" in the next stage.
+  await markBaselineCandidates(scope);
+
+  // Stage 2 (Pattern C): a distinct confirm/OK/search control, not yet clicked, only if a
+  // dealer-results widget hasn't already appeared on its own.
+  let confirmControlClicked = false;
+  const alreadyDealerVisible = await scope
+    .locator(`:is(${DEALER_RESULT_SELECTOR}):not([${DEALER_ALREADY_ACTIVATED_ATTR}])`)
+    .first()
+    .isVisible()
+    .catch(() => false);
+  if (!alreadyDealerVisible) {
+    const confirmControl = await findUnclickedConfirmControl(scope);
+    if (confirmControl) {
+      // Mark BEFORE clicking -- same reasoning as the trigger/suggestion clicks above.
+      await markAlreadyActivated(confirmControl);
+      await confirmControl.click().catch(() => {});
+      confirmControlClicked = true;
+      eventsDispatched.push("click_confirm_control");
+      await markBaselineCandidates(scope);
+    }
+  }
+
+  // Stage 3: dealer results, independently bounded from stage 1/2.
+  const stage3 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS);
+  const secondStageSuggestionCount = await scope.locator(DEALER_RESULT_SELECTOR).count().catch(() => 0);
+
+  if (stage3.authoritative || stage3.generic) {
+    const dealerResult = stage3.authoritative ?? stage3.generic!;
+    const dealerWasGeneric = !stage3.authoritative;
+    const dealerHandle = await freeze(dealerResult);
+    if (dealerHandle) {
+      await dealerHandle.click().catch(() => {});
+    } else {
+      await dealerResult.click().catch(() => {});
+    }
+    eventsDispatched.push("click_dealer_result");
+    const dealerCommitted = dealerHandle ? await verifyDealerSelectionCommitted(page, dealerHandle) : false;
+    const afterDealerText = await safeInnerText(scope);
+    const dealerTextChanged = afterDealerText.trim().length > 0 && afterDealerText.trim() !== afterSelectText.trim();
+    const dealerVerified = dealerCommitted || dealerTextChanged;
+
+    return {
+      dealerLookupTriggered: true,
+      dealerLookupOutcome: dealerVerified ? (dealerWasGeneric ? "suggestion_selected" : "dealer_selected") : "unresolved",
+      locationSuggestionsDetected: true,
+      locationSuggestionSelected: true,
+      dealerResultsDetected: true,
+      dealerAutoPopulated: false,
+      dealerSelected: true,
+      dealerValueVerified: dealerVerified,
+      dealerVerificationEvidence: dealerVerified
+        ? dealerCommitted
+          ? "selected_result_carries_checked_or_aria_checked_or_aria_selected_state"
+          : "dealer_lookup_scope_text_changed_after_second_stage_selection"
+        : "no_committed_state_detected_on_selected_result",
+      dealerLookupFailureReason: dealerVerified ? undefined : "selectable_result_found_but_commit_state_never_verified",
+      executionTrace: {
+        eventsDispatched,
+        waitCondition: DEALER_WAIT_CONDITION,
+        waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
+        waitOutcome: "resolved",
+        suggestionsDetected: true,
+        suggestionCount,
+        selectedSuggestionIdentity: "dealer_result[0]",
+        secondStageSuggestionCount,
+        genericCandidateFallbackUsed: stage1WasGeneric || dealerWasGeneric,
+        autoDropdownDetected,
+        confirmControlClicked,
+        timedOutStage: null,
+        loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
+        stageWaitExtended: stage3.extended,
+      },
+    };
+  }
+
+  // No distinct dealer-results stage ever appeared. Either the location selection itself
+  // already WAS the dealer (a single combined widget -- Pattern B's simplest case), the dealer
+  // auto-populated with no further selectable result (Pattern D), or nothing further happened.
+  const afterDealerText = await safeInnerText(scope);
+  const autoPopulatedFurther = afterDealerText.trim().length > 0 && afterDealerText.trim() !== afterSelectText.trim();
+
+  if (stage1Verified && !autoPopulatedFurther) {
+    return {
+      dealerLookupTriggered: true,
+      dealerLookupOutcome: stage1WasGeneric ? "suggestion_selected" : "dealer_selected",
+      locationSuggestionsDetected: true,
+      locationSuggestionSelected: false,
+      dealerResultsDetected: true,
+      dealerAutoPopulated: false,
+      dealerSelected: true,
+      dealerValueVerified: true,
+      dealerVerificationEvidence: stage1Committed
+        ? "selected_result_carries_checked_or_aria_checked_or_aria_selected_state"
+        : "dealer_lookup_scope_state_changed_after_selection_with_no_distinct_dealer_stage",
+      executionTrace: {
+        eventsDispatched,
+        waitCondition: DEALER_WAIT_CONDITION,
+        waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
+        waitOutcome: "resolved",
+        suggestionsDetected: true,
+        suggestionCount,
+        selectedSuggestionIdentity: "result[0]",
+        secondStageSuggestionCount,
+        genericCandidateFallbackUsed: stage1WasGeneric,
+        autoDropdownDetected,
+        confirmControlClicked,
+        timedOutStage: stage3.timedOut ? "dealer_results" : null,
+        loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
+        stageWaitExtended: stage3.extended,
+      },
+    };
+  }
+
+  if (autoPopulatedFurther) {
+    return {
+      dealerLookupTriggered: true,
+      dealerLookupOutcome: "auto_populated",
+      locationSuggestionsDetected: true,
+      locationSuggestionSelected: confirmControlClicked,
+      dealerResultsDetected: false,
+      dealerAutoPopulated: true,
+      dealerSelected: false,
+      dealerValueVerified: true,
+      dealerVerificationEvidence: "dealer_lookup_scope_text_changed_after_location_selection_with_no_selectable_result",
+      executionTrace: {
+        eventsDispatched,
+        waitCondition: DEALER_WAIT_CONDITION,
+        waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
+        waitOutcome: "timed_out",
+        suggestionsDetected: true,
+        suggestionCount,
+        selectedSuggestionIdentity: "result[0]",
+        secondStageSuggestionCount,
+        genericCandidateFallbackUsed: stage1WasGeneric,
+        autoDropdownDetected,
+        confirmControlClicked,
+        timedOutStage: "dealer_results",
+        loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
+        stageWaitExtended: stage3.extended,
       },
     };
   }
@@ -663,24 +964,29 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
   return {
     dealerLookupTriggered: true,
     dealerLookupOutcome: "unresolved",
-    locationSuggestionsDetected: false,
-    locationSuggestionSelected: false,
+    locationSuggestionsDetected: true,
+    locationSuggestionSelected: confirmControlClicked,
     dealerResultsDetected: false,
     dealerAutoPopulated: false,
     dealerSelected: false,
     dealerValueVerified: false,
-    dealerVerificationEvidence: "no_change_detected_in_dealer_lookup_scope",
-    dealerLookupFailureReason: "no_selectable_result_and_no_text_change_within_timeout",
+    dealerVerificationEvidence: "no_change_detected_in_dealer_lookup_scope_after_location_selection",
+    dealerLookupFailureReason: "location_selected_but_no_selectable_dealer_result_and_no_text_change_within_timeout",
     executionTrace: {
-      eventsDispatched: [eventDispatched],
-      waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-      waitTimeoutMs,
+      eventsDispatched,
+      waitCondition: DEALER_WAIT_CONDITION,
+      waitTimeoutMs: DEALER_RESULT_WAIT_TIMEOUT_MS,
       waitOutcome: "timed_out",
-      suggestionsDetected: false,
+      suggestionsDetected: true,
       suggestionCount,
-      selectedSuggestionIdentity: null,
-      secondStageSuggestionCount: null,
-      genericCandidateFallbackUsed: false,
+      selectedSuggestionIdentity: "result[0]",
+      secondStageSuggestionCount,
+      genericCandidateFallbackUsed: stage1WasGeneric,
+      autoDropdownDetected,
+      confirmControlClicked,
+      timedOutStage: "dealer_results",
+      loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
+      stageWaitExtended: stage3.extended,
     },
   };
 }

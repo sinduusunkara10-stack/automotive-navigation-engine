@@ -671,6 +671,21 @@ export interface ActionResult {
        * but a generic, role/tag-agnostic newly-appeared clickable candidate within the dealer
        * widget's own scope was used instead. */
       genericCandidateFallbackUsed: boolean;
+      /** True when a location/postcode suggestion list was already visible, entirely on its
+       * own, before any trigger click or keyboard action was attempted. */
+      autoDropdownDetected: boolean;
+      /** True when a distinct OK/search/confirm control was found and clicked after a location
+       * suggestion was selected, before polling for dealer results. */
+      confirmControlClicked: boolean;
+      /** Which bounded stage actually ran out of time, or null if every stage that ran
+       * resolved within its own bound. */
+      timedOutStage: "location_suggestions" | "dealer_results" | null;
+      /** True when a generic loading indicator was still visibly active in scope right at a
+       * stage's base timeout, justifying its one bounded extension. */
+      loadingIndicatorObservedAtTimeout: boolean;
+      /** True when a stage's wait was actually extended past its base bound because of an
+       * observed loading indicator. */
+      stageWaitExtended: boolean;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -1769,7 +1784,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.46.0";
+  schemaVersion: "1.47.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

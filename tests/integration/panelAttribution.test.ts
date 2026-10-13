@@ -124,7 +124,7 @@ function buildTask(params: {
   allowedActions?: TaskRequest["safety"]["allowedActions"];
 }): TaskRequest {
   return {
-    schemaVersion: "1.44.0",
+    schemaVersion: "1.45.0",
     taskId: "panel-attribution",
     objective: "Show Info was clicked.",
     startUrl: params.startUrl,
@@ -155,7 +155,7 @@ function buildTask(params: {
     safety: {
       allowedActions: params.allowedActions ?? ["click", "wait", "go_back", "stop_success", "stop_blocked", "stop_failure"],
     },
-    outputSchemaVersion: "1.46.0",
+    outputSchemaVersion: "1.47.0",
   };
 }
 

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">Postcode or city</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <div id="suggestions"></div>
+        <button type="button" id="confirm-btn" disabled>OK</button>
+        <div id="dealer-results"></div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Pattern C: the suggestion dropdown appears entirely on its own (no button needed to
+      // reveal it), selecting a suggestion enables a distinct OK/confirm control, and only
+      // clicking that control reveals the actual dealer results. An engine that clicks OK
+      // before a suggestion is selected would find it disabled and never get a dealer result.
+      let suggestionSelected = false;
+      document.getElementById("dealer-postcode").addEventListener("input", () => {
+        const suggestions = document.getElementById("suggestions");
+        if (suggestions.children.length > 0) return;
+        suggestions.innerHTML = '<div role="option" id="suggestion-1" tabindex="0">Riverside, SW1</div>';
+        document.getElementById("suggestion-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          suggestionSelected = true;
+          document.getElementById("confirm-btn").disabled = false;
+        });
+      });
+      document.getElementById("confirm-btn").addEventListener("click", () => {
+        if (!suggestionSelected) return;
+        const results = document.getElementById("dealer-results");
+        results.innerHTML = '<div role="radio" id="dealer-result-1" tabindex="0">Riverside Motors · 1.2mi</div>';
+        document.getElementById("dealer-result-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-checked", "true");
+          document.getElementById("dealer-committed").value = "dealer-1";
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>
