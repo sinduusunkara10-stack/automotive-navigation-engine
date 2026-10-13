@@ -592,6 +592,93 @@ export interface ActionResult {
     multiplePostcodeFieldsEvidence: string;
   };
   /**
+   * Opt-in, investigation-only dealer/postcode decision-trace evidence -- present only when the
+   * engine process has FORM_DISCOVERY_DIAGNOSTIC=1 set (same gate as formDiscoveryDebug; see
+   * src/diagnostics/dealerLookupDiagnostic.ts). Absent whenever that env var is unset; never
+   * affects trigger-to-field association, dealer-lookup matching, thresholds, or fill/submit
+   * behaviour, which are computed identically either way. Exists so a dealer/postcode-related
+   * form_validation_failed is diagnosable from the API response alone, down to which
+   * trigger-to-field candidate pair was accepted or rejected and why. Never carries a typed
+   * field value, a selected suggestion's own text, or any other submitted personal data.
+   */
+  dealerLookupTrace?: {
+    enabled: true;
+    runId: string;
+    taskId: string;
+    capturedAt: string;
+    captureStage: string;
+    fields: {
+      elementId: string;
+      role: "field" | "trigger";
+      fieldIndex: string | null;
+      triggerIndex: string | null;
+      label: string | null;
+      name: string | null;
+      tag: string;
+      inputType: string | null;
+      semanticRole: string | null;
+      visible: boolean;
+      enabled: boolean;
+      required: boolean;
+      populated: boolean;
+      ariaAttributes: { attribute: string; value: string }[];
+      ariaRelationshipTargets: { attribute: string; targetId: string; targetExists: boolean }[];
+      formId: string | null;
+      sectionId: string | null;
+      domAncestry: { tag: string; hasId: boolean; role: string | null }[];
+      boundingBox: { x: number; y: number; width: number; height: number };
+    }[];
+    triggerFieldPairs: {
+      triggerIndex: string;
+      triggerText: string;
+      fieldIndex: string;
+      ariaMatch: boolean;
+      nearestCommonAncestorHops: number | null;
+      ancestorHopCutoff: number;
+      pixelDistance: number | null;
+      pixelDistanceCutoff: number;
+      domOrderDelta: number;
+      ancestorHopScoreComponent: number | null;
+      pixelDistanceScoreComponent: number | null;
+      finalScore: number | null;
+      passedAncestorCutoff: boolean;
+      passedPixelCutoff: boolean;
+      accepted: boolean;
+      isWinner: boolean;
+      rejectionReason: string | null;
+    }[];
+    execution: {
+      associatedPostcodeFieldIndex: string | null;
+      associatedDealerTriggerIndex: string | null;
+      eventsDispatched: string[];
+      waitCondition: string | null;
+      waitTimeoutMs: number | null;
+      waitOutcome: "resolved" | "timed_out" | "not_attempted";
+      suggestionsDetected: boolean;
+      suggestionCount: number;
+      selectedSuggestionIdentity: string | null;
+      dealerResultsDetected: boolean;
+      dealerSelectionAttempted: boolean;
+      dealerSelectionOutcome: string;
+      dealerIdentifierStateBefore: "not_applicable" | "absent" | "present";
+      dealerIdentifierStateAfter: "not_applicable" | "absent" | "present";
+      hiddenFieldChangeDetected: boolean;
+      networkResponseEvidence: string;
+      positiveCompletionEvidenceUsed: string;
+      preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
+      exactBlockingReason: string;
+    };
+    diagnosticCompleteness: {
+      status: "COMPLETE" | "INCOMPLETE";
+      missingEvidence: string[];
+      evaluatedCandidateCount: number;
+      acceptedCandidateCount: number;
+      rejectedCandidateCount: number;
+      finalDecision: string;
+      finalDecisionReason: string;
+    };
+  };
+  /**
    * Generic radio-group consent discovery/resolution diagnostics (see forms/consentGroups.ts) --
    * always present whenever a submit was attempted or the pre-submit readiness gate ran, even
    * when zero consent groups exist on the form.
@@ -1667,7 +1754,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.44.0";
+  schemaVersion: "1.45.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

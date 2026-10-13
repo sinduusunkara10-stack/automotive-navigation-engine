@@ -1,8 +1,8 @@
 import type { Locator, Page } from "playwright";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
-const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
-const TRIGGER_INDEX_ATTR = "data-nav-engine-trigger-index";
+export const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
+export const TRIGGER_INDEX_ATTR = "data-nav-engine-trigger-index";
 /** Written on the smallest ancestor that contains both a field and its adjacent lookup trigger -- lets resolveDealerLookup scope its before/after text comparison to the dealer widget itself rather than the whole form or the whole page. */
 export const DEALER_SCOPE_ATTR = "data-nav-engine-dealer-scope";
 
@@ -71,6 +71,47 @@ export interface RawLookupTriggerCandidate {
   adjacentFieldId: string | null;
 }
 
+/** Shared, single-source-of-truth cutoffs for trigger-to-field association -- never duplicated as inline literals elsewhere, so a diagnostic report of "configured cutoff" can never drift from the value actually enforced. */
+export const TRIGGER_FIELD_MAX_ANCESTOR_HOPS = 20;
+export const TRIGGER_FIELD_MAX_PIXEL_DISTANCE = 600;
+export const TRIGGER_FIELD_ANCESTOR_HOP_WEIGHT = 40;
+
+/**
+ * Diagnostic-only (see src/diagnostics/dealerLookupDiagnostic.ts) per trigger-candidate x
+ * field-candidate pair evidence -- never read by, or able to influence, the actual association
+ * decision in tagAndFindLookupTriggers (that decision is computed first, unconditionally, by the
+ * exact same code path as before this type existed; this is a second, additive pass over the same
+ * already-computed numbers, only run when explicitly requested). One entry per pair considered,
+ * not just the winner, so a rejected pair's own numbers are always inspectable.
+ */
+export interface TriggerFieldPairDebug {
+  triggerIndex: string;
+  triggerText: string;
+  fieldIndex: string;
+  ariaMatch: boolean;
+  nearestCommonAncestorHops: number | null;
+  ancestorHopCutoff: number;
+  pixelDistance: number | null;
+  pixelDistanceCutoff: number;
+  /** Signed: this field's position in document order minus the trigger's, among all tagged candidates/fields respectively -- a coarse "found before or after" signal, independent of the ancestor/pixel scoring. */
+  domOrderDelta: number;
+  ancestorHopScoreComponent: number | null;
+  pixelDistanceScoreComponent: number | null;
+  finalScore: number | null;
+  passedAncestorCutoff: boolean;
+  passedPixelCutoff: boolean;
+  /** True when this pair was usable at all (an ARIA match, or within both cutoffs) -- independent of whether it ended up the winner (another pair can also be accepted and simply have scored worse). */
+  accepted: boolean;
+  isWinner: boolean;
+  rejectionReason: string | null;
+}
+
+export interface TagAndFindLookupTriggersResult {
+  candidates: RawLookupTriggerCandidate[];
+  /** Present only when collectDebug was true -- every pair considered, for every visible trigger candidate against every tagged field. */
+  pairDebug: TriggerFieldPairDebug[];
+}
+
 /**
  * Tags every visible, non-submit button-like control in the form with TRIGGER_INDEX_ATTR and
  * reports the field it is structurally associated with, if any. Must run after tagAndReadFields
@@ -93,17 +134,47 @@ export interface RawLookupTriggerCandidate {
  * Signals 2 and 3 are combined into one score per candidate field and bounded by sanity cutoffs,
  * so a trigger is never matched to "the nearest field anywhere on the page".
  */
-export async function tagAndFindLookupTriggers(form: Locator): Promise<RawLookupTriggerCandidate[]> {
+export async function tagAndFindLookupTriggers(form: Locator, collectDebug = false): Promise<TagAndFindLookupTriggersResult> {
   return form.evaluate(
-    (formEl: HTMLFormElement, attrs: { fieldAttr: string; triggerAttr: string; scopeAttr: string }) => {
+    (
+      formEl: HTMLFormElement,
+      attrs: {
+        fieldAttr: string;
+        triggerAttr: string;
+        scopeAttr: string;
+        collectDebug: boolean;
+        maxAncestorHops: number;
+        maxPixelDistance: number;
+        ancestorHopWeight: number;
+      },
+    ) => {
       const submitEls = new Set(Array.from(formEl.querySelectorAll('button[type="submit"], input[type="submit"]')));
       const candidates = Array.from(formEl.querySelectorAll('button, input[type="button"], [role="button"]')) as HTMLElement[];
       const fieldEls = Array.from(formEl.querySelectorAll(`[${attrs.fieldAttr}]`)) as HTMLElement[];
       const results: { triggerIndex: string; text: string; adjacentFieldId: string | null }[] = [];
+      const pairDebug: {
+        triggerIndex: string;
+        triggerText: string;
+        fieldIndex: string;
+        ariaMatch: boolean;
+        nearestCommonAncestorHops: number | null;
+        ancestorHopCutoff: number;
+        pixelDistance: number | null;
+        pixelDistanceCutoff: number;
+        domOrderDelta: number;
+        ancestorHopScoreComponent: number | null;
+        pixelDistanceScoreComponent: number | null;
+        finalScore: number | null;
+        passedAncestorCutoff: boolean;
+        passedPixelCutoff: boolean;
+        accepted: boolean;
+        isWinner: boolean;
+        rejectionReason: string | null;
+      }[] = [];
 
-      const MAX_ANCESTOR_HOPS = 20;
-      const MAX_PIXEL_DISTANCE = 600;
-      const ANCESTOR_HOP_WEIGHT = 40;
+      const MAX_ANCESTOR_HOPS = attrs.maxAncestorHops;
+      const MAX_PIXEL_DISTANCE = attrs.maxPixelDistance;
+      const ANCESTOR_HOP_WEIGHT = attrs.ancestorHopWeight;
 
       candidates.forEach((el, i) => {
         if (submitEls.has(el)) return;
@@ -177,6 +248,96 @@ export async function tagAndFindLookupTriggers(form: Locator): Promise<RawLookup
 
         const adjacentFieldId = ariaMatchedId ?? bestFieldId;
 
+        // Diagnostic-only second pass over the same fields, run only when explicitly requested --
+        // never short-circuits like the decision loop above (no `break`/`continue` skipping a
+        // field once a winner is known), so every pair's own real numbers are always inspectable,
+        // including a rejected pair's ancestor-hop/pixel-distance values even when they exceeded a
+        // cutoff. Reads the exact same DOM state the decision loop above already read; computes
+        // nothing that feeds back into adjacentFieldId.
+        if (attrs.collectDebug) {
+          for (let f = 0; f < fieldEls.length; f += 1) {
+            const fieldEl = fieldEls[f]!;
+            const fieldId = fieldEl.getAttribute(attrs.fieldAttr);
+            if (fieldId === null) continue;
+
+            const fieldDomId = fieldEl.getAttribute("id") || "";
+            const describedBy = (fieldEl.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+            const ariaMatchesThisField = Boolean((fieldDomId && referencedIds.includes(fieldDomId)) || (triggerDomId && describedBy.includes(triggerDomId)));
+
+            let ancestor: Element | null = el;
+            let triggerHops = 0;
+            let sharedAncestor: Element | null = null;
+            while (ancestor && ancestor !== formEl.parentElement) {
+              if (ancestor.contains(fieldEl)) {
+                sharedAncestor = ancestor;
+                break;
+              }
+              ancestor = ancestor.parentElement;
+              triggerHops += 1;
+            }
+            let nearestCommonAncestorHops: number | null = null;
+            if (sharedAncestor) {
+              let fieldAncestor: Element | null = fieldEl;
+              let fieldHops = 0;
+              while (fieldAncestor && fieldAncestor !== sharedAncestor) {
+                fieldAncestor = fieldAncestor.parentElement;
+                fieldHops += 1;
+              }
+              nearestCommonAncestorHops = triggerHops + fieldHops;
+            }
+
+            const fieldRect = fieldEl.getBoundingClientRect();
+            const dx = rect.left + rect.width / 2 - (fieldRect.left + fieldRect.width / 2);
+            const dy = rect.top + rect.height / 2 - (fieldRect.top + fieldRect.height / 2);
+            const pixelDistance = Math.sqrt(dx * dx + dy * dy);
+
+            const passedAncestorCutoff = nearestCommonAncestorHops !== null && nearestCommonAncestorHops <= MAX_ANCESTOR_HOPS;
+            const passedPixelCutoff = Number.isFinite(pixelDistance) && pixelDistance <= MAX_PIXEL_DISTANCE;
+            const ancestorHopScoreComponent = nearestCommonAncestorHops !== null ? nearestCommonAncestorHops * ANCESTOR_HOP_WEIGHT : null;
+            const pixelDistanceScoreComponent = Number.isFinite(pixelDistance) ? pixelDistance : null;
+            const finalScore =
+              ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff)
+                ? ariaMatchesThisField
+                  ? 0
+                  : (ancestorHopScoreComponent ?? 0) + (pixelDistanceScoreComponent ?? 0)
+                : null;
+            const accepted = ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff);
+            const isWinner = adjacentFieldId === fieldId;
+
+            let rejectionReason: string | null = null;
+            if (!accepted) {
+              const reasons: string[] = [];
+              if (nearestCommonAncestorHops === null) reasons.push("no shared ancestor found within the form");
+              else if (!passedAncestorCutoff) reasons.push(`ancestor-hop count ${nearestCommonAncestorHops} exceeds cutoff ${MAX_ANCESTOR_HOPS}`);
+              if (!Number.isFinite(pixelDistance)) reasons.push("pixel distance could not be computed");
+              else if (!passedPixelCutoff) reasons.push(`pixel distance ${Math.round(pixelDistance)} exceeds cutoff ${MAX_PIXEL_DISTANCE}`);
+              rejectionReason = reasons.length > 0 ? reasons.join("; ") : "did not match on any signal";
+            } else if (!isWinner) {
+              rejectionReason = ariaMatchedId !== null ? "another field had an authoritative ARIA match" : "another accepted field scored better (lower combined ancestor-hop + pixel-distance score)";
+            }
+
+            pairDebug.push({
+              triggerIndex,
+              triggerText: text,
+              fieldIndex: fieldId,
+              ariaMatch: ariaMatchesThisField,
+              nearestCommonAncestorHops,
+              ancestorHopCutoff: MAX_ANCESTOR_HOPS,
+              pixelDistance: Number.isFinite(pixelDistance) ? pixelDistance : null,
+              pixelDistanceCutoff: MAX_PIXEL_DISTANCE,
+              domOrderDelta: i - f,
+              ancestorHopScoreComponent,
+              pixelDistanceScoreComponent,
+              finalScore,
+              passedAncestorCutoff,
+              passedPixelCutoff,
+              accepted,
+              isWinner,
+              rejectionReason,
+            });
+          }
+        }
+
         if (adjacentFieldId !== null) {
           const fieldEl = formEl.querySelector(`[${attrs.fieldAttr}="${adjacentFieldId}"]`);
           if (fieldEl) {
@@ -194,9 +355,17 @@ export async function tagAndFindLookupTriggers(form: Locator): Promise<RawLookup
         results.push({ triggerIndex, text, adjacentFieldId });
       });
 
-      return results;
+      return { candidates: results, pairDebug };
     },
-    { fieldAttr: FIELD_INDEX_ATTR, triggerAttr: TRIGGER_INDEX_ATTR, scopeAttr: DEALER_SCOPE_ATTR },
+    {
+      fieldAttr: FIELD_INDEX_ATTR,
+      triggerAttr: TRIGGER_INDEX_ATTR,
+      scopeAttr: DEALER_SCOPE_ATTR,
+      collectDebug,
+      maxAncestorHops: TRIGGER_FIELD_MAX_ANCESTOR_HOPS,
+      maxPixelDistance: TRIGGER_FIELD_MAX_PIXEL_DISTANCE,
+      ancestorHopWeight: TRIGGER_FIELD_ANCESTOR_HOP_WEIGHT,
+    },
   );
 }
 
@@ -230,6 +399,26 @@ async function verifyDealerSelectionCommitted(page: Page, option: Locator): Prom
     .catch(() => false);
 }
 
+/**
+ * Diagnostic-only (see src/diagnostics/dealerLookupDiagnostic.ts) blow-by-blow record of what
+ * resolveDealerLookup actually did and observed -- every field here is read from state this
+ * function already computes or a single additional cheap, non-waiting DOM count; nothing here
+ * changes resolveDealerLookup's own timing, waits, or decisions. Never includes a selected
+ * result's own text (which could be a real postcode/city/dealer name entered or returned by the
+ * live site) -- identity is reported positionally/structurally only.
+ */
+export interface DealerLookupExecutionTrace {
+  eventsDispatched: ("click_trigger" | "press_enter")[];
+  waitCondition: string;
+  waitTimeoutMs: number;
+  waitOutcome: "resolved" | "timed_out";
+  suggestionsDetected: boolean;
+  suggestionCount: number;
+  /** Positional only -- e.g. "result[0]" -- never the selected result's own text content. */
+  selectedSuggestionIdentity: string | null;
+  secondStageSuggestionCount: number | null;
+}
+
 export interface DealerLookupOutcome {
   dealerLookupTriggered: boolean;
   dealerLookupOutcome: "auto_populated" | "suggestion_selected" | "dealer_selected" | "unresolved";
@@ -241,6 +430,7 @@ export interface DealerLookupOutcome {
   dealerValueVerified: boolean;
   dealerVerificationEvidence: string;
   dealerLookupFailureReason?: string;
+  executionTrace: DealerLookupExecutionTrace;
 }
 
 /**
@@ -259,6 +449,7 @@ export interface DealerLookupOutcome {
  */
 export async function resolveDealerLookup(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
   const baselineText = await safeInnerText(scope);
+  const eventDispatched: "click_trigger" | "press_enter" = trigger ? "click_trigger" : "press_enter";
 
   if (trigger) {
     await trigger.click().catch(() => {});
@@ -268,18 +459,21 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
 
   const resultLocator = scope.locator(DEALER_RESULT_SELECTOR);
   let resultsAppeared = false;
+  const firstWaitTimeoutMs = 3000;
   try {
-    await resultLocator.first().waitFor({ state: "visible", timeout: 3000 });
+    await resultLocator.first().waitFor({ state: "visible", timeout: firstWaitTimeoutMs });
     resultsAppeared = true;
   } catch {
     resultsAppeared = false;
   }
+  const suggestionCount = await resultLocator.count().catch(() => 0);
 
   if (resultsAppeared) {
     const first = resultLocator.first();
     await first.click().catch(() => {});
     let verified = await verifyDealerSelectionCommitted(page, first);
     let suggestionSelected = false;
+    let secondStageSuggestionCount: number | null = null;
 
     if (!verified) {
       // Possibly a two-stage widget: the first list was a location/geocoding suggestion, not
@@ -288,6 +482,7 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       await page.waitForTimeout(500);
       const secondResult = scope.locator(DEALER_RESULT_SELECTOR);
       const secondCount = await secondResult.count().catch(() => 0);
+      secondStageSuggestionCount = secondCount;
       if (secondCount > 0) {
         suggestionSelected = true;
         const second = secondResult.first();
@@ -309,6 +504,16 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
         ? "selected_result_carries_checked_or_aria_checked_or_aria_selected_state"
         : "no_committed_state_detected_on_selected_result",
       dealerLookupFailureReason: verified ? undefined : "selectable_result_found_but_commit_state_never_verified",
+      executionTrace: {
+        eventsDispatched: [eventDispatched],
+        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
+        waitTimeoutMs: firstWaitTimeoutMs,
+        waitOutcome: "resolved",
+        suggestionsDetected: true,
+        suggestionCount,
+        selectedSuggestionIdentity: "result[0]",
+        secondStageSuggestionCount,
+      },
     };
   }
 
@@ -329,6 +534,16 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       dealerSelected: false,
       dealerValueVerified: true,
       dealerVerificationEvidence: "dealer_lookup_scope_text_changed_after_trigger_with_no_selectable_result",
+      executionTrace: {
+        eventsDispatched: [eventDispatched],
+        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
+        waitTimeoutMs: firstWaitTimeoutMs,
+        waitOutcome: "timed_out",
+        suggestionsDetected: false,
+        suggestionCount,
+        selectedSuggestionIdentity: null,
+        secondStageSuggestionCount: null,
+      },
     };
   }
 
@@ -343,5 +558,15 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
     dealerValueVerified: false,
     dealerVerificationEvidence: "no_change_detected_in_dealer_lookup_scope",
     dealerLookupFailureReason: "no_selectable_result_and_no_text_change_within_timeout",
+    executionTrace: {
+      eventsDispatched: [eventDispatched],
+      waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
+      waitTimeoutMs: firstWaitTimeoutMs,
+      waitOutcome: "timed_out",
+      suggestionsDetected: false,
+      suggestionCount,
+      selectedSuggestionIdentity: null,
+      secondStageSuggestionCount: null,
+    },
   };
 }
