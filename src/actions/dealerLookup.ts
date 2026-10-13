@@ -1,4 +1,5 @@
 import type { ElementHandle, Locator, Page } from "playwright";
+import { startDealerLookupNetworkCapture, summarizeDealerLookupNetworkActivity, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
 export const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
@@ -17,10 +18,24 @@ export const DEALER_RESULT_SELECTOR = '[role="radio"], input[type="radio"], [rol
  * change elsewhere can't produce a false positive.
  */
 const GENERIC_RESULT_CANDIDATE_SELECTOR = 'a, button, li, [role], [onclick], [tabindex]';
-/** Marks every candidate already present before the trigger is activated, so the first
+/** Marks every candidate already visible before the trigger is activated, so the first
  * unmarked, visible candidate afterward is provably new -- avoids racy before/after count
- * diffing and never depends on DOM order staying stable. */
+ * diffing and never depends on DOM order staying stable. Deliberately visibility-gated (not
+ * "every matching element regardless of visibility"): a result container that already exists in
+ * the DOM at baseline time but is hidden, then later made visible with no new element ever
+ * inserted, must still register as new -- a hidden-until-shown container was confirmed as a real,
+ * generic rendering pattern this engine has to handle, not a hypothetical. */
 const DEALER_BASELINE_CANDIDATE_ATTR = "data-nav-engine-dealer-baseline-candidate";
+/** Marks every candidate present at baseline regardless of visibility -- independent of the
+ * visibility-gated attribute above, used only to report (never to decide) whether a result that
+ * later appears was a pre-existing-but-hidden element or a freshly-inserted one. Diagnostic-only. */
+const DEALER_BASELINE_EXISTED_ATTR = "data-nav-engine-dealer-baseline-existed";
+/** Marks every authoritative ARIA/native-radio result element present anywhere on the page
+ * (not just in scope) before the lookup starts -- lets the page-wide fallback tier (see
+ * pollForStageResult) tell a genuinely new result rendered outside the widget's own DOM scope
+ * (e.g. a portal/overlay appended elsewhere, a common pattern for positioned dropdowns) apart
+ * from an unrelated pre-existing control elsewhere on the page that merely shares the same role. */
+const DEALER_PAGE_BASELINE_AUTHORITATIVE_ATTR = "data-nav-engine-dealer-page-baseline-authoritative";
 
 /** Bounded, not unbounded -- a live production lookup can legitimately take longer than a fixed
  * 3s (confirmed by a live run where it never resolved in 3s+600ms at all), but this still caps
@@ -435,19 +450,50 @@ async function safeInnerText(locator: Locator): Promise<string> {
   return locator.evaluate((el: Element) => el.textContent ?? "").catch(() => "");
 }
 
-/** Tags every current generic candidate as "pre-existing" so a later check can tell new from old. */
+/** Presence-only, never the validation message's own text (which some browsers can echo the
+ * field's current value into) -- see DealerLookupExecutionTrace's own doc comments. */
+async function readFieldValidationState(field: Locator): Promise<{ ariaInvalid: boolean; hasNativeValidationMessage: boolean }> {
+  return field
+    .evaluate((el: Element) => ({
+      ariaInvalid: el.getAttribute("aria-invalid") === "true",
+      hasNativeValidationMessage: ((el as HTMLInputElement).validationMessage ?? "").length > 0,
+    }))
+    .catch(() => ({ ariaInvalid: false, hasNativeValidationMessage: false }));
+}
+
+/** Tags every current generic candidate as "pre-existing" so a later check can tell new from old.
+ * Only candidates VISIBLE right now are tagged with the exclusion attribute -- a candidate that
+ * exists but is hidden at this moment is tagged only with the diagnostic-only "existed" attribute,
+ * so if it later becomes visible with no new element ever inserted, it is still correctly treated
+ * as a new result (see DEALER_BASELINE_CANDIDATE_ATTR's own doc comment). */
 async function markBaselineCandidates(scope: Locator): Promise<void> {
   await scope
     .locator(GENERIC_RESULT_CANDIDATE_SELECTOR)
-    .evaluateAll((els: Element[], attr: string) => {
-      els.forEach((el) => el.setAttribute(attr, "1"));
-    }, DEALER_BASELINE_CANDIDATE_ATTR)
+    .evaluateAll(
+      (els: Element[], attrs: { existedAttr: string; visibleAttr: string }) => {
+        els.forEach((el) => {
+          el.setAttribute(attrs.existedAttr, "1");
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+          if (visible) el.setAttribute(attrs.visibleAttr, "1");
+        });
+      },
+      { existedAttr: DEALER_BASELINE_EXISTED_ATTR, visibleAttr: DEALER_BASELINE_CANDIDATE_ATTR },
+    )
     .catch(() => {});
+}
+
+interface NewCandidateResult {
+  locator: Locator;
+  /** True when this element already existed in the DOM at baseline time (just hidden), rather
+   * than being freshly inserted afterward -- diagnostic-only, never affects selection. */
+  wasPreExistingHiddenElement: boolean;
 }
 
 /** The first visible candidate that wasn't already present when the trigger was activated, or
  * null if none has appeared yet. Never selected by tag/class identity -- only "new and visible". */
-async function firstNewCandidate(scope: Locator): Promise<Locator | null> {
+async function firstNewCandidate(scope: Locator): Promise<NewCandidateResult | null> {
   // :not() binds only to the single compound selector immediately before it, not to a whole
   // comma-separated list -- wrapping the candidate list in :is(...) first is required so the
   // exclusion applies to every branch (a/button/li/[role]/[onclick]/[tabindex]) rather than only
@@ -456,7 +502,10 @@ async function firstNewCandidate(scope: Locator): Promise<Locator | null> {
   const count = await newCandidates.count().catch(() => 0);
   for (let i = 0; i < count; i += 1) {
     const candidate = newCandidates.nth(i);
-    if (await candidate.isVisible().catch(() => false)) return candidate;
+    if (await candidate.isVisible().catch(() => false)) {
+      const wasPreExistingHiddenElement = await candidate.evaluate((el, attr) => el.hasAttribute(attr), DEALER_BASELINE_EXISTED_ATTR).catch(() => false);
+      return { locator: candidate, wasPreExistingHiddenElement };
+    }
   }
   return null;
 }
@@ -467,6 +516,16 @@ interface StagePollResult {
   timedOut: boolean;
   extended: boolean;
   loadingIndicatorObserved: boolean;
+  /** True when the authoritative match was never found inside `scope` at all and only matched
+   * page-wide -- the widget rendered its result outside the DOM subtree that contains the trigger
+   * and its field (a portal/overlay appended elsewhere is the common real-world cause). Always
+   * false for a generic-candidate match (the generic fallback stays scope-only, deliberately --
+   * see GENERIC_RESULT_CANDIDATE_SELECTOR's own doc comment on why a page-wide generic search
+   * would be too false-positive-prone to use safely). */
+  foundOutsideScope: boolean;
+  /** Diagnostic-only, mirrors NewCandidateResult.wasPreExistingHiddenElement; always false for an
+   * authoritative match (that path isn't baseline-gated the same way -- see below). */
+  wasPreExistingHiddenElement: boolean;
 }
 
 /**
@@ -475,8 +534,23 @@ interface StagePollResult {
  * candidate second, every poll interval, stopping the instant either appears. If neither has
  * appeared by `baseTimeoutMs` and a generic loading indicator is still visibly active in scope,
  * grants exactly one bounded extension (never more, never unbounded) up to `maxTimeoutMs` total.
+ *
+ * `pageWideAuthoritativeFallback`, when provided, is checked only after the in-scope authoritative
+ * and generic checks both miss on a given poll tick -- a second, page-wide-but-narrow tier that
+ * looks only for a NEW (not pre-existing at lookup start) authoritative ARIA/native-radio element
+ * anywhere on the page. Deliberately restricted to the authoritative selector alone (never the
+ * noisy generic one) to keep the false-positive risk of searching outside the widget's own DOM
+ * scope low: an unrelated page element sharing role="radio"/role="option" that already existed
+ * before the lookup started can never match, since it was tagged at baseline.
  */
-async function pollForStageResult(page: Page, scope: Locator, baseTimeoutMs: number, extensionMs: number, maxTimeoutMs: number): Promise<StagePollResult> {
+async function pollForStageResult(
+  page: Page,
+  scope: Locator,
+  baseTimeoutMs: number,
+  extensionMs: number,
+  maxTimeoutMs: number,
+  pageWideAuthoritativeFallback?: Locator,
+): Promise<StagePollResult> {
   const start = Date.now();
   let deadline = start + baseTimeoutMs;
   let extended = false;
@@ -488,11 +562,30 @@ async function pollForStageResult(page: Page, scope: Locator, baseTimeoutMs: num
 
   while (true) {
     if (await authoritativeLocator.first().isVisible().catch(() => false)) {
-      return { authoritative: authoritativeLocator.first(), generic: null, timedOut: false, extended, loadingIndicatorObserved };
+      return { authoritative: authoritativeLocator.first(), generic: null, timedOut: false, extended, loadingIndicatorObserved, foundOutsideScope: false, wasPreExistingHiddenElement: false };
     }
     const candidate = await firstNewCandidate(scope);
     if (candidate) {
-      return { authoritative: null, generic: candidate, timedOut: false, extended, loadingIndicatorObserved };
+      return {
+        authoritative: null,
+        generic: candidate.locator,
+        timedOut: false,
+        extended,
+        loadingIndicatorObserved,
+        foundOutsideScope: false,
+        wasPreExistingHiddenElement: candidate.wasPreExistingHiddenElement,
+      };
+    }
+    if (pageWideAuthoritativeFallback && (await pageWideAuthoritativeFallback.first().isVisible().catch(() => false))) {
+      return {
+        authoritative: pageWideAuthoritativeFallback.first(),
+        generic: null,
+        timedOut: false,
+        extended,
+        loadingIndicatorObserved,
+        foundOutsideScope: true,
+        wasPreExistingHiddenElement: false,
+      };
     }
     if (Date.now() >= deadline) {
       if (!extended && Date.now() < start + maxTimeoutMs) {
@@ -504,7 +597,7 @@ async function pollForStageResult(page: Page, scope: Locator, baseTimeoutMs: num
           continue;
         }
       }
-      return { authoritative: null, generic: null, timedOut: true, extended, loadingIndicatorObserved };
+      return { authoritative: null, generic: null, timedOut: true, extended, loadingIndicatorObserved, foundOutsideScope: false, wasPreExistingHiddenElement: false };
     }
     await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
   }
@@ -515,6 +608,24 @@ async function pollForStageResult(page: Page, scope: Locator, baseTimeoutMs: num
  * of which should ever justify the full per-stage extension logic. */
 async function quickPoll(page: Page, scope: Locator, timeoutMs: number): Promise<StagePollResult> {
   return pollForStageResult(page, scope, timeoutMs, 0, timeoutMs);
+}
+
+/** Page-wide locator for a NEW authoritative result, excluding anything present at baseline --
+ * see DEALER_PAGE_BASELINE_AUTHORITATIVE_ATTR's own doc comment. */
+function pageWideNewAuthoritativeLocator(page: Page): Locator {
+  return page.locator(`:is(${DEALER_RESULT_SELECTOR}):not([${DEALER_ALREADY_ACTIVATED_ATTR}]):not([${DEALER_PAGE_BASELINE_AUTHORITATIVE_ATTR}])`);
+}
+
+/** Tags every authoritative-role element present anywhere on the page right now as pre-existing,
+ * so the page-wide fallback tier can later tell a genuinely new result (rendered outside the
+ * widget's own DOM scope) apart from an unrelated control elsewhere on the page. */
+async function markPageBaselineAuthoritative(page: Page): Promise<void> {
+  await page
+    .locator(DEALER_RESULT_SELECTOR)
+    .evaluateAll((els: Element[], attr: string) => {
+      els.forEach((el) => el.setAttribute(attr, "1"));
+    }, DEALER_PAGE_BASELINE_AUTHORITATIVE_ATTR)
+    .catch(() => {});
 }
 
 /** Marks the control already used to activate the lookup (a trigger click, or the field itself
@@ -592,6 +703,7 @@ async function verifyDealerSelectionCommitted(page: Page, option: ElementHandle<
  */
 export type DealerLookupEvent =
   | "dispatch_input_change_blur"
+  | "dispatch_keyboard_events"
   | "click_trigger"
   | "press_arrowdown"
   | "press_enter"
@@ -630,6 +742,24 @@ export interface DealerLookupExecutionTrace {
   /** True when a stage's wait was actually extended past its base bound because of an observed
    * loading indicator -- still capped by that stage's own hard maximum. */
   stageWaitExtended: boolean;
+  /** True when the selected result was never found inside the trigger/field's own DOM-containment
+   * scope and only matched a page-wide fallback search -- see pollForStageResult's own doc
+   * comment. Null when no result was ever selected at all (nothing to report this about). */
+  resultFoundOutsideScope: boolean | null;
+  /** True when the selected generic-fallback result already existed in the DOM before the lookup
+   * started, merely hidden, rather than being freshly inserted afterward. Null when no generic
+   * candidate was ever selected (an authoritative result, or no result at all). */
+  wasPreExistingHiddenElement: boolean | null;
+  /** Sanitised xhr/fetch request evidence observed during this call -- see
+   * dealerLookupNetwork.ts. Never a request/response body, never a typed or returned value. */
+  networkRequests: SanitizedNetworkRequestEvidence[];
+  /** True when the postcode/location field itself carried aria-invalid="true" at the moment a
+   * stage timed out with no result -- never the validation message text itself, which some
+   * browsers can echo the field's own value into. */
+  fieldAriaInvalidAtTimeout: boolean;
+  /** True when the field's native (browser-generated) validationMessage was non-empty at the
+   * moment a stage timed out with no result -- presence only, never the message text itself. */
+  fieldHasNativeValidationMessageAtTimeout: boolean;
 }
 
 export interface DealerLookupOutcome {
@@ -676,12 +806,44 @@ const DEALER_WAIT_CONDITION = `${DEALER_RESULT_SELECTOR} visible within scope, o
  * result element to already exist before activation -- on a real site the result container is
  * routinely created only afterward.
  */
+/**
+ * Public entry point -- wraps resolveDealerLookupCore with sanitised network observation for the
+ * full duration of the call, then attaches the result to the returned trace. Kept as a thin
+ * wrapper (rather than threading capture start/stop through every one of the core function's
+ * five return points) so the core state machine's own control flow stays exactly as it was.
+ */
 export async function resolveDealerLookup(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
+  const capture = startDealerLookupNetworkCapture(page);
+  try {
+    const outcome = await resolveDealerLookupCore(page, scope, trigger, field);
+    outcome.executionTrace.networkRequests = await capture.stop();
+    return outcome;
+  } catch (error) {
+    await capture.stop().catch(() => {});
+    throw error;
+  }
+}
+
+async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
   const baselineText = await safeInnerText(scope);
   await markBaselineCandidates(scope);
+  // Page-wide baseline, independent of the scope-local one above -- lets the page-wide fallback
+  // tier (see pollForStageResult) distinguish a genuinely new, portal-rendered result from an
+  // unrelated pre-existing control elsewhere on the page that merely shares the same ARIA role.
+  await markPageBaselineAuthoritative(page);
+  const pageWideFallback = pageWideNewAuthoritativeLocator(page);
 
   // Never rely solely on Playwright's own implicit fill() behaviour -- some widgets only react
-  // to blur, not input/change.
+  // to blur, not input/change. Keyboard events are dispatched too, separately from fill()'s own
+  // input/change -- fill() sets the value and fires input/change but never simulates a real
+  // keypress, and some autocomplete widgets bind their lookup trigger to keyup/keydown instead.
+  await field
+    .evaluate((el: Element) => {
+      el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true }));
+    })
+    .catch(() => {});
+  const eventsDispatched: DealerLookupEvent[] = ["dispatch_keyboard_events"];
   await field
     .evaluate((el: Element) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -689,7 +851,7 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
     })
     .catch(() => {});
   await field.blur().catch(() => {});
-  const eventsDispatched: DealerLookupEvent[] = ["dispatch_input_change_blur"];
+  eventsDispatched.push("dispatch_input_change_blur");
 
   // Stage 0: did a suggestion list appear entirely on its own?
   let stage1 = await quickPoll(page, scope, DEALER_AUTO_APPEAR_CHECK_MS);
@@ -721,7 +883,7 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       }
     }
     if (!stage1.authoritative && !stage1.generic) {
-      stage1 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS);
+      stage1 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS, pageWideFallback);
     }
   }
 
@@ -734,6 +896,7 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
     await page.waitForTimeout(600);
     const afterText = await safeInnerText(scope);
     const changed = afterText.trim().length > 0 && afterText.trim() !== baselineText.trim() && afterText.trim().length > baselineText.trim().length;
+    const fieldValidationState = await readFieldValidationState(field);
 
     if (changed) {
       return {
@@ -761,6 +924,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
           timedOutStage: "location_suggestions",
           loadingIndicatorObservedAtTimeout: stage1.loadingIndicatorObserved,
           stageWaitExtended: stage1.extended,
+          resultFoundOutsideScope: null,
+          wasPreExistingHiddenElement: null,
+          networkRequests: [],
+          fieldAriaInvalidAtTimeout: fieldValidationState.ariaInvalid,
+          fieldHasNativeValidationMessageAtTimeout: fieldValidationState.hasNativeValidationMessage,
         },
       };
     }
@@ -791,6 +959,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
         timedOutStage: "location_suggestions",
         loadingIndicatorObservedAtTimeout: stage1.loadingIndicatorObserved,
         stageWaitExtended: stage1.extended,
+        resultFoundOutsideScope: null,
+        wasPreExistingHiddenElement: null,
+        networkRequests: [],
+        fieldAriaInvalidAtTimeout: fieldValidationState.ariaInvalid,
+        fieldHasNativeValidationMessageAtTimeout: fieldValidationState.hasNativeValidationMessage,
       },
     };
   }
@@ -798,6 +971,8 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
   // Stage 1: select the location/postcode suggestion.
   const stage1Result = stage1.authoritative ?? stage1.generic!;
   const stage1WasGeneric = !stage1.authoritative;
+  const stage1FoundOutsideScope = stage1.foundOutsideScope;
+  const stage1WasPreExistingHiddenElement = stage1.wasPreExistingHiddenElement;
   // Freeze, then mark, then click, in that order -- see the trigger-click comment above for why
   // marking must happen before clicking, and the freeze() doc comment for why a frozen handle
   // (not the original lazily-re-resolving Locator) is required for both: marking through the
@@ -841,7 +1016,7 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
   }
 
   // Stage 3: dealer results, independently bounded from stage 1/2.
-  const stage3 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS);
+  const stage3 = await pollForStageResult(page, scope, DEALER_RESULT_WAIT_TIMEOUT_MS, DEALER_STAGE_WAIT_EXTENSION_MS, DEALER_STAGE_WAIT_MAX_MS, pageWideFallback);
   const secondStageSuggestionCount = await scope.locator(DEALER_RESULT_SELECTOR).count().catch(() => 0);
 
   if (stage3.authoritative || stage3.generic) {
@@ -889,6 +1064,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
         timedOutStage: null,
         loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
         stageWaitExtended: stage3.extended,
+        resultFoundOutsideScope: stage3.foundOutsideScope,
+        wasPreExistingHiddenElement: stage3.wasPreExistingHiddenElement,
+        networkRequests: [],
+        fieldAriaInvalidAtTimeout: false,
+        fieldHasNativeValidationMessageAtTimeout: false,
       },
     };
   }
@@ -927,6 +1107,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
         timedOutStage: stage3.timedOut ? "dealer_results" : null,
         loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
         stageWaitExtended: stage3.extended,
+        resultFoundOutsideScope: stage1FoundOutsideScope,
+        wasPreExistingHiddenElement: stage1WasPreExistingHiddenElement,
+        networkRequests: [],
+        fieldAriaInvalidAtTimeout: false,
+        fieldHasNativeValidationMessageAtTimeout: false,
       },
     };
   }
@@ -957,6 +1142,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
         timedOutStage: "dealer_results",
         loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
         stageWaitExtended: stage3.extended,
+        resultFoundOutsideScope: stage1FoundOutsideScope,
+        wasPreExistingHiddenElement: stage1WasPreExistingHiddenElement,
+        networkRequests: [],
+        fieldAriaInvalidAtTimeout: false,
+        fieldHasNativeValidationMessageAtTimeout: false,
       },
     };
   }
@@ -987,6 +1177,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       timedOutStage: "dealer_results",
       loadingIndicatorObservedAtTimeout: stage3.loadingIndicatorObserved,
       stageWaitExtended: stage3.extended,
+      resultFoundOutsideScope: stage1FoundOutsideScope,
+      wasPreExistingHiddenElement: stage1WasPreExistingHiddenElement,
+      networkRequests: [],
+      fieldAriaInvalidAtTimeout: false,
+      fieldHasNativeValidationMessageAtTimeout: false,
     },
   };
 }

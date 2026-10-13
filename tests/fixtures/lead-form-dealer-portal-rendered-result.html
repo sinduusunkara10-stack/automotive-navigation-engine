@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Postcode or city</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-find-btn">Find a dealer</button>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <!-- Deliberately outside the <form> entirely -- a common real-world shape for a positioned
+         dropdown/portal. The trigger and its field have no explicit shared wrapper of their own,
+         so resolveDealerLookup's scope falls back to the <form> element itself -- and the result
+         list this click reveals is rendered somewhere even that wider fallback scope never
+         reaches. -->
+    <div id="portal-results-root"></div>
+    <script>
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        const root = document.getElementById("portal-results-root");
+        root.innerHTML = '<div role="radio" id="dealer-result-1" tabindex="0">Riverside Motors · 1.2mi</div>';
+        document.getElementById("dealer-result-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-checked", "true");
+          document.getElementById("dealer-committed").value = "dealer-1";
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

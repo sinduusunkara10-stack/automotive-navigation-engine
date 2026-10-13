@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import { FIELD_INDEX_ATTR, TRIGGER_INDEX_ATTR, type DealerLookupOutcome, type RawLookupTriggerCandidate, type TriggerFieldPairDebug } from "../actions/dealerLookup.js";
+import { summarizeDealerLookupNetworkActivity, type SanitizedNetworkRequestEvidence } from "../actions/dealerLookupNetwork.js";
 import type { PlannedField } from "../forms/fillPlan.js";
 import { isFormDiscoveryDiagnosticEnabled } from "./formDiscoveryDiagnostic.js";
 
@@ -104,6 +105,11 @@ export interface DealerLookupExecutionSummary {
   timedOutStage: "location_suggestions" | "dealer_results" | null;
   loadingIndicatorObservedAtTimeout: boolean;
   stageWaitExtended: boolean;
+  resultFoundOutsideScope: boolean | null;
+  wasPreExistingHiddenElement: boolean | null;
+  networkRequests: SanitizedNetworkRequestEvidence[];
+  fieldAriaInvalidAtTimeout: boolean;
+  fieldHasNativeValidationMessageAtTimeout: boolean;
 }
 
 export interface DealerLookupTrace {
@@ -394,7 +400,7 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     dealerIdentifierStateBefore: dealerLookupOutcome === undefined ? "not_applicable" : "absent",
     dealerIdentifierStateAfter: dealerLookupOutcome === undefined ? "not_applicable" : dealerLookupOutcome.dealerValueVerified ? "present" : "absent",
     hiddenFieldChangeDetected: dealerLookupOutcome?.dealerAutoPopulated ?? false,
-    networkResponseEvidence: "no network-response capture is wired into the dealer-lookup flow -- this evidence source does not exist yet",
+    networkResponseEvidence: trace ? summarizeDealerLookupNetworkActivity(trace.networkRequests) : "the dealer-lookup flow never ran, so no network observation ran either",
     positiveCompletionEvidenceUsed: dealerLookupOutcome?.dealerVerificationEvidence || "none: the dealer-lookup flow never ran for this form",
     preSubmitReadinessResult: preSubmitReadinessPassed === null ? "not_evaluated" : preSubmitReadinessPassed ? "passed" : "blocked",
     exactBlockingReason: preSubmitReadinessPassed === false ? preSubmitReadinessFailures.join("; ") : preSubmitReadinessPassed === true ? "not blocked" : "readiness gate has not run yet",
@@ -403,6 +409,11 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     confirmControlClicked: trace?.confirmControlClicked ?? false,
     timedOutStage: trace?.timedOutStage ?? null,
     loadingIndicatorObservedAtTimeout: trace?.loadingIndicatorObservedAtTimeout ?? false,
+    resultFoundOutsideScope: trace?.resultFoundOutsideScope ?? null,
+    wasPreExistingHiddenElement: trace?.wasPreExistingHiddenElement ?? null,
+    networkRequests: trace?.networkRequests ?? [],
+    fieldAriaInvalidAtTimeout: trace?.fieldAriaInvalidAtTimeout ?? false,
+    fieldHasNativeValidationMessageAtTimeout: trace?.fieldHasNativeValidationMessageAtTimeout ?? false,
     stageWaitExtended: trace?.stageWaitExtended ?? false,
   };
 

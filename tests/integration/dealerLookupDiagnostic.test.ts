@@ -45,7 +45,7 @@ class FillFormOnceProvider implements ReasoningProvider {
 
 function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.45.0",
+    schemaVersion: "1.46.0",
     taskId: "dealer-lookup-trace-engine-level",
     objective: "Submit the lead-capture form.",
     allowedDomains: ["127.0.0.1"],
@@ -58,7 +58,7 @@ function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "start
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.47.0",
+    outputSchemaVersion: "1.48.0",
     ...overrides,
   };
 }
@@ -554,6 +554,155 @@ test("dealerLookupTrace: a lookup that never reveals anything selectable, with n
     assert.equal(trace!.execution.loadingIndicatorObservedAtTimeout, false);
     assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
     assert.equal(result.success, false);
+    assert.deepEqual(trace!.execution.networkRequests, [], "no xhr/fetch request was ever sent by this widget");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a result rendered entirely outside the trigger/field's own DOM-containment scope (a portal appended elsewhere in the document) is still found via the page-wide authoritative fallback, never by widening the generic fallback", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-portal-rendered-result.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-portal-result" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.resultFoundOutsideScope, true);
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, false, "the authoritative role=radio selector, not the generic fallback, must be what matched");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a result container already present in the DOM at lookup start, merely hidden, that is only ever toggled visible (never replaced or re-inserted) is still recognised as a new result", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-preexisting-hidden-result.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-preexisting-hidden" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, true);
+    assert.equal(trace!.execution.wasPreExistingHiddenElement, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a widget that only reacts to a real keyup event (not input/change/blur alone) is still opened, via the new synthetic keydown/keyup dispatch", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-keyup-only.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-keyup-only" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.eventsDispatched.includes("dispatch_keyboard_events"), true);
+    assert.equal(trace!.execution.autoDropdownDetected, true, "the suggestion list must already be visible by the time the auto-dropdown check runs, proving the keyup dispatch -- not the trigger click, which this fixture makes a no-op -- is what revealed it");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a request that is sent and completes with records is reported with sanitised method/endpoint-pattern/content-type/record-count evidence, never the records or the typed postcode", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-network-request-with-records.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-network-with-records" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.networkRequests.length, 1);
+    const request = trace!.execution.networkRequests[0]!;
+    assert.equal(request.method, "GET");
+    assert.equal(request.endpointPattern.endsWith("/dealer-lookup-results.json"), true);
+    assert.equal(request.outcome, "completed");
+    assert.equal(request.status, 200);
+    assert.equal(request.appearsToContainRecords, true);
+    assert.equal(request.recordCount, 2);
+    const serialized = JSON.stringify(request);
+    assert.equal(serialized.includes("Riverside"), false, "the record's own content must never appear in the sanitised evidence, only its count");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a request that is sent but fails at the network level (not merely zero results) is reported with outcome 'failed', not treated the same as no request at all", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-network-request-fails.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-network-fails" }),
+    );
+
+    assert.equal(result.success, false);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.networkRequests.length, 1);
+    assert.equal(trace!.execution.networkRequests[0]!.outcome, "failed");
+    assert.equal(trace!.execution.timedOutStage, "location_suggestions");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a field marked aria-invalid by the site's own client-side validation at the moment the location-suggestions stage times out is surfaced as presence-only evidence, never the validation message's own text", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-validation-message-on-timeout.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-validation-message" }),
+    );
+
+    assert.equal(result.success, false);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.timedOutStage, "location_suggestions");
+    assert.equal(trace!.execution.fieldAriaInvalidAtTimeout, true);
+    const serialized = JSON.stringify(trace!.execution);
+    assert.equal(serialized.toLowerCase().includes("please"), false, "never the validation message's own text");
   } finally {
     await page.close();
     await browser.close();

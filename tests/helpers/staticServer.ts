@@ -4,6 +4,7 @@ import { extname, join, normalize } from "node:path";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
 };
 
 export interface LocalStaticServer {

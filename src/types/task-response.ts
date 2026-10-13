@@ -686,6 +686,33 @@ export interface ActionResult {
       /** True when a stage's wait was actually extended past its base bound because of an
        * observed loading indicator. */
       stageWaitExtended: boolean;
+      /** True when the selected result was never found inside the trigger/field's own DOM
+       * scope and only matched via a page-wide fallback search (e.g. a portal-rendered
+       * dropdown). Null when no result was ever selected. */
+      resultFoundOutsideScope: boolean | null;
+      /** True when the selected generic-fallback result already existed in the DOM before the
+       * lookup started, merely hidden, rather than being freshly inserted afterward. Null when
+       * no generic candidate was ever selected. */
+      wasPreExistingHiddenElement: boolean | null;
+      /** Sanitised xhr/fetch request evidence observed during the lookup -- never a request or
+       * response body, never a typed or returned value (postcode, address, dealer name, etc.). */
+      networkRequests: {
+        method: string;
+        endpointPattern: string;
+        resourceType: string;
+        startedAtMs: number;
+        outcome: "completed" | "failed" | "pending";
+        status: number | null;
+        contentType: string | null;
+        appearsToContainRecords: boolean | null;
+        recordCount: number | null;
+      }[];
+      /** True when the postcode/location field carried aria-invalid="true" at the moment a
+       * stage timed out with no result -- never the validation message text itself. */
+      fieldAriaInvalidAtTimeout: boolean;
+      /** True when the field's native validationMessage was non-empty at the moment a stage
+       * timed out with no result -- presence only, never the message text itself. */
+      fieldHasNativeValidationMessageAtTimeout: boolean;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -1784,7 +1811,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.47.0";
+  schemaVersion: "1.48.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
