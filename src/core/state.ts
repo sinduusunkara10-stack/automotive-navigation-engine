@@ -533,6 +533,16 @@ export class RunState {
   lastClickLabel: string | undefined;
 
   /**
+   * Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts), never read by any
+   * scoring/selection/fill logic: the accessible name of the most recent click whose
+   * dispatch was classified `interactionOutcome === "NAVIGATION"` -- a best-effort "which
+   * CTA actually got us to the current page" signal, distinct from lastClickLabel above
+   * (which every click overwrites, navigating or not). Never cleared. Undefined until the
+   * run's first navigating click.
+   */
+  journeyAnchorCtaLabel: string | undefined;
+
+  /**
    * Route Memory (see core/routeMemory.ts): remembers, per decision-point fingerprint,
    * which candidate route choices (click/navigate) have already been tried and what
    * happened, so a repeated dead end is visible to the reasoning layer even across

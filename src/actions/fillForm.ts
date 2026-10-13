@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
-import type { ActionExecutorResult } from "../types/task-response.js";
+import type { ActionExecutorResult, ActiveSurfaceInfo } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -22,13 +22,23 @@ import {
   tagAndFindLookupTriggers,
   triggerByIndex,
   type DealerLookupOutcome,
+  type TriggerFieldPairDebug,
 } from "./dealerLookup.js";
+import {
+  buildFormDiscoveryDebug,
+  isFormDiscoveryDiagnosticEnabled,
+  logFormDiscoveryDiagnosticEmitted,
+  logFormDiscoveryDiagnosticEnabled,
+  writeFormDiscoveryDebugBackup,
+} from "../diagnostics/formDiscoveryDiagnostic.js";
+import { buildDealerLookupTrace } from "../diagnostics/dealerLookupDiagnostic.js";
 import {
   computeFormScore,
   resolveAmbiguousFormSelection,
   selectBestForm,
   type FormCandidate,
   type FormJourneyContext,
+  type FormScoreBreakdown,
   type FormSelectionAmbiguityResolver,
   type FormTextSignals,
   type FormVisibilityProminenceSignals,
@@ -153,6 +163,10 @@ export interface ExecuteFillFormParams {
   journeyContext?: FormJourneyContext;
   /** Optional, injected once per run -- see forms/formRelevance.ts's FormSelectionAmbiguityResolver. No caller configures one yet; its absence just means the ambiguous band fails closed. */
   selectionAmbiguityResolver?: FormSelectionAmbiguityResolver;
+  /** Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts) -- never read by scoring/selection/fill logic. */
+  taskId?: string;
+  /** Diagnostic-only -- the pre-dispatch observation's own activeSurface. */
+  activeSurfaceInfo?: ActiveSurfaceInfo;
 }
 
 /** Where a field's `required: true` came from -- see RawFieldDescriptor.requiredEvidence below. */
@@ -401,17 +415,29 @@ function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
  * resolving each field's own dealerLookupTriggerIndex by structural adjacency -- never a form-
  * wide flag, since a form can have two postcode-purpose fields (a plain customer-address postcode
  * and a dealer-locator postcode/city) sharing identical label vocabulary.
+ *
+ * `collectDebug` (diagnostic-only, see diagnostics/dealerLookupDiagnostic.ts) asks
+ * tagAndFindLookupTriggers for its full per-pair trace in addition to the normal result; the
+ * association decision itself (triggerByFieldId) is computed identically either way, from the
+ * same `.candidates` this function already read before `pairDebug` existed.
  */
-async function tagAndReadFieldsWithDealerLookup(form: Locator): Promise<RawFieldDescriptor[]> {
+async function tagAndReadFieldsWithDealerLookup(
+  form: Locator,
+  collectDebug = false,
+): Promise<{ fields: RawFieldDescriptor[]; triggerCandidates: Awaited<ReturnType<typeof tagAndFindLookupTriggers>>["candidates"]; pairDebug: TriggerFieldPairDebug[] }> {
   const raw = await tagAndReadFields(form);
-  const triggers = await tagAndFindLookupTriggers(form);
+  const { candidates: triggers, pairDebug } = await tagAndFindLookupTriggers(form, collectDebug);
   const triggerByFieldId = new Map<string, string>();
   for (const trigger of triggers) {
     if (trigger.adjacentFieldId && matchesLookupTriggerVocabulary(trigger.text) && !triggerByFieldId.has(trigger.adjacentFieldId)) {
       triggerByFieldId.set(trigger.adjacentFieldId, trigger.triggerIndex);
     }
   }
-  return raw.map((field) => ({ ...field, dealerLookupTriggerIndex: triggerByFieldId.get(String(field.index)) }));
+  return {
+    fields: raw.map((field) => ({ ...field, dealerLookupTriggerIndex: triggerByFieldId.get(String(field.index)) })),
+    triggerCandidates: triggers,
+    pairDebug,
+  };
 }
 
 async function fieldByIndex(form: Locator, index: string): Promise<Locator> {
@@ -639,8 +665,51 @@ function scorePlan(plan: PlannedField[]): number {
 }
 
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
-  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver } = params;
+  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo } = params;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
+  const diagnosticRunId = taskId ?? "unknown";
+  logFormDiscoveryDiagnosticEnabled({ runId: diagnosticRunId, taskId: diagnosticRunId });
+
+  /**
+   * Builds and logs the opt-in formDiscoveryDebug payload (see src/diagnostics/
+   * formDiscoveryDiagnostic.ts) for one exit point, a no-op when the env var is unset. Never
+   * throws into the caller -- a diagnostic failure must never turn a real result into an error.
+   */
+  async function emitDiagnostic(
+    captureStage: string,
+    candidateIndexes: number[],
+    scoresByIndex: Map<number, FormScoreBreakdown>,
+    selection: {
+      selectedFormIndex: number | null;
+      runnerUpIndex: number | null;
+      runnerUpScore: number | null;
+      belowConfidenceThreshold: boolean;
+      ambiguous: boolean;
+      rejectionReason: string;
+    },
+  ): Promise<ActionExecutorResult["formDiscoveryDebug"]> {
+    if (!isFormDiscoveryDiagnosticEnabled()) return undefined;
+    try {
+      const debug = await buildFormDiscoveryDebug({
+        page,
+        taskId: diagnosticRunId,
+        journeyContext,
+        currentLastClickLabel: journeyContext.previousActionLabel,
+        activeSurfaceInfo,
+        captureStage,
+        candidateIndexes,
+        scoresByIndex,
+        selection,
+      });
+      logFormDiscoveryDiagnosticEmitted({ runId: diagnosticRunId, taskId: diagnosticRunId, failureReason: captureStage });
+      await writeFormDiscoveryDebugBackup(debug);
+      return debug;
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error("FORM_DISCOVERY_DIAGNOSTIC_BUILD_FAILED", e);
+      return undefined;
+    }
+  }
 
   if (await detectCaptchaOnPage(page)) {
     return { success: false, formFillOutcome: "blocked_captcha" };
@@ -662,7 +731,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const forms = page.locator("form");
   const formsOnPage = await forms.count();
   if (formsOnPage === 0) {
-    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome };
+    const formDiscoveryDebug = await emitDiagnostic("no_form_found", [], new Map(), {
+      selectedFormIndex: null,
+      runnerUpIndex: null,
+      runnerUpScore: null,
+      belowConfidenceThreshold: false,
+      ambiguous: false,
+      rejectionReason: "no <form> element on the page",
+    });
+    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome, formDiscoveryDebug };
   }
 
   /**
@@ -683,11 +760,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     dealerSearchWidgetDetected: boolean;
     textSignals: FormTextSignals;
     score: ReturnType<typeof computeFormScore>;
+    /** The real per-candidate field count, independent of what a form_discovery_failed branch below reports -- see the misleading-reporting fix below. */
+    realFieldsDiscovered: number;
+    /** The real per-candidate count of visible, required fields -- same reporting-accuracy fix. */
+    realRequiredFieldsDetected: number;
   }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
     const hasCountryCodeSelectorCandidate = (await candidate.locator('select[name*="country" i], select[name*="dial" i]').count()) > 0;
-    const raw = await tagAndReadFieldsWithDealerLookup(candidate);
+    const { fields: raw } = await tagAndReadFieldsWithDealerLookup(candidate);
     const descriptors = raw.map(toDescriptor);
     // Structural, generic, per-field dealer-lookup detection (see dealerLookup.ts) -- never a
     // form-wide flag, since a form can have two postcode-purpose fields (a plain customer-
@@ -717,6 +798,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
       dealerSearchWidgetDetected: dealerSearchWidgetDetectedCandidate,
       textSignals,
+      realFieldsDiscovered: descriptors.length,
+      realRequiredFieldsDetected: descriptors.filter((d) => d.required && d.visible).length,
       score: computeFormScore({
         journeyContext,
         textSignals,
@@ -759,17 +842,35 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // never guessed away, and a selection below the confidence threshold is never filled or
   // submitted at all -- "do not submit when confidence is below a defined threshold".
   if (selection.belowConfidenceThreshold || selection.ambiguous) {
+    const runnerUp = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebug = await emitDiagnostic(
+      "form_discovery_failed:below_confidence_or_ambiguous",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
+        selectedFormIndex: selection.chosenIndex,
+        runnerUpIndex: runnerUp?.index ?? null,
+        runnerUpScore: runnerUp?.totalFormScore ?? null,
+        belowConfidenceThreshold: selection.belowConfidenceThreshold,
+        ambiguous: selection.ambiguous,
+        rejectionReason: selection.selectedFormReason,
+      },
+    );
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
       formMarketDetected: market,
       formLanguageDetected: language,
       formLocationGateDiagnostics: locationGateOutcome,
+      formDiscoveryDebug,
       formDiscoveryDiagnostics: {
         formsOnPage,
         selectedFormIndex: selection.chosenIndex,
-        fieldsDiscovered: 0,
-        requiredFieldsDetected: 0,
+        // Corrected reporting: the candidate's real discovered/required-field counts, not a
+        // hard-coded 0 -- selection being rejected (belowConfidenceThreshold/ambiguous) never
+        // implies the candidate had no fields; it means no fill/submit was attempted on it.
+        fieldsDiscovered: chosenEvidence.realFieldsDiscovered,
+        requiredFieldsDetected: chosenEvidence.realRequiredFieldsDetected,
         requiredFieldsFilled: 0,
         dealerSearchWidgetDetected: chosenEvidence.dealerSearchWidgetDetected,
         unmappedRequiredFieldIds: [],
@@ -790,9 +891,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   let claudeCallUsed = false;
   let retries = 0;
   let dealerLookupOutcome: DealerLookupOutcome | undefined;
+  // Diagnostic-only (see diagnostics/dealerLookupDiagnostic.ts): the trigger-to-field association
+  // trace captured from the chosen form's very first full field pass only -- never from a later
+  // partial catch-up/poll pass (onlyIndices set), which only re-reads a subset of fields and would
+  // give an incomplete picture of every candidate pair considered.
+  let dealerLookupDebugCapture: { triggerCandidates: Awaited<ReturnType<typeof tagAndReadFieldsWithDealerLookup>>["triggerCandidates"]; pairDebug: TriggerFieldPairDebug[] } | undefined;
 
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
-    const raw = await tagAndReadFieldsWithDealerLookup(form);
+    const shouldCollectDebug = !onlyIndices && !dealerLookupDebugCapture && isFormDiscoveryDiagnosticEnabled();
+    const { fields: raw, triggerCandidates, pairDebug } = await tagAndReadFieldsWithDealerLookup(form, shouldCollectDebug);
+    if (shouldCollectDebug) {
+      dealerLookupDebugCapture = { triggerCandidates, pairDebug };
+    }
     const descriptors = raw.map(toDescriptor).filter((d) => !onlyIndices || onlyIndices.has(d.id));
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
     const filledIds = new Set<string>();
@@ -900,7 +1010,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // Consent selections (or the dealer lookup) can generically reveal new required text/select
   // fields -- one bounded catch-up pass, filling only fields not already resolved, so a field a
   // widget only reveals after an earlier interaction is never invisible to the readiness gate.
-  const rawAfterConsent = await tagAndReadFieldsWithDealerLookup(form);
+  const { fields: rawAfterConsent } = await tagAndReadFieldsWithDealerLookup(form);
   const descriptorsAfterConsent = rawAfterConsent.map(toDescriptor);
   const newlyRequiredIds = new Set(
     descriptorsAfterConsent.filter((d) => d.required && d.visible && !initialFilledIds.has(d.id)).map((d) => d.id),
@@ -963,6 +1073,27 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     finalFilledIds.size === 0 ||
     (requiredFields.length > 0 && requiredFieldsFilled === 0)
   ) {
+    const runnerUpZero = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebug = await emitDiagnostic(
+      "form_discovery_failed:zero_actionable_or_filled",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
+        selectedFormIndex: selection.chosenIndex,
+        runnerUpIndex: runnerUpZero?.index ?? null,
+        runnerUpScore: runnerUpZero?.totalFormScore ?? null,
+        belowConfidenceThreshold: false,
+        ambiguous: false,
+        rejectionReason:
+          formSelectionDiagnostics.fieldActionabilityScore === 0
+            ? "selected form's fieldActionabilityScore is 0"
+            : actionableFields.length === 0
+              ? "zero actionable fields in the fill plan"
+              : finalFilledIds.size === 0
+                ? "zero fields were actually filled"
+                : "required fields were detected but none were filled",
+      },
+    );
     return {
       success: false,
       formFillOutcome: "form_discovery_failed",
@@ -971,6 +1102,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formLocationGateDiagnostics: locationGateOutcome,
       formClaudeCallUsed: claudeCallUsed,
       formDiscoveryDiagnostics,
+      formDiscoveryDebug,
     };
   }
 
@@ -1013,6 +1145,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const preSubmitReadinessPassed = preSubmitReadinessFailures.length === 0;
 
   if (!preSubmitReadinessPassed) {
+    const dealerLookupTrace = await buildDealerLookupTrace({
+      page,
+      form,
+      taskId: diagnosticRunId,
+      captureStage: "pre_submit_readiness_failed",
+      plan: initialPlan,
+      triggerCandidates: dealerLookupDebugCapture?.triggerCandidates ?? [],
+      pairDebug: dealerLookupDebugCapture?.pairDebug ?? [],
+      dealerLookupOutcome,
+      preSubmitReadinessPassed: false,
+      preSubmitReadinessFailures,
+    }).catch(() => undefined);
     return {
       success: false,
       formFillOutcome: "form_validation_failed",
@@ -1026,6 +1170,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formDiscoveryDiagnostics,
       formDealerSearchDiagnostics: buildDealerSearchDiagnostics(),
       formConsentDiagnostics: consentResult,
+      dealerLookupTrace,
       formPostSubmitDiagnostics: {
         submitCanceled: true,
         invalidFieldIds: unresolvedRequiredFinal.map((d) => d.id),
@@ -1056,7 +1201,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const beforeUrl = page.url();
 
   async function rerunDealerSearch(): Promise<void> {
-    const raw = await tagAndReadFieldsWithDealerLookup(form);
+    const { fields: raw } = await tagAndReadFieldsWithDealerLookup(form);
     const descriptors = raw.map(toDescriptor);
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
     const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
@@ -1143,6 +1288,32 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   };
 
   if (!attempt.succeeded) {
+    const runnerUpValidation = selection.rejectedFormsAndReasons[0];
+    const formDiscoveryDebugValidation = await emitDiagnostic(
+      attempt.postSubmit.validationCauseObserved ? "form_validation_failed" : "validation_cause_not_observed",
+      candidateEvidence.map((c) => c.index),
+      new Map(candidateEvidence.map((c) => [c.index, c.score])),
+      {
+        selectedFormIndex: selection.chosenIndex,
+        runnerUpIndex: runnerUpValidation?.index ?? null,
+        runnerUpScore: runnerUpValidation?.totalFormScore ?? null,
+        belowConfidenceThreshold: false,
+        ambiguous: false,
+        rejectionReason: "selected and filled, but the site's own submit validation cancelled it",
+      },
+    );
+    const dealerLookupTrace = await buildDealerLookupTrace({
+      page,
+      form,
+      taskId: diagnosticRunId,
+      captureStage: "post_submit_validation_failed",
+      plan: initialPlan,
+      triggerCandidates: dealerLookupDebugCapture?.triggerCandidates ?? [],
+      pairDebug: dealerLookupDebugCapture?.pairDebug ?? [],
+      dealerLookupOutcome,
+      preSubmitReadinessPassed: true,
+      preSubmitReadinessFailures: [],
+    }).catch(() => undefined);
     return {
       success: false,
       // A cancelled submission whose cause this engine could actually observe (a native/aria
@@ -1160,11 +1331,40 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formDiscoveryDiagnostics,
       formDealerSearchDiagnostics,
       formConsentDiagnostics: consentResult,
+      dealerLookupTrace,
       formPostSubmitDiagnostics,
+      formDiscoveryDebug: formDiscoveryDebugValidation,
     };
   }
 
   await captureAnalyticsPhase(page, captures, stepIndex + 1, captureModules);
+
+  const runnerUpSuccess = selection.rejectedFormsAndReasons[0];
+  const formDiscoveryDebugSuccess = await emitDiagnostic(
+    "submitted",
+    candidateEvidence.map((c) => c.index),
+    new Map(candidateEvidence.map((c) => [c.index, c.score])),
+    {
+      selectedFormIndex: selection.chosenIndex,
+      runnerUpIndex: runnerUpSuccess?.index ?? null,
+      runnerUpScore: runnerUpSuccess?.totalFormScore ?? null,
+      belowConfidenceThreshold: false,
+      ambiguous: false,
+      rejectionReason: "not rejected -- selected, filled, and submitted successfully",
+    },
+  );
+  const dealerLookupTraceSuccess = await buildDealerLookupTrace({
+    page,
+    form,
+    taskId: diagnosticRunId,
+    captureStage: "submitted",
+    plan: initialPlan,
+    triggerCandidates: dealerLookupDebugCapture?.triggerCandidates ?? [],
+    pairDebug: dealerLookupDebugCapture?.pairDebug ?? [],
+    dealerLookupOutcome,
+    preSubmitReadinessPassed: true,
+    preSubmitReadinessFailures: [],
+  }).catch(() => undefined);
 
   return {
     success: true,
@@ -1180,6 +1380,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     formDiscoveryDiagnostics,
     formDealerSearchDiagnostics,
     formConsentDiagnostics: consentResult,
+    dealerLookupTrace: dealerLookupTraceSuccess,
     formPostSubmitDiagnostics,
+    formDiscoveryDebug: formDiscoveryDebugSuccess,
   };
 }

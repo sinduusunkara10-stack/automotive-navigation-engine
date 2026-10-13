@@ -483,6 +483,83 @@ export interface ActionResult {
     }[];
   };
   /**
+   * Opt-in, investigation-only evidence for a `fill_form` action -- present only when the
+   * engine process has FORM_DISCOVERY_DIAGNOSTIC=1 set (see src/diagnostics/
+   * formDiscoveryDiagnostic.ts). Absent whenever that env var is unset; never affects
+   * form-selection scoring, thresholds, or fill/submit behaviour, which are computed
+   * identically either way. Exists so a form_discovery_failed (or any fill_form) run is
+   * diagnosable from the API response alone, without reproducing it or reading a local file.
+   * Never carries typed field values, email addresses, phone numbers, or other submitted
+   * personal data -- only structural/positional/scoring evidence.
+   */
+  formDiscoveryDebug?: {
+    enabled: true;
+    runId: string;
+    taskId: string;
+    capturedAt: string;
+    pageUrl: string;
+    pageTitle: string;
+    captureStage: string;
+    activeSurfaceKind: string;
+    activeSurfaceId: string | null;
+    journeyContext: {
+      objective: string | null;
+      activeMilestoneTexts: string[];
+      /** The value actually fed into form-selection scoring at this call -- identical to lastClickLabelAtCapture by construction (both read state.lastClickLabel at the same point). */
+      previousActionLabel: string | null;
+      lastClickLabelAtCapture: string | null;
+      /** The accessible name of the most recent click whose dispatch was classified interactionOutcome "NAVIGATION" (see RunState.journeyAnchorCtaLabel) -- a best-effort "what CTA actually got us to this page" signal, independent of lastClickLabel's overwrite-on-every-click behaviour. */
+      journeyAnchorCtaLabel: string | null;
+      /** True when previousActionLabel still equals journeyAnchorCtaLabel (the navigating CTA's own label was not clobbered by a later, non-navigating click before fill_form ran); false, with replacementLabel set, when it was. Absent when journeyAnchorCtaLabel itself was never recorded (no navigating click observed yet this run). */
+      ctaPreserved?: boolean;
+      replacementLabel?: string | null;
+    };
+    candidates: {
+      index: number;
+      id: string | null;
+      name: string | null;
+      className: string | null;
+      action: string | null;
+      visible: boolean;
+      boundingBox: { x: number; y: number; width: number; height: number };
+      /** Best-effort, generic: this form (or an ancestor) sits inside what looks like an overlay/drawer/modal container (fixed/absolute/sticky positioning with a raised stacking context, or a role=dialog/aria-modal ancestor) -- not a precise match against the engine's own in_document surface tracking, which fill_form does not have access to. */
+      withinOverlayLikeContainer: boolean;
+      fieldsInSubtree: number;
+      fieldsAssociatedViaFormAttribute: number;
+      totalEffectiveFieldCount: number;
+      journeyRelevanceScore: number;
+      visibilityProminenceScore: number;
+      fieldActionabilityScore: number;
+      totalFormScore: number;
+      fields: {
+        tag: string;
+        type: string | null;
+        id: string | null;
+        name: string | null;
+        placeholder: string | null;
+        label: string | null;
+        required: boolean;
+        visible: boolean;
+        disabled: boolean;
+        readonly: boolean;
+        closestFormIndex: number | null;
+        formAttr: string | null;
+        boundingBox: { x: number; y: number; width: number; height: number };
+      }[];
+    }[];
+    selection: {
+      selectedFormIndex: number | null;
+      runnerUpIndex: number | null;
+      runnerUpScore: number | null;
+      adoptThreshold: number;
+      rejectThreshold: number;
+      ambiguityMargin: number;
+      belowConfidenceThreshold: boolean;
+      ambiguous: boolean;
+      rejectionReason: string;
+    };
+  };
+  /**
    * Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a
    * `dealer_search` decision drives -- present (with explicit false defaults) whenever a
    * submit was attempted, even if no field was ever mapped to the `dealerSearch` decision, so
@@ -513,6 +590,104 @@ export interface ActionResult {
     /** More than one field on the chosen form matched the generic "postcode" purpose and more than one remained a plain fill_text decision (never upgraded to dealer_search) -- a generic defense-in-depth signal, independent of dealerLookupFieldDetected, that typed postcode text alone must never be read as a resolved dealer dependency. */
     multiplePostcodeFieldsUnresolved: boolean;
     multiplePostcodeFieldsEvidence: string;
+  };
+  /**
+   * Opt-in, investigation-only dealer/postcode decision-trace evidence -- present only when the
+   * engine process has FORM_DISCOVERY_DIAGNOSTIC=1 set (same gate as formDiscoveryDebug; see
+   * src/diagnostics/dealerLookupDiagnostic.ts). Absent whenever that env var is unset; never
+   * affects trigger-to-field association, dealer-lookup matching, thresholds, or fill/submit
+   * behaviour, which are computed identically either way. Exists so a dealer/postcode-related
+   * form_validation_failed is diagnosable from the API response alone, down to which
+   * trigger-to-field candidate pair was accepted or rejected and why. Never carries a typed
+   * field value, a selected suggestion's own text, or any other submitted personal data.
+   */
+  dealerLookupTrace?: {
+    enabled: true;
+    runId: string;
+    taskId: string;
+    capturedAt: string;
+    captureStage: string;
+    fields: {
+      elementId: string;
+      role: "field" | "trigger";
+      fieldIndex: string | null;
+      triggerIndex: string | null;
+      label: string | null;
+      name: string | null;
+      tag: string;
+      inputType: string | null;
+      semanticRole: string | null;
+      visible: boolean;
+      enabled: boolean;
+      required: boolean;
+      populated: boolean;
+      ariaAttributes: { attribute: string; value: string }[];
+      ariaRelationshipTargets: { attribute: string; targetId: string; targetExists: boolean }[];
+      formId: string | null;
+      sectionId: string | null;
+      domAncestry: { tag: string; hasId: boolean; role: string | null }[];
+      boundingBox: { x: number; y: number; width: number; height: number };
+    }[];
+    triggerFieldPairs: {
+      triggerIndex: string;
+      triggerText: string;
+      fieldIndex: string;
+      ariaMatch: boolean;
+      nearestCommonAncestorHops: number | null;
+      ancestorHopCutoff: number;
+      pixelDistance: number | null;
+      pixelDistanceCutoff: number;
+      domOrderDelta: number;
+      ancestorHopScoreComponent: number | null;
+      pixelDistanceScoreComponent: number | null;
+      finalScore: number | null;
+      passedAncestorCutoff: boolean;
+      passedPixelCutoff: boolean;
+      accepted: boolean;
+      isWinner: boolean;
+      rejectionReason: string | null;
+    }[];
+    execution: {
+      associatedPostcodeFieldIndex: string | null;
+      associatedDealerTriggerIndex: string | null;
+      eventsDispatched: string[];
+      waitCondition: string | null;
+      waitTimeoutMs: number | null;
+      waitOutcome: "resolved" | "timed_out" | "not_attempted";
+      suggestionsDetected: boolean;
+      suggestionCount: number;
+      selectedSuggestionIdentity: string | null;
+      dealerResultsDetected: boolean;
+      dealerSelectionAttempted: boolean;
+      dealerSelectionOutcome: string;
+      dealerIdentifierStateBefore: "not_applicable" | "absent" | "present";
+      dealerIdentifierStateAfter: "not_applicable" | "absent" | "present";
+      hiddenFieldChangeDetected: boolean;
+      networkResponseEvidence: string;
+      positiveCompletionEvidenceUsed: string;
+      preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
+      exactBlockingReason: string;
+    };
+    diagnosticCompleteness: {
+      status: "COMPLETE" | "INCOMPLETE";
+      missingEvidence: string[];
+      evaluatedCandidateCount: number;
+      acceptedCandidateCount: number;
+      rejectedCandidateCount: number;
+      finalDecision: string;
+      finalDecisionReason: string;
+    };
+    /**
+     * Payload safeguards: true if any array below was shortened, or any element's own bounded
+     * data (e.g. domAncestry) hit its cap, to keep the serialized trace under
+     * DEALER_TRACE_MAX_SERIALIZED_BYTES. Deterministic (always drops from the end of each array
+     * first) -- never a random/unordered subset.
+     */
+    truncated: boolean;
+    /** Candidate trigger-field pairs dropped from triggerFieldPairs to stay within limits. */
+    omittedCandidateCount: number;
+    /** Field/trigger elements dropped from fields to stay within limits. */
+    omittedFieldCount: number;
   };
   /**
    * Generic radio-group consent discovery/resolution diagnostics (see forms/consentGroups.ts) --
@@ -1590,7 +1765,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.43.0";
+  schemaVersion: "1.45.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

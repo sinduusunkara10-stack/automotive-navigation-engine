@@ -1994,8 +1994,14 @@ export async function runStep(params: {
                     .filter((criterion) => getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).includes(criterion.id))
                     .map((criterion) => criterion.description),
                   previousActionLabel: state.lastClickLabel,
+                  journeyAnchorCtaLabel: state.journeyAnchorCtaLabel,
                 }
               : undefined,
+          // Diagnostic-only (see src/diagnostics/formDiscoveryDiagnostic.ts), built only for
+          // fill_form: this run's taskId and the pre-dispatch observation's own activeSurface,
+          // never read by any scoring/selection/fill logic.
+          taskId: effectiveAction.type === "fill_form" ? task.taskId : undefined,
+          activeSurfaceInfo: effectiveAction.type === "fill_form" ? observation.activeSurface : undefined,
         });
 
   // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured
@@ -2283,6 +2289,9 @@ export async function runStep(params: {
   );
   if (isClick && clickedCtaAccessibleName) {
     state.lastClickLabel = clickedCtaAccessibleName;
+    if (actionResult.interactionOutcome === "NAVIGATION") {
+      state.journeyAnchorCtaLabel = clickedCtaAccessibleName;
+    }
   }
 
   // Goal-Directed Bounded Branch Exploration: this step's own dispatched action counts as

@@ -145,5 +145,9 @@ vite.config.ts.timestamp-*
 # Local test-run artifacts (e.g. capture-module screenshots from the local PoC)
 test-artifacts/
 
+# Local optional backup of formDiscoveryDebug (FORM_DISCOVERY_DIAGNOSTIC=1) -- never committed,
+# the API response field is the retrievable channel
+diagnostics/form-discovery/
+
 # Claude Code agent worktree scratch state (isolated background-agent checkouts)
 .claude/
