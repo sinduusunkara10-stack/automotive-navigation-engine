@@ -6,8 +6,27 @@ export const TRIGGER_INDEX_ATTR = "data-nav-engine-trigger-index";
 /** Written on the smallest ancestor that contains both a field and its adjacent lookup trigger -- lets resolveDealerLookup scope its before/after text comparison to the dealer widget itself rather than the whole form or the whole page. */
 export const DEALER_SCOPE_ATTR = "data-nav-engine-dealer-scope";
 
-/** Generic, accessibility-based dealer-result candidates -- never a brand-specific selector. Used for both a location-suggestion list and a final selectable dealer list; resolveDealerLookup tells them apart by whether a selection ever verifiably commits. */
+/** Generic, accessibility-based dealer-result candidates -- never a brand-specific selector. Used for both a location-suggestion list and a final selectable dealer list; resolveDealerLookup tells them apart by whether a selection ever verifiably commits. This is the authoritative, tried-first signal -- a real ARIA role or native radio always wins over the generic fallback below when both are present. */
 export const DEALER_RESULT_SELECTOR = '[role="radio"], input[type="radio"], [role="option"]';
+
+/**
+ * Role/tag-agnostic fallback candidates for a results list that carries no ARIA semantics at all
+ * (a plain <li><a>, a card <div> with a click handler, a <button> inside a dropdown) -- never
+ * selected by tag identity alone. Used only as a "something new and clickable appeared" growth
+ * signal, scoped to the dealer widget itself (never the whole page), so an unrelated page-wide
+ * change elsewhere can't produce a false positive.
+ */
+const GENERIC_RESULT_CANDIDATE_SELECTOR = 'a, button, li, [role], [onclick], [tabindex]';
+/** Marks every candidate already present before the trigger is activated, so the first
+ * unmarked, visible candidate afterward is provably new -- avoids racy before/after count
+ * diffing and never depends on DOM order staying stable. */
+const DEALER_BASELINE_CANDIDATE_ATTR = "data-nav-engine-dealer-baseline-candidate";
+
+/** Bounded, not unbounded -- a live production lookup can legitimately take longer than a fixed
+ * 3s (confirmed by a live run where it never resolved in 3s+600ms at all), but this still caps
+ * total wait rather than polling forever. */
+export const DEALER_RESULT_WAIT_TIMEOUT_MS = 6000;
+export const DEALER_RESULT_POLL_INTERVAL_MS = 250;
 
 /**
  * Generic, language-agnostic vocabulary for a lookup/selection trigger -- "search"/"find"/"go"/
@@ -392,6 +411,32 @@ async function safeInnerText(locator: Locator): Promise<string> {
   return locator.evaluate((el: Element) => el.textContent ?? "").catch(() => "");
 }
 
+/** Tags every current generic candidate as "pre-existing" so a later check can tell new from old. */
+async function markBaselineCandidates(scope: Locator): Promise<void> {
+  await scope
+    .locator(GENERIC_RESULT_CANDIDATE_SELECTOR)
+    .evaluateAll((els: Element[], attr: string) => {
+      els.forEach((el) => el.setAttribute(attr, "1"));
+    }, DEALER_BASELINE_CANDIDATE_ATTR)
+    .catch(() => {});
+}
+
+/** The first visible candidate that wasn't already present when the trigger was activated, or
+ * null if none has appeared yet. Never selected by tag/class identity -- only "new and visible". */
+async function firstNewCandidate(scope: Locator): Promise<Locator | null> {
+  // :not() binds only to the single compound selector immediately before it, not to a whole
+  // comma-separated list -- wrapping the candidate list in :is(...) first is required so the
+  // exclusion applies to every branch (a/button/li/[role]/[onclick]/[tabindex]) rather than only
+  // the last one.
+  const newCandidates = scope.locator(`:is(${GENERIC_RESULT_CANDIDATE_SELECTOR}):not([${DEALER_BASELINE_CANDIDATE_ATTR}])`);
+  const count = await newCandidates.count().catch(() => 0);
+  for (let i = 0; i < count; i += 1) {
+    const candidate = newCandidates.nth(i);
+    if (await candidate.isVisible().catch(() => false)) return candidate;
+  }
+  return null;
+}
+
 /**
  * A clicked result doesn't by itself prove the widget's own JS committed the selection (e.g. a
  * hidden "selected dealer id" field it still has to write) -- check the result's own selected/
@@ -427,6 +472,10 @@ export interface DealerLookupExecutionTrace {
   /** Positional only -- e.g. "result[0]" -- never the selected result's own text content. */
   selectedSuggestionIdentity: string | null;
   secondStageSuggestionCount: number | null;
+  /** True when no element matched DEALER_RESULT_SELECTOR (no ARIA radio/option semantics) but a
+   * new, visible, generically-clickable element appeared within the dealer-widget scope after
+   * the trigger fired, and that element was used as the selected result instead. */
+  genericCandidateFallbackUsed: boolean;
 }
 
 export interface DealerLookupOutcome {
@@ -461,6 +510,11 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
   const baselineText = await safeInnerText(scope);
   const eventDispatched: "click_trigger" | "press_enter" = trigger ? "click_trigger" : "press_enter";
 
+  // Marked before the trigger fires so a bounded poll can later tell "a brand-new result
+  // element appeared" apart from "an element that was already on the page before the lookup
+  // ran" without racy before/after count-diffing.
+  await markBaselineCandidates(scope);
+
   if (trigger) {
     await trigger.click().catch(() => {});
   } else {
@@ -469,12 +523,24 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
 
   const resultLocator = scope.locator(DEALER_RESULT_SELECTOR);
   let resultsAppeared = false;
-  const firstWaitTimeoutMs = 3000;
-  try {
-    await resultLocator.first().waitFor({ state: "visible", timeout: firstWaitTimeoutMs });
-    resultsAppeared = true;
-  } catch {
-    resultsAppeared = false;
+  let genericCandidate: Locator | null = null;
+  const waitTimeoutMs = DEALER_RESULT_WAIT_TIMEOUT_MS;
+  const deadline = Date.now() + waitTimeoutMs;
+  // Adaptive, bounded poll: the authoritative ARIA/native-radio selector is checked every
+  // interval first (unchanged priority over the generic fallback), and only once neither it
+  // nor a brand-new generic candidate has shown up does the loop give up -- never a single
+  // fixed-delay waitFor, since real lookup widgets vary widely in how long they take to render.
+  while (Date.now() < deadline) {
+    if (await resultLocator.first().isVisible().catch(() => false)) {
+      resultsAppeared = true;
+      break;
+    }
+    const candidate = await firstNewCandidate(scope);
+    if (candidate) {
+      genericCandidate = candidate;
+      break;
+    }
+    await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
   }
   const suggestionCount = await resultLocator.count().catch(() => 0);
 
@@ -517,12 +583,48 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       executionTrace: {
         eventsDispatched: [eventDispatched],
         waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-        waitTimeoutMs: firstWaitTimeoutMs,
+        waitTimeoutMs,
         waitOutcome: "resolved",
         suggestionsDetected: true,
         suggestionCount,
         selectedSuggestionIdentity: "result[0]",
         secondStageSuggestionCount,
+        genericCandidateFallbackUsed: false,
+      },
+    };
+  }
+
+  if (genericCandidate) {
+    await genericCandidate.click().catch(() => {});
+    const committed = await verifyDealerSelectionCommitted(page, genericCandidate);
+    const afterGenericClickText = await safeInnerText(scope);
+    const scopeTextChanged =
+      afterGenericClickText.trim().length > 0 && afterGenericClickText.trim() !== baselineText.trim();
+    const verified = committed || scopeTextChanged;
+
+    return {
+      dealerLookupTriggered: true,
+      dealerLookupOutcome: "suggestion_selected",
+      locationSuggestionsDetected: true,
+      locationSuggestionSelected: true,
+      dealerResultsDetected: verified,
+      dealerAutoPopulated: false,
+      dealerSelected: verified,
+      dealerValueVerified: verified,
+      dealerVerificationEvidence: verified
+        ? "generic_candidate_selected_and_committed_or_scope_state_changed"
+        : "generic_candidate_selected_but_no_committed_state_detected",
+      dealerLookupFailureReason: verified ? undefined : "generic_candidate_selected_but_commit_state_never_verified",
+      executionTrace: {
+        eventsDispatched: [eventDispatched],
+        waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope, or a new generic result candidate within scope`,
+        waitTimeoutMs,
+        waitOutcome: "resolved",
+        suggestionsDetected: true,
+        suggestionCount,
+        selectedSuggestionIdentity: "generic_candidate[0]",
+        secondStageSuggestionCount: null,
+        genericCandidateFallbackUsed: true,
       },
     };
   }
@@ -547,12 +649,13 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
       executionTrace: {
         eventsDispatched: [eventDispatched],
         waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-        waitTimeoutMs: firstWaitTimeoutMs,
+        waitTimeoutMs,
         waitOutcome: "timed_out",
         suggestionsDetected: false,
         suggestionCount,
         selectedSuggestionIdentity: null,
         secondStageSuggestionCount: null,
+        genericCandidateFallbackUsed: false,
       },
     };
   }
@@ -571,12 +674,13 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
     executionTrace: {
       eventsDispatched: [eventDispatched],
       waitCondition: `${DEALER_RESULT_SELECTOR} visible within scope`,
-      waitTimeoutMs: firstWaitTimeoutMs,
+      waitTimeoutMs,
       waitOutcome: "timed_out",
       suggestionsDetected: false,
       suggestionCount,
       selectedSuggestionIdentity: null,
       secondStageSuggestionCount: null,
+      genericCandidateFallbackUsed: false,
     },
   };
 }

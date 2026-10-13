@@ -98,6 +98,7 @@ export interface DealerLookupExecutionSummary {
   positiveCompletionEvidenceUsed: string;
   preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
   exactBlockingReason: string;
+  genericCandidateFallbackUsed: boolean;
 }
 
 export interface DealerLookupTrace {
@@ -392,6 +393,7 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     positiveCompletionEvidenceUsed: dealerLookupOutcome?.dealerVerificationEvidence || "none: the dealer-lookup flow never ran for this form",
     preSubmitReadinessResult: preSubmitReadinessPassed === null ? "not_evaluated" : preSubmitReadinessPassed ? "passed" : "blocked",
     exactBlockingReason: preSubmitReadinessPassed === false ? preSubmitReadinessFailures.join("; ") : preSubmitReadinessPassed === true ? "not blocked" : "readiness gate has not run yet",
+    genericCandidateFallbackUsed: trace?.genericCandidateFallbackUsed ?? false,
   };
 
   const completenessBeforeTruncation = computeCompleteness({

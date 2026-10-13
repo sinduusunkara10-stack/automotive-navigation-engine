@@ -667,6 +667,10 @@ export interface ActionResult {
       positiveCompletionEvidenceUsed: string;
       preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
       exactBlockingReason: string;
+      /** True only when no element matched the authoritative ARIA/native-radio result selector
+       * but a generic, role/tag-agnostic newly-appeared clickable candidate within the dealer
+       * widget's own scope was used instead. */
+      genericCandidateFallbackUsed: boolean;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -1765,7 +1769,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.45.0";
+  schemaVersion: "1.46.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

@@ -45,7 +45,7 @@ class FillFormOnceProvider implements ReasoningProvider {
 
 function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.43.0",
+    schemaVersion: "1.44.0",
     taskId: "dealer-lookup-trace-engine-level",
     objective: "Submit the lead-capture form.",
     allowedDomains: ["127.0.0.1"],
@@ -58,7 +58,7 @@ function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "start
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.45.0",
+    outputSchemaVersion: "1.46.0",
     ...overrides,
   };
 }
@@ -349,6 +349,48 @@ test("dealerLookupTrace: a trigger that is also tagged as its own field (the rea
     const winner = trace!.triggerFieldPairs.find((p) => p.isWinner);
     assert.ok(winner, "the real dealer-search button must still win association with the postcode field");
     assert.equal(winner!.accepted, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a dealer result resolved via the generic-candidate fallback (no ARIA role match) reports genericCandidateFallbackUsed=true, while an authoritative ARIA-role resolution reports it false", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-generic-result-list.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-generic-candidate" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: an authoritative role=\"radio\"/role=\"option\" resolution reports genericCandidateFallbackUsed=false", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-search-success.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-aria-not-generic" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, false);
   } finally {
     await page.close();
     await browser.close();
