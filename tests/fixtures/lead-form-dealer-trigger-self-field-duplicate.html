@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <label for="dealer-postcode">CP ou ville</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-search-btn"></button>
+      <div id="dealer-results" hidden>
+        <label><input type="radio" name="dealerChoice" value="dealer-1" id="dealer-1" /> Dealer One</label>
+        <label><input type="radio" name="dealerChoice" value="dealer-2" id="dealer-2" /> Dealer Two</label>
+      </div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+
+      <!-- Real production regression: tagAndReadFields tags every input/select/textarea as a
+           FIELD unconditionally, including input[type=button] -- so this unrelated, off-screen
+           native button-input gets tagged as BOTH a trigger candidate (button-like selector)
+           AND a field candidate (plain input selector). Left unguarded, that self-pair always
+           scores ancestorHops=0/pixelDistance=0 -- the lowest possible score -- and wins over the
+           real dealer-search-btn/dealer-postcode pair above regardless of any other evidence.
+           Positioned far off-screen (left: -9000px), mirroring a native framework-generated
+           submit-proxy input seen on a live production page. -->
+      <input type="button" id="offscreen-proxy-button" value="{formButton}" style="position: absolute; left: -9000px; top: 400px;" />
+
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <div id="dealer-error" class="error-message" role="alert" hidden>Please select a dealer before submitting.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      document.getElementById("dealer-search-btn").addEventListener("click", () => {
+        document.getElementById("dealer-results").hidden = false;
+      });
+      document.querySelectorAll('input[name="dealerChoice"]').forEach((radio) => {
+        radio.addEventListener("change", () => {
+          document.getElementById("dealer-committed").value = radio.value;
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        if (!document.getElementById("dealer-committed").value) {
+          event.preventDefault();
+          document.getElementById("dealer-error").hidden = false;
+          return;
+        }
+        event.preventDefault();
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

@@ -1246,3 +1246,57 @@ test("fill_form: a location gate and a lead form on the same page never share fi
     await close();
   }
 });
+
+test("fill_form: a dealer-lookup trigger with no accessible text at all (icon-only button) is still trusted via its structural/ARIA association alone -- vocabulary text is supporting evidence, never a required gate", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-icon-only-trigger.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true, `expected a successful submission, got formFillOutcome=${result.formFillOutcome}`);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: an unrelated off-screen input[type=button] that is also tagged as a field (self-match) never wins association over the real, visibly-adjacent dealer-search trigger", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-trigger-self-field-duplicate.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true, `expected a successful submission, got formFillOutcome=${result.formFillOutcome}`);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupFieldDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

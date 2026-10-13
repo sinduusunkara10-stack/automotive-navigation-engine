@@ -428,8 +428,25 @@ async function tagAndReadFieldsWithDealerLookup(
   const raw = await tagAndReadFields(form);
   const { candidates: triggers, pairDebug } = await tagAndFindLookupTriggers(form, collectDebug);
   const triggerByFieldId = new Map<string, string>();
+  // Pass 1: a trigger whose own accessible text/value matches the lookup vocabulary is the
+  // strongest, most unambiguous signal (confirms the structural association isn't a coincidental
+  // decoy button) -- registered first so it always wins ties over pass 2 below.
   for (const trigger of triggers) {
     if (trigger.adjacentFieldId && matchesLookupTriggerVocabulary(trigger.text) && !triggerByFieldId.has(trigger.adjacentFieldId)) {
+      triggerByFieldId.set(trigger.adjacentFieldId, trigger.triggerIndex);
+    }
+  }
+  // Pass 2 (fallback): tagAndFindLookupTriggers' own structural/ARIA association
+  // (TRIGGER_FIELD_MAX_ANCESTOR_HOPS/MAX_PIXEL_DISTANCE, ARIA relationship taking priority over
+  // both) already ranks evidence semantic-role-and-DOM-relationship-first, pixel distance last --
+  // see its own doc comment. Requiring vocabulary-matching text on top of that was too strict: a
+  // real lookup/select control is very often icon-only (empty accessible text) or carries an
+  // untranslated i18n placeholder (e.g. a literal "{formButton}" key leaking from a broken
+  // template) on a live production page, so it never has vocabulary text to match at all. Trust
+  // the structural association by itself whenever no vocabulary-confirmed trigger has already
+  // claimed that field -- vocabulary remains the deciding signal only when it's actually present.
+  for (const trigger of triggers) {
+    if (trigger.adjacentFieldId && !triggerByFieldId.has(trigger.adjacentFieldId)) {
       triggerByFieldId.set(trigger.adjacentFieldId, trigger.triggerIndex);
     }
   }

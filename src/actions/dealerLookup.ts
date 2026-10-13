@@ -199,6 +199,13 @@ export async function tagAndFindLookupTriggers(form: Locator, collectDebug = fal
 
         for (let f = 0; f < fieldEls.length; f += 1) {
           const fieldEl = fieldEls[f]!;
+          // A trigger can never be its own target field -- e.g. a native <input type="button">
+          // is tagged both as a field (tagAndReadFields tags every input/select/textarea
+          // unconditionally) and as a trigger candidate (this function's own button/
+          // input[type=button]/[role=button] selector) here. Left unguarded, this self-pair
+          // always scores ancestorHops=0/pixelDistance=0 -- the lowest possible score -- so it
+          // would win over every real field on the form regardless of any other evidence.
+          if (fieldEl === el) continue;
           const fieldId = fieldEl.getAttribute(attrs.fieldAttr);
           if (fieldId === null) continue;
 
@@ -259,10 +266,11 @@ export async function tagAndFindLookupTriggers(form: Locator, collectDebug = fal
             const fieldEl = fieldEls[f]!;
             const fieldId = fieldEl.getAttribute(attrs.fieldAttr);
             if (fieldId === null) continue;
+            const isSelfMatch = fieldEl === el;
 
             const fieldDomId = fieldEl.getAttribute("id") || "";
             const describedBy = (fieldEl.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
-            const ariaMatchesThisField = Boolean((fieldDomId && referencedIds.includes(fieldDomId)) || (triggerDomId && describedBy.includes(triggerDomId)));
+            const ariaMatchesThisField = !isSelfMatch && Boolean((fieldDomId && referencedIds.includes(fieldDomId)) || (triggerDomId && describedBy.includes(triggerDomId)));
 
             let ancestor: Element | null = el;
             let triggerHops = 0;
@@ -291,21 +299,23 @@ export async function tagAndFindLookupTriggers(form: Locator, collectDebug = fal
             const dy = rect.top + rect.height / 2 - (fieldRect.top + fieldRect.height / 2);
             const pixelDistance = Math.sqrt(dx * dx + dy * dy);
 
-            const passedAncestorCutoff = nearestCommonAncestorHops !== null && nearestCommonAncestorHops <= MAX_ANCESTOR_HOPS;
-            const passedPixelCutoff = Number.isFinite(pixelDistance) && pixelDistance <= MAX_PIXEL_DISTANCE;
+            const passedAncestorCutoff = !isSelfMatch && nearestCommonAncestorHops !== null && nearestCommonAncestorHops <= MAX_ANCESTOR_HOPS;
+            const passedPixelCutoff = !isSelfMatch && Number.isFinite(pixelDistance) && pixelDistance <= MAX_PIXEL_DISTANCE;
             const ancestorHopScoreComponent = nearestCommonAncestorHops !== null ? nearestCommonAncestorHops * ANCESTOR_HOP_WEIGHT : null;
             const pixelDistanceScoreComponent = Number.isFinite(pixelDistance) ? pixelDistance : null;
             const finalScore =
-              ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff)
+              !isSelfMatch && (ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff))
                 ? ariaMatchesThisField
                   ? 0
                   : (ancestorHopScoreComponent ?? 0) + (pixelDistanceScoreComponent ?? 0)
                 : null;
-            const accepted = ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff);
-            const isWinner = adjacentFieldId === fieldId;
+            const accepted = !isSelfMatch && (ariaMatchesThisField || (passedAncestorCutoff && passedPixelCutoff));
+            const isWinner = !isSelfMatch && adjacentFieldId === fieldId;
 
             let rejectionReason: string | null = null;
-            if (!accepted) {
+            if (isSelfMatch) {
+              rejectionReason = "this field and trigger are the same DOM element -- a trigger can never be its own target field";
+            } else if (!accepted) {
               const reasons: string[] = [];
               if (nearestCommonAncestorHops === null) reasons.push("no shared ancestor found within the form");
               else if (!passedAncestorCutoff) reasons.push(`ancestor-hop count ${nearestCommonAncestorHops} exceeds cutoff ${MAX_ANCESTOR_HOPS}`);
