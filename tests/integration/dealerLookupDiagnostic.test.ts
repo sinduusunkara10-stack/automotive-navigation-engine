@@ -321,3 +321,37 @@ test("dealerLookupTrace: payload safeguards truncate an oversized trigger-field-
     await close();
   }
 });
+
+test("dealerLookupTrace: a trigger that is also tagged as its own field (the real DS/Peugeot regression's own signature) is reported as a rejected self-match, never an accepted/winning pair", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-trigger-self-field-duplicate.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-self-match" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+
+    const selfMatchPairs = trace!.triggerFieldPairs.filter((p) => p.pixelDistance === 0 && p.nearestCommonAncestorHops === 0 && !p.accepted);
+    assert.ok(selfMatchPairs.length > 0, "the off-screen proxy's self-pair must be reported, rejected");
+    for (const pair of selfMatchPairs) {
+      assert.equal(pair.accepted, false);
+      assert.equal(pair.isWinner, false);
+      assert.ok(pair.rejectionReason?.includes("same DOM element"), `expected a self-match rejection reason, got: ${pair.rejectionReason}`);
+    }
+
+    // The real dealer-search button must still win its own, genuine pair -- the self-match
+    // guard must never prevent a legitimate structural association elsewhere on the form.
+    const winner = trace!.triggerFieldPairs.find((p) => p.isWinner);
+    assert.ok(winner, "the real dealer-search button must still win association with the postcode field");
+    assert.equal(winner!.accepted, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
