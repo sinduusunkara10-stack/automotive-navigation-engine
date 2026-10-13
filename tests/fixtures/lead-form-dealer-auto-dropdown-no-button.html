@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">Postcode or city</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <div id="dealer-results"></div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Pattern A: no lookup/search button exists at all -- the suggestion list appears purely
+      // from the field's own input event, entirely on its own. An engine that only ever waits
+      // for a trigger click to exist would never resolve this widget.
+      document.getElementById("dealer-postcode").addEventListener("input", () => {
+        const results = document.getElementById("dealer-results");
+        if (results.children.length > 0) return;
+        results.innerHTML =
+          '<div role="option" id="suggestion-1" tabindex="0">Riverside, SW1</div>' +
+          '<div role="option" id="suggestion-2" tabindex="0">Riverside Heights, SW2</div>';
+        document.getElementById("suggestion-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          document.getElementById("dealer-committed").value = "suggestion-1";
+        });
+        document.getElementById("suggestion-2").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          document.getElementById("dealer-committed").value = "suggestion-2";
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

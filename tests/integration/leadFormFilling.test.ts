@@ -1300,3 +1300,57 @@ test("fill_form: an unrelated off-screen input[type=button] that is also tagged 
     await close();
   }
 });
+
+test("fill_form: a dealer result list implemented as plain non-ARIA <li> items (no role=\"radio\"/role=\"option\"), inserted after the engine's old fixed 3-second wait would have expired, is still detected and selected via the generic-candidate fallback", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-generic-result-list.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true, `expected a successful submission, got formFillOutcome=${result.formFillOutcome}`);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupTriggered, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "suggestion_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+
+    const dealerCommitted = await page.evaluate(() => (document.getElementById("dealer-committed") as HTMLInputElement).value);
+    assert.equal(dealerCommitted, "dealer-1");
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("fill_form: an authoritative role=\"radio\" dealer result that only appears after the engine's old fixed 3-second wait would have expired is still detected via the new bounded adaptive poll", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-delayed-aria-result.html`);
+    const result = await executeFillForm({
+      page,
+      action: { type: "fill_form" },
+      captures: {},
+      stepIndex: 1,
+      captureModules: [],
+    });
+
+    assert.equal(result.success, true, `expected a successful submission, got formFillOutcome=${result.formFillOutcome}`);
+    assert.equal(result.formFillOutcome, "submitted");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerLookupOutcome, "dealer_selected");
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});

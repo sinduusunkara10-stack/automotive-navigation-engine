@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">Postcode or town</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <button type="button" id="dealer-find-btn">Find a dealer</button>
+        <div id="dealer-results"></div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Authoritative ARIA result (role="radio"), but only inserted after a delay longer than
+      // the engine's old fixed 3-second wait -- proves the bounded adaptive poll (not a single
+      // fixed-delay waitFor) is what makes this widget resolvable at all.
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        setTimeout(() => {
+          const results = document.getElementById("dealer-results");
+          results.innerHTML = '<div role="radio" id="dealer-result-1" tabindex="0">Riverside Motors · 1.2mi</div>';
+          document.getElementById("dealer-result-1").addEventListener("click", (e) => {
+            e.target.setAttribute("aria-checked", "true");
+            document.getElementById("dealer-committed").value = "dealer-1";
+          });
+        }, 4200);
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

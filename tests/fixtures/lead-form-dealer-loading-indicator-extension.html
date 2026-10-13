@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Postcode or city</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-find-btn">Find a dealer</button>
+      <div id="suggestions" hidden></div>
+      <div id="status-indicator" role="status" hidden>Loading...</div>
+      <div id="dealer-results" hidden></div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Clicking the trigger reveals a location suggestion immediately (stage 1 resolves with
+      // no extension needed); selecting it starts the distinct dealer-results stage, whose own
+      // generic role="status" loading indicator stays visibly active past that stage's base
+      // 6-second timeout -- the authoritative dealer result only arrives at 7 seconds, within
+      // the stage's bounded extension (6s base + 3s extension = 9s max) but past the base
+      // timeout alone. Proves the dealer-results stage's own one bounded extension (never an
+      // unconditional longer wait) is what makes this widget resolvable.
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        const suggestions = document.getElementById("suggestions");
+        suggestions.hidden = false;
+        suggestions.innerHTML = '<div role="option" id="suggestion-1" tabindex="0">Riverside, SW1</div>';
+        document.getElementById("suggestion-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          document.getElementById("status-indicator").hidden = false;
+          setTimeout(() => {
+            const results = document.getElementById("dealer-results");
+            results.hidden = false;
+            results.innerHTML = '<div role="radio" id="dealer-result-1" tabindex="0">Riverside Motors · 1.2mi</div>';
+            document.getElementById("dealer-result-1").addEventListener("click", (ev) => {
+              ev.target.setAttribute("aria-checked", "true");
+              document.getElementById("dealer-committed").value = "dealer-1";
+            });
+            document.getElementById("status-indicator").hidden = true;
+          }, 7000);
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

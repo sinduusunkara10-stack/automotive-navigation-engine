@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Postcode or city</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-find-btn">Find a dealer</button>
+      <div id="suggestions" hidden></div>
+      <div id="status-indicator" role="status" hidden>Loading dealers...</div>
+      <div id="dealer-results" hidden></div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Location suggestions appear immediately on click (stage 1 resolves in well under a
+      // second), but the distinct dealer-results stage only arrives at 7 seconds, past its own
+      // base timeout but within its own bounded extension -- proves the two stages' bounded
+      // waits are independent: a fast location stage must never starve, or be conflated with,
+      // a slow dealer-results stage.
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        const suggestions = document.getElementById("suggestions");
+        suggestions.hidden = false;
+        suggestions.innerHTML = '<div role="option" id="suggestion-1" tabindex="0">Riverside, SW1</div>';
+        document.getElementById("suggestion-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          document.getElementById("status-indicator").hidden = false;
+          setTimeout(() => {
+            const results = document.getElementById("dealer-results");
+            results.hidden = false;
+            results.innerHTML = '<div role="radio" id="dealer-result-1" tabindex="0">Riverside Motors · 1.2mi</div>';
+            document.getElementById("dealer-result-1").addEventListener("click", (ev) => {
+              ev.target.setAttribute("aria-checked", "true");
+              document.getElementById("dealer-committed").value = "dealer-1";
+            });
+            document.getElementById("status-indicator").hidden = true;
+          }, 7000);
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

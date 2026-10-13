@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+
+      <div id="dealer-widget">
+        <label for="dealer-postcode">Postcode or city</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <div id="suggestions"></div>
+        <div id="dealer-name" aria-live="polite"></div>
+      </div>
+
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Pattern D: the suggestion dropdown appears entirely on its own, and selecting a
+      // suggestion auto-populates the nearest dealer directly -- no further click, no distinct
+      // dealer-results list ever appears. An engine that always waits for a second, separate
+      // dealer-results stage would time out here even though the widget is already resolved.
+      document.getElementById("dealer-postcode").addEventListener("input", () => {
+        const suggestions = document.getElementById("suggestions");
+        if (suggestions.children.length > 0) return;
+        suggestions.innerHTML = '<div role="option" id="suggestion-1" tabindex="0">Riverside, SW1</div>';
+        document.getElementById("suggestion-1").addEventListener("click", (e) => {
+          e.target.setAttribute("aria-selected", "true");
+          document.getElementById("dealer-name").textContent = "Nearest dealer: Riverside Motors";
+          document.getElementById("dealer-committed").value = "dealer-1";
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

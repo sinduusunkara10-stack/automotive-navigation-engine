@@ -45,7 +45,7 @@ class FillFormOnceProvider implements ReasoningProvider {
 
 function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.43.0",
+    schemaVersion: "1.45.0",
     taskId: "dealer-lookup-trace-engine-level",
     objective: "Submit the lead-capture form.",
     allowedDomains: ["127.0.0.1"],
@@ -58,7 +58,7 @@ function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "start
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.45.0",
+    outputSchemaVersion: "1.47.0",
     ...overrides,
   };
 }
@@ -349,6 +349,211 @@ test("dealerLookupTrace: a trigger that is also tagged as its own field (the rea
     const winner = trace!.triggerFieldPairs.find((p) => p.isWinner);
     assert.ok(winner, "the real dealer-search button must still win association with the postcode field");
     assert.equal(winner!.accepted, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a dealer result resolved via the generic-candidate fallback (no ARIA role match) reports genericCandidateFallbackUsed=true, while an authoritative ARIA-role resolution reports it false", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-generic-result-list.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-generic-candidate" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: an authoritative role=\"radio\"/role=\"option\" resolution reports genericCandidateFallbackUsed=false", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-search-success.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-aria-not-generic" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.genericCandidateFallbackUsed, false);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: Pattern A -- a suggestion dropdown that appears entirely on its own, with no lookup/search button at all, is detected before any activation is attempted and resolved by selecting it", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-auto-dropdown-no-button.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-pattern-a" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.autoDropdownDetected, true);
+    assert.equal(trace!.execution.eventsDispatched.includes("click_trigger"), false);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: Pattern C -- an auto-appearing dropdown still requires a distinct OK/confirm control after a suggestion is selected before dealer results appear, and the engine never clicks it before the suggestion is picked", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-auto-dropdown-then-confirm.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-pattern-c" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.autoDropdownDetected, true);
+    assert.equal(trace!.execution.confirmControlClicked, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: Pattern D -- an auto-appearing dropdown whose selected suggestion auto-populates the dealer directly, with no further selectable dealer-results stage, is recognised without ever submitting unverified", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-auto-dropdown-autopopulate.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-pattern-d" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.autoDropdownDetected, true);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: Pattern E -- a widget with no lookup button and no reaction to typing is only opened by ArrowDown, never mistaken for an unresolved dead end", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-keyboard-only.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-pattern-e" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.eventsDispatched.includes("press_arrowdown"), true);
+    assert.equal(trace!.execution.autoDropdownDetected, false);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a result that only arrives past the base 6-second stage timeout, with a generic loading indicator still visibly active, is caught by the stage's one bounded extension rather than timing out", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-loading-indicator-extension.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-loading-extension" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.stageWaitExtended, true);
+    assert.equal(trace!.execution.loadingIndicatorObservedAtTimeout, true);
+    assert.equal(trace!.execution.timedOutStage, null);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: location suggestions resolving almost instantly never starve, or get conflated with, an independently-timed slow dealer-results stage that itself needs its own bounded extension", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-fast-suggestions-slow-dealer.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-independent-stage-timing" }),
+    );
+
+    assert.equal(result.success, true);
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.suggestionsDetected, true);
+    assert.equal(trace!.execution.stageWaitExtended, true);
+    assert.equal(trace!.execution.timedOutStage, null);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
+test("dealerLookupTrace: a lookup that never reveals anything selectable, with no loading indicator either, reports a genuinely unresolved outcome and blocks submit rather than hanging or submitting unverified", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-dealer-suggestions-never-appear.html`);
+    const result = await withDiagnosticFlag(true, () =>
+      executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [], taskId: "task-never-appear" }),
+    );
+
+    const trace = result.dealerLookupTrace;
+    assert.ok(trace, "dealerLookupTrace must be present");
+    assert.equal(trace!.execution.timedOutStage, "location_suggestions");
+    assert.equal(trace!.execution.loadingIndicatorObservedAtTimeout, false);
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+    assert.equal(result.success, false);
   } finally {
     await page.close();
     await browser.close();

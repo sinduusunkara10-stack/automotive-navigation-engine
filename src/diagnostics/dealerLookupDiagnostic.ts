@@ -98,6 +98,12 @@ export interface DealerLookupExecutionSummary {
   positiveCompletionEvidenceUsed: string;
   preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
   exactBlockingReason: string;
+  genericCandidateFallbackUsed: boolean;
+  autoDropdownDetected: boolean;
+  confirmControlClicked: boolean;
+  timedOutStage: "location_suggestions" | "dealer_results" | null;
+  loadingIndicatorObservedAtTimeout: boolean;
+  stageWaitExtended: boolean;
 }
 
 export interface DealerLookupTrace {
@@ -392,6 +398,12 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     positiveCompletionEvidenceUsed: dealerLookupOutcome?.dealerVerificationEvidence || "none: the dealer-lookup flow never ran for this form",
     preSubmitReadinessResult: preSubmitReadinessPassed === null ? "not_evaluated" : preSubmitReadinessPassed ? "passed" : "blocked",
     exactBlockingReason: preSubmitReadinessPassed === false ? preSubmitReadinessFailures.join("; ") : preSubmitReadinessPassed === true ? "not blocked" : "readiness gate has not run yet",
+    genericCandidateFallbackUsed: trace?.genericCandidateFallbackUsed ?? false,
+    autoDropdownDetected: trace?.autoDropdownDetected ?? false,
+    confirmControlClicked: trace?.confirmControlClicked ?? false,
+    timedOutStage: trace?.timedOutStage ?? null,
+    loadingIndicatorObservedAtTimeout: trace?.loadingIndicatorObservedAtTimeout ?? false,
+    stageWaitExtended: trace?.stageWaitExtended ?? false,
   };
 
   const completenessBeforeTruncation = computeCompleteness({
