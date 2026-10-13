@@ -3,6 +3,26 @@ import { FIELD_INDEX_ATTR, TRIGGER_INDEX_ATTR, type DealerLookupOutcome, type Ra
 import type { PlannedField } from "../forms/fillPlan.js";
 import { isFormDiscoveryDiagnosticEnabled } from "./formDiscoveryDiagnostic.js";
 
+/** Emits once per captured dealerLookupTrace payload, only when enabled -- a concise summary only (run id, completeness, counts, serialized size, truncation), never the trace itself, so Render's log viewer can confirm a payload was built without the full trace (which never touches logs or disk) being printed anywhere. */
+export function logDealerLookupTraceEmitted(params: {
+  runId: string;
+  taskId: string;
+  completeness: "COMPLETE" | "INCOMPLETE";
+  evaluatedCandidateCount: number;
+  acceptedCandidateCount: number;
+  rejectedCandidateCount: number;
+  serializedBytes: number;
+  truncated: boolean;
+}): void {
+  if (!isFormDiscoveryDiagnosticEnabled()) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `DEALER_LOOKUP_TRACE_EMITTED runId=${params.runId} taskId=${params.taskId} completeness=${params.completeness} ` +
+      `evaluatedCandidateCount=${params.evaluatedCandidateCount} acceptedCandidateCount=${params.acceptedCandidateCount} ` +
+      `rejectedCandidateCount=${params.rejectedCandidateCount} serializedBytes=${params.serializedBytes} truncated=${params.truncated}`,
+  );
+}
+
 /**
  * Opt-in, investigation-only dealer/postcode decision-trace evidence (see
  * ActionResult.dealerLookupTrace in types/task-response.ts and schemas/task-response.schema.json).
@@ -90,6 +110,54 @@ export interface DealerLookupTrace {
   triggerFieldPairs: TriggerFieldPairDebug[];
   execution: DealerLookupExecutionSummary;
   diagnosticCompleteness: DealerLookupDiagnosticCompleteness;
+  truncated: boolean;
+  omittedCandidateCount: number;
+  omittedFieldCount: number;
+}
+
+/** Payload safeguards -- this diagnostic runs against live, unknown-shape production pages, so every array is bounded independent of how many controls or candidate pairs a page actually has. */
+export const DEALER_TRACE_MAX_FIELDS = 50;
+export const DEALER_TRACE_MAX_TRIGGER_FIELD_PAIRS = 100;
+export const DEALER_TRACE_MAX_DOM_ANCESTRY_DEPTH = 8;
+export const DEALER_TRACE_MAX_SERIALIZED_BYTES = 200_000;
+
+/** Deterministic: always keeps the first `max` entries and reports how many were dropped from the end -- never a random/unordered subset, so a repeated run against the same page produces the same truncation. */
+function capArray<T>(items: T[], max: number): { kept: T[]; omitted: number } {
+  if (items.length <= max) return { kept: items, omitted: 0 };
+  return { kept: items.slice(0, max), omitted: items.length - max };
+}
+
+/** Last-resort safeguard against the two count caps above still producing an oversized payload (e.g. very large label/ariaAttributes text on a handful of elements) -- halves the larger of the two evidence arrays repeatedly until the serialized trace fits, or until nothing is left to drop. */
+function enforceSerializedSizeBudget(
+  trace: Omit<DealerLookupTrace, "truncated" | "omittedCandidateCount" | "omittedFieldCount">,
+  omittedFieldCount: number,
+  omittedCandidateCount: number,
+): { fields: DealerLookupFieldTrace[]; triggerFieldPairs: TriggerFieldPairDebug[]; omittedFieldCount: number; omittedCandidateCount: number; truncated: boolean } {
+  let fields = trace.fields;
+  let triggerFieldPairs = trace.triggerFieldPairs;
+  let droppedFields = omittedFieldCount;
+  let droppedPairs = omittedCandidateCount;
+  let truncatedBySize = false;
+
+  while (
+    JSON.stringify({ ...trace, fields, triggerFieldPairs }).length > DEALER_TRACE_MAX_SERIALIZED_BYTES &&
+    (fields.length > 0 || triggerFieldPairs.length > 0)
+  ) {
+    truncatedBySize = true;
+    if (triggerFieldPairs.length >= fields.length && triggerFieldPairs.length > 0) {
+      const nextLength = Math.max(0, Math.floor(triggerFieldPairs.length / 2));
+      droppedPairs += triggerFieldPairs.length - nextLength;
+      triggerFieldPairs = triggerFieldPairs.slice(0, nextLength);
+    } else if (fields.length > 0) {
+      const nextLength = Math.max(0, Math.floor(fields.length / 2));
+      droppedFields += fields.length - nextLength;
+      fields = fields.slice(0, nextLength);
+    } else {
+      break;
+    }
+  }
+
+  return { fields, triggerFieldPairs, omittedFieldCount: droppedFields, omittedCandidateCount: droppedPairs, truncated: truncatedBySize };
 }
 
 /** One rich DOM read per field/trigger element, keyed by its own tagged index attribute. No named helper inside the evaluate callback (tsx/esbuild __name serialization gotcha -- see formDiscoveryDiagnostic.ts's own comment on this). */
@@ -99,7 +167,7 @@ async function readElementTrace(
 ): Promise<DealerLookupFieldTrace[]> {
   if (targets.length === 0) return [];
   return page.evaluate(
-    (args: { targets: { elementId: string; role: "field" | "trigger"; index: string }[]; fieldAttr: string; triggerAttr: string }) => {
+    (args: { targets: { elementId: string; role: "field" | "trigger"; index: string }[]; fieldAttr: string; triggerAttr: string; maxDomAncestryDepth: number }) => {
       return args.targets.map((target) => {
         const attr = target.role === "field" ? args.fieldAttr : args.triggerAttr;
         const el = document.querySelector(`[${attr}="${target.index}"]`) as HTMLElement | null;
@@ -170,7 +238,7 @@ async function readElementTrace(
         const domAncestry: { tag: string; hasId: boolean; role: string | null }[] = [];
         let ancestor: Element | null = el.parentElement;
         let ancestorSteps = 0;
-        while (ancestor && ancestor !== closestForm?.parentElement && ancestorSteps < 8) {
+        while (ancestor && ancestor !== closestForm?.parentElement && ancestorSteps < args.maxDomAncestryDepth) {
           domAncestry.push({ tag: ancestor.tagName.toLowerCase(), hasId: Boolean(ancestor.getAttribute("id")), role: ancestor.getAttribute("role") });
           if (ancestor === closestForm) break;
           ancestor = ancestor.parentElement;
@@ -211,7 +279,7 @@ async function readElementTrace(
         };
       });
     },
-    { targets, fieldAttr: FIELD_INDEX_ATTR, triggerAttr: TRIGGER_INDEX_ATTR },
+    { targets, fieldAttr: FIELD_INDEX_ATTR, triggerAttr: TRIGGER_INDEX_ATTR, maxDomAncestryDepth: DEALER_TRACE_MAX_DOM_ANCESTRY_DEPTH },
   );
 }
 
@@ -289,10 +357,12 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
   const postcodeOrDealerFields = plan.filter((p) => p.matchedField === "postcode" || p.matchedField === "dealerSearch");
   const fieldTargets = postcodeOrDealerFields.map((p) => ({ elementId: `field-${p.descriptor.id}`, role: "field" as const, index: p.descriptor.id }));
   const triggerTargets = triggerCandidates.map((t) => ({ elementId: `trigger-${t.triggerIndex}`, role: "trigger" as const, index: t.triggerIndex }));
+  const { kept: targetsToRead, omitted: omittedFieldCountFromCap } = capArray([...fieldTargets, ...triggerTargets], DEALER_TRACE_MAX_FIELDS);
+  const { kept: pairDebugCapped, omitted: omittedCandidateCountFromCap } = capArray(pairDebug, DEALER_TRACE_MAX_TRIGGER_FIELD_PAIRS);
 
   let fields: DealerLookupFieldTrace[] = [];
   try {
-    fields = await readElementTrace(page, [...fieldTargets, ...triggerTargets]);
+    fields = await readElementTrace(page, targetsToRead);
   } catch {
     fields = [];
   }
@@ -324,23 +394,66 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     exactBlockingReason: preSubmitReadinessPassed === false ? preSubmitReadinessFailures.join("; ") : preSubmitReadinessPassed === true ? "not blocked" : "readiness gate has not run yet",
   };
 
-  const diagnosticCompleteness = computeCompleteness({
+  const completenessBeforeTruncation = computeCompleteness({
     triggerCandidates,
-    pairDebug,
+    pairDebug: pairDebugCapped,
     postcodeOrDealerFieldIds: postcodeOrDealerFields.map((p) => p.descriptor.id),
     dealerLookupOutcome,
     preSubmitReadinessPassed,
+  });
+
+  const traceBeforeSizeBudget = {
+    enabled: true as const,
+    runId: taskId,
+    taskId,
+    capturedAt: new Date().toISOString(),
+    captureStage,
+    fields,
+    triggerFieldPairs: pairDebugCapped,
+    execution,
+    diagnosticCompleteness: completenessBeforeTruncation,
+  };
+
+  const sized = enforceSerializedSizeBudget(traceBeforeSizeBudget, omittedFieldCountFromCap, omittedCandidateCountFromCap);
+  const truncated = sized.truncated || omittedFieldCountFromCap > 0 || omittedCandidateCountFromCap > 0;
+
+  const diagnosticCompleteness: DealerLookupDiagnosticCompleteness = truncated
+    ? {
+        ...completenessBeforeTruncation,
+        status: "INCOMPLETE",
+        missingEvidence: [
+          ...completenessBeforeTruncation.missingEvidence,
+          "evidence was truncated to stay within the diagnostic's payload safeguards -- see omittedFieldCount/omittedCandidateCount",
+        ],
+        evaluatedCandidateCount: sized.triggerFieldPairs.length,
+        acceptedCandidateCount: sized.triggerFieldPairs.filter((p) => p.accepted).length,
+        rejectedCandidateCount: sized.triggerFieldPairs.filter((p) => !p.accepted).length,
+      }
+    : completenessBeforeTruncation;
+
+  logDealerLookupTraceEmitted({
+    runId: taskId,
+    taskId,
+    completeness: diagnosticCompleteness.status,
+    evaluatedCandidateCount: diagnosticCompleteness.evaluatedCandidateCount,
+    acceptedCandidateCount: diagnosticCompleteness.acceptedCandidateCount,
+    rejectedCandidateCount: diagnosticCompleteness.rejectedCandidateCount,
+    serializedBytes: JSON.stringify({ ...traceBeforeSizeBudget, fields: sized.fields, triggerFieldPairs: sized.triggerFieldPairs, diagnosticCompleteness }).length,
+    truncated,
   });
 
   return {
     enabled: true,
     runId: taskId,
     taskId,
-    capturedAt: new Date().toISOString(),
+    capturedAt: traceBeforeSizeBudget.capturedAt,
     captureStage,
-    fields,
-    triggerFieldPairs: pairDebug,
+    fields: sized.fields,
+    triggerFieldPairs: sized.triggerFieldPairs,
     execution,
     diagnosticCompleteness,
+    truncated,
+    omittedCandidateCount: sized.omittedCandidateCount,
+    omittedFieldCount: sized.omittedFieldCount,
   };
 }

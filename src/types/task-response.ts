@@ -677,6 +677,17 @@ export interface ActionResult {
       finalDecision: string;
       finalDecisionReason: string;
     };
+    /**
+     * Payload safeguards: true if any array below was shortened, or any element's own bounded
+     * data (e.g. domAncestry) hit its cap, to keep the serialized trace under
+     * DEALER_TRACE_MAX_SERIALIZED_BYTES. Deterministic (always drops from the end of each array
+     * first) -- never a random/unordered subset.
+     */
+    truncated: boolean;
+    /** Candidate trigger-field pairs dropped from triggerFieldPairs to stay within limits. */
+    omittedCandidateCount: number;
+    /** Field/trigger elements dropped from fields to stay within limits. */
+    omittedFieldCount: number;
   };
   /**
    * Generic radio-group consent discovery/resolution diagnostics (see forms/consentGroups.ts) --

@@ -1038,7 +1038,10 @@
             "fields",
             "triggerFieldPairs",
             "execution",
-            "diagnosticCompleteness"
+            "diagnosticCompleteness",
+            "truncated",
+            "omittedCandidateCount",
+            "omittedFieldCount"
           ],
           "properties": {
             "enabled": {
@@ -1509,6 +1512,20 @@
                   "type": "string"
                 }
               }
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "True if any evidence array was shortened, or the serialized trace was still over its byte budget after count caps, to keep the payload bounded on an unknown-shape production page. Deterministic (oldest/first-discovered entries kept) -- never a random subset."
+            },
+            "omittedCandidateCount": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of trigger-field candidate pairs dropped from triggerFieldPairs to stay within the diagnostic payload safeguards."
+            },
+            "omittedFieldCount": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of field/trigger elements dropped from fields to stay within the diagnostic payload safeguards."
             }
           }
         },
