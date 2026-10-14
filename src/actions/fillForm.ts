@@ -32,6 +32,7 @@ import {
   writeFormDiscoveryDebugBackup,
 } from "../diagnostics/formDiscoveryDiagnostic.js";
 import { buildDealerLookupTrace } from "../diagnostics/dealerLookupDiagnostic.js";
+import { startDealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
 import {
   computeFormScore,
   resolveAmbiguousFormSelection,
@@ -529,7 +530,7 @@ async function applyDecision(
       const triggerIndex = plannedField.decision.triggerIndex;
       const trigger = triggerIndex ? await triggerByIndex(form, triggerIndex) : null;
       const scope = await dealerScopeFor(form, plannedField.descriptor.id);
-      const outcome = await resolveDealerLookup(page, scope, trigger, field);
+      const outcome = await resolveDealerLookup(page, scope, trigger, field, form);
       return { key: "dealerSearch", dealerLookup: outcome };
     }
     default:
@@ -570,7 +571,7 @@ async function findInvalidFieldIds(form: Locator): Promise<string[]> {
  * at the start of the run, and silently reports zero invalid fields even though the site
  * cancelled the submit.
  */
-async function collectPostSubmitDiagnostics(form: Locator): Promise<PostSubmitDiagnostics> {
+async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVerified: boolean): Promise<PostSubmitDiagnostics> {
   await tagAndReadFields(form).catch(() => []);
   const invalidFieldIds = await findInvalidFieldIds(form).catch(() => []);
   const nativeValidationMessages = await form
@@ -610,11 +611,23 @@ async function collectPostSubmitDiagnostics(form: Locator): Promise<PostSubmitDi
     .catch(() => ({}));
   const unresolvedDependentControlIds = await form
     .evaluate(
-      (formEl: HTMLFormElement, attrs: { scopeAttr: string; resultSelector: string }) => {
+      (formEl: HTMLFormElement, attrs: { scopeAttr: string; resultSelector: string; dealerValueAlreadyVerified: boolean }) => {
         const unresolved: string[] = [];
         Array.from(formEl.querySelectorAll(`[${attrs.scopeAttr}]`)).forEach((scope) => {
           const scopedResults = Array.from(scope.querySelectorAll(attrs.resultSelector));
-          if (scopedResults.length === 0) return;
+          // A scope with zero selectable results is not "nothing to check" -- it is the
+          // strongest possible evidence that nothing was ever committed through a selectable
+          // control, UNLESS resolveDealerLookup already verified this exact dependency through
+          // a different, independently-trustworthy mechanism (a hidden-input commit) -- a
+          // selectable-result scan can never see that, so it must defer to that verdict rather
+          // than contradict it. Previously the zero-result case was skipped entirely, which left
+          // a dealer-lookup scope that never surfaced a single selectable result silently
+          // unflagged here, with no safety net independent of whatever resolveDealerLookup
+          // itself had classified.
+          if (scopedResults.length === 0) {
+            if (!attrs.dealerValueAlreadyVerified) unresolved.push(scope.getAttribute(attrs.scopeAttr) ?? "");
+            return;
+          }
           const committed = scopedResults.some(
             (resultEl) =>
               (resultEl as HTMLInputElement).checked === true ||
@@ -625,7 +638,7 @@ async function collectPostSubmitDiagnostics(form: Locator): Promise<PostSubmitDi
         });
         return unresolved;
       },
-      { scopeAttr: DEALER_SCOPE_ATTR, resultSelector: DEALER_RESULT_SELECTOR },
+      { scopeAttr: DEALER_SCOPE_ATTR, resultSelector: DEALER_RESULT_SELECTOR, dealerValueAlreadyVerified },
     )
     .catch(() => []);
 
@@ -1205,6 +1218,22 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         preSubmitReadinessPassed: false,
         preSubmitReadinessFailures,
         submitAttempted: false,
+        submitControlIdentity: "not_applicable: submit was never attempted",
+        submitActivationMethod: null,
+        submissionRequestStarted: false,
+        submissionNetworkRequests: [] as SanitizedNetworkRequestEvidence[],
+        submissionCanceledBeforeRequest: true,
+        validationSurfaceDetected: false,
+        validationSurfaceType: null as "field_validation" | "visible_message" | "unresolved_dependent_control" | null,
+        dealerCommitEvidence: dealerLookupOutcome?.executionTrace.hiddenFieldCommitDetected ?? null,
+        submissionOutcome: "cancelled_before_request" as const,
+        submissionOutcomeReason: "the pre-submit readiness gate failed, so submit was never clicked at all",
+        retryEligible: false,
+        retryReason: dealerDependencyUnresolved
+          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified`
+          : multiplePostcodeFieldsUnresolved
+            ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
+            : "not retried: submit was never attempted, the pre-submit readiness gate failed",
       },
     };
   }
@@ -1217,6 +1246,19 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const beforeUrl = page.url();
 
+  // Generic descriptor of the control actually activated -- tag/type and its own static button
+  // text (never a typed or submitted value), so a cancellation's diagnostics can at least say
+  // what was clicked without guessing from a brand-specific selector.
+  const submitControlIdentity = await submit
+    .evaluate((el: Element) => {
+      const tag = el.tagName.toLowerCase();
+      const type = (el as HTMLInputElement).type ?? "";
+      const text = (el.textContent ?? (el as HTMLInputElement).value ?? "").trim().slice(0, 60);
+      return `${tag}${type ? `[type="${type}"]` : ""}${text ? `:"${text}"` : ""}`;
+    })
+    .catch(() => "unknown");
+  const submitActivationMethod = "click" as const;
+
   async function rerunDealerSearch(): Promise<void> {
     const { fields: raw } = await tagAndReadFieldsWithDealerLookup(form);
     const descriptors = raw.map(toDescriptor);
@@ -1227,9 +1269,19 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
   }
 
-  async function attemptSubmit(): Promise<{ postSubmit: PostSubmitDiagnostics; succeeded: boolean; afterUrl: string }> {
+  async function attemptSubmit(): Promise<{
+    postSubmit: PostSubmitDiagnostics;
+    succeeded: boolean;
+    afterUrl: string;
+    networkRequests: SanitizedNetworkRequestEvidence[];
+  }> {
+    // Started before the click, stopped after settling -- correlates purely by "happened during
+    // this submit attempt's window", never by URL/brand, same convention as the dealer-lookup
+    // capture this reuses. Never a request/response body, never a typed or submitted value.
+    const capture = startDealerLookupNetworkCapture(page);
     await submit.click();
     await waitForAdaptiveSettle(page);
+    const networkRequests = await capture.stop().catch(() => []);
     const afterUrl = page.url();
     const urlChanged = afterUrl !== beforeUrl;
     // A URL change already proves the submit went through -- `form` now refers to whatever
@@ -1246,10 +1298,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           unresolvedDependentControlIds: [],
           validationCauseObserved: true,
         }
-      : await collectPostSubmitDiagnostics(form);
+      : await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false);
     const hasConfirmationText = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await detectConfirmationText(page));
     const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || hasConfirmationText);
-    return { postSubmit, succeeded, afterUrl };
+    return { postSubmit, succeeded, afterUrl, networkRequests };
   }
 
   let attempt = await attemptSubmit();
@@ -1289,6 +1341,38 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // response, which previously made "the dealer flow never activated" indistinguishable from
   // "it activated and every step came back false".
   const formDealerSearchDiagnostics = buildDealerSearchDiagnostics();
+  const submissionRequestStarted = attempt.networkRequests.length > 0;
+  const submissionCanceledBeforeRequest = !attempt.succeeded && !submissionRequestStarted;
+  // Carries the dealer lookup's own hidden-identifier-commit evidence through to submission
+  // time, for correlation -- null when no dealer_search decision ever ran on this form.
+  const dealerCommitEvidence = dealerLookupOutcome?.executionTrace.hiddenFieldCommitDetected ?? null;
+  const finalDealerUncommitted = dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified;
+  // Whether a further retry would have had a real corrective action available -- independent of
+  // whether the retry budget was already spent (retryDecision/retryReason explains that part).
+  const retryEligible = !attempt.succeeded && (finalDealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0);
+  const validationSurfaceType: "field_validation" | "visible_message" | "unresolved_dependent_control" | null = !attempt.succeeded
+    ? attempt.postSubmit.ariaInvalidFieldIds.length > 0 || Object.keys(attempt.postSubmit.nativeValidationMessages).length > 0
+      ? "field_validation"
+      : attempt.postSubmit.postSubmitValidationMessages.length > 0
+        ? "visible_message"
+        : attempt.postSubmit.unresolvedDependentControlIds.length > 0
+          ? "unresolved_dependent_control"
+          : null
+    : null;
+  const submissionOutcome: "succeeded" | "validation_failed" | "cancelled_unknown_cause" | "cancelled_before_request" = attempt.succeeded
+    ? "succeeded"
+    : attempt.postSubmit.validationCauseObserved
+      ? "validation_failed"
+      : submissionCanceledBeforeRequest
+        ? "cancelled_before_request"
+        : "cancelled_unknown_cause";
+  const submissionOutcomeReason = attempt.succeeded
+    ? "submit resulted in a URL change or on-screen confirmation text"
+    : attempt.postSubmit.validationCauseObserved
+      ? "a native/aria-invalid field, visible validation text, or an unresolved dependent control was observed after submit"
+      : submissionCanceledBeforeRequest
+        ? "submit was cancelled and no xhr/fetch request was ever observed during the submit window"
+        : "submit was cancelled but no diagnosable cause was observed, even though a network request was sent";
   const formPostSubmitDiagnostics = {
     submitCanceled: !attempt.succeeded,
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
@@ -1302,6 +1386,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     preSubmitReadinessPassed: true,
     preSubmitReadinessFailures: [] as string[],
     submitAttempted: true,
+    submitControlIdentity,
+    submitActivationMethod,
+    submissionRequestStarted,
+    submissionNetworkRequests: attempt.networkRequests,
+    submissionCanceledBeforeRequest,
+    validationSurfaceDetected: attempt.postSubmit.validationCauseObserved,
+    validationSurfaceType,
+    dealerCommitEvidence,
+    submissionOutcome,
+    submissionOutcomeReason,
+    retryEligible,
+    retryReason: retryDecision,
   };
 
   if (!attempt.succeeded) {

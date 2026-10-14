@@ -450,6 +450,26 @@ async function safeInnerText(locator: Locator): Promise<string> {
   return locator.evaluate((el: Element) => el.textContent ?? "").catch(() => "");
 }
 
+/** Positional snapshot of every hidden input's value within the given root (the enclosing form,
+ * not the narrower trigger/field DOM scope -- a widget's own committed-value hidden field is
+ * commonly a sibling of the visible widget markup, not nested inside it), in DOM order -- never
+ * read by name/id (which would mean hard-coding a site's own field naming), only by position, so
+ * a before/after comparison can tell whether any of them transitioned from empty to non-empty. */
+async function snapshotHiddenInputValues(root: Locator): Promise<string[]> {
+  return root
+    .evaluate((el: Element) => Array.from(el.querySelectorAll('input[type="hidden"]')).map((input) => (input as HTMLInputElement).value.trim()))
+    .catch(() => []);
+}
+
+/** True only when the same positional hidden input went from empty to non-empty between two
+ * snapshots -- never when the count of hidden inputs changed (that is far more likely to be an
+ * unrelated widget mutating the DOM than a genuine commit) and never from a value that was
+ * already non-empty before (which proves nothing about this lookup). */
+function hasHiddenInputCommit(before: string[], after: string[]): boolean {
+  if (before.length !== after.length) return false;
+  return before.some((value, index) => value.length === 0 && (after[index]?.length ?? 0) > 0);
+}
+
 /** Presence-only, never the validation message's own text (which some browsers can echo the
  * field's current value into) -- see DealerLookupExecutionTrace's own doc comments. */
 async function readFieldValidationState(field: Locator): Promise<{ ariaInvalid: boolean; hasNativeValidationMessage: boolean }> {
@@ -760,6 +780,13 @@ export interface DealerLookupExecutionTrace {
   /** True when the field's native (browser-generated) validationMessage was non-empty at the
    * moment a stage timed out with no result -- presence only, never the message text itself. */
   fieldHasNativeValidationMessageAtTimeout: boolean;
+  /** True when a hidden input (input[type="hidden"]) within the dealer-lookup scope itself
+   * transitioned from an empty value to a non-empty one -- the only signal this engine treats as
+   * genuine proof a widget committed an identifier, as opposed to some unrelated visible text
+   * (an error message, a loading string, whitespace noise) merely changing in scope. False when
+   * this check ran and found no such transition. Null when this check never ran at all (a result
+   * was selected via its own ARIA/native-checked state instead, which is already authoritative). */
+  hiddenFieldCommitDetected: boolean | null;
 }
 
 export interface DealerLookupOutcome {
@@ -812,10 +839,10 @@ const DEALER_WAIT_CONDITION = `${DEALER_RESULT_SELECTOR} visible within scope, o
  * wrapper (rather than threading capture start/stop through every one of the core function's
  * five return points) so the core state machine's own control flow stays exactly as it was.
  */
-export async function resolveDealerLookup(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
+export async function resolveDealerLookup(page: Page, scope: Locator, trigger: Locator | null, field: Locator, form: Locator): Promise<DealerLookupOutcome> {
   const capture = startDealerLookupNetworkCapture(page);
   try {
-    const outcome = await resolveDealerLookupCore(page, scope, trigger, field);
+    const outcome = await resolveDealerLookupCore(page, scope, trigger, field, form);
     outcome.executionTrace.networkRequests = await capture.stop();
     return outcome;
   } catch (error) {
@@ -824,8 +851,14 @@ export async function resolveDealerLookup(page: Page, scope: Locator, trigger: L
   }
 }
 
-async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Locator | null, field: Locator): Promise<DealerLookupOutcome> {
+async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Locator | null, field: Locator, form: Locator): Promise<DealerLookupOutcome> {
   const baselineText = await safeInnerText(scope);
+  // Hidden-input commit detection reads from the enclosing form, not the narrower trigger/field
+  // DOM-containment scope -- a widget's own committed-value hidden field is commonly a sibling
+  // of the visible widget markup rather than nested inside it, and a hidden input changing
+  // anywhere in the form is still a far stronger, far less noisy signal than any visible text
+  // change in the narrow scope (which is what caused the original false positive).
+  const baselineHiddenValues = await snapshotHiddenInputValues(form);
   await markBaselineCandidates(scope);
   // Page-wide baseline, independent of the scope-local one above -- lets the page-wide fallback
   // tier (see pollForStageResult) distinguish a genuinely new, portal-rendered result from an
@@ -890,15 +923,22 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
   const suggestionCount = await scope.locator(DEALER_RESULT_SELECTOR).count().catch(() => 0);
 
   if (!stage1.authoritative && !stage1.generic) {
-    // Nothing selectable ever appeared for the location/postcode stage. Fall back to a scoped
-    // text-change signal (auto-populate with no selectable result at all), else unresolved --
-    // the caller must never submit on either basis alone when unresolved.
+    // Nothing selectable ever appeared for the location/postcode stage. The only signal this
+    // engine treats as genuine proof of a committed dealer/location identifier here is a hidden
+    // input within scope transitioning from empty to non-empty -- never a generic visible
+    // text-length change in scope, which was confirmed in production to fire from unrelated
+    // causes (a validation message, a loading string) with no identifier ever actually
+    // committed, and was wrongly treated as sufficient to let a submit proceed and then get
+    // silently cancelled by the site's own JS. A text-only change, with no hidden-field commit,
+    // is reported as unresolved -- the caller must never submit on that basis alone.
     await page.waitForTimeout(600);
     const afterText = await safeInnerText(scope);
-    const changed = afterText.trim().length > 0 && afterText.trim() !== baselineText.trim() && afterText.trim().length > baselineText.trim().length;
+    const afterHiddenValues = await snapshotHiddenInputValues(form);
+    const hiddenFieldCommitDetected = hasHiddenInputCommit(baselineHiddenValues, afterHiddenValues);
+    const textChanged = afterText.trim().length > 0 && afterText.trim() !== baselineText.trim() && afterText.trim().length > baselineText.trim().length;
     const fieldValidationState = await readFieldValidationState(field);
 
-    if (changed) {
+    if (hiddenFieldCommitDetected) {
       return {
         dealerLookupTriggered: true,
         dealerLookupOutcome: "auto_populated",
@@ -908,7 +948,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
         dealerAutoPopulated: true,
         dealerSelected: false,
         dealerValueVerified: true,
-        dealerVerificationEvidence: "dealer_lookup_scope_text_changed_after_trigger_with_no_selectable_result",
+        dealerVerificationEvidence: "dealer_lookup_scope_hidden_identifier_committed_after_trigger",
         executionTrace: {
           eventsDispatched,
           waitCondition: DEALER_WAIT_CONDITION,
@@ -929,6 +969,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
           networkRequests: [],
           fieldAriaInvalidAtTimeout: fieldValidationState.ariaInvalid,
           fieldHasNativeValidationMessageAtTimeout: fieldValidationState.hasNativeValidationMessage,
+          hiddenFieldCommitDetected: true,
         },
       };
     }
@@ -943,7 +984,9 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
       dealerSelected: false,
       dealerValueVerified: false,
       dealerVerificationEvidence: "no_change_detected_in_dealer_lookup_scope",
-      dealerLookupFailureReason: "no_selectable_result_and_no_text_change_within_timeout",
+      dealerLookupFailureReason: textChanged
+        ? "visible_scope_text_changed_but_no_hidden_identifier_committed_within_timeout"
+        : "no_selectable_result_and_no_text_change_within_timeout",
       executionTrace: {
         eventsDispatched,
         waitCondition: DEALER_WAIT_CONDITION,
@@ -964,6 +1007,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
         networkRequests: [],
         fieldAriaInvalidAtTimeout: fieldValidationState.ariaInvalid,
         fieldHasNativeValidationMessageAtTimeout: fieldValidationState.hasNativeValidationMessage,
+        hiddenFieldCommitDetected: false,
       },
     };
   }
@@ -1069,6 +1113,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
         networkRequests: [],
         fieldAriaInvalidAtTimeout: false,
         fieldHasNativeValidationMessageAtTimeout: false,
+        hiddenFieldCommitDetected: null,
       },
     };
   }
@@ -1112,6 +1157,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
         networkRequests: [],
         fieldAriaInvalidAtTimeout: false,
         fieldHasNativeValidationMessageAtTimeout: false,
+        hiddenFieldCommitDetected: null,
       },
     };
   }
@@ -1147,6 +1193,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
         networkRequests: [],
         fieldAriaInvalidAtTimeout: false,
         fieldHasNativeValidationMessageAtTimeout: false,
+        hiddenFieldCommitDetected: null,
       },
     };
   }
@@ -1182,6 +1229,7 @@ async function resolveDealerLookupCore(page: Page, scope: Locator, trigger: Loca
       networkRequests: [],
       fieldAriaInvalidAtTimeout: false,
       fieldHasNativeValidationMessageAtTimeout: false,
+      hiddenFieldCommitDetected: null,
     },
   };
 }

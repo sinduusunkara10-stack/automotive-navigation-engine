@@ -713,6 +713,12 @@ export interface ActionResult {
       /** True when the field's native validationMessage was non-empty at the moment a stage
        * timed out with no result -- presence only, never the message text itself. */
       fieldHasNativeValidationMessageAtTimeout: boolean;
+      /** True only when a hidden input within the dealer-lookup scope itself was observed
+       * transitioning from an empty value to a non-empty one -- the only signal this engine
+       * treats as genuine proof of a committed identifier when no selectable ARIA/native-radio
+       * result ever appeared. Null when this check never ran (an authoritative result's own
+       * checked/aria-checked/aria-selected state already settled it). */
+      hiddenFieldCommitDetected: boolean | null;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -813,6 +819,52 @@ export interface ActionResult {
     preSubmitReadinessFailures: string[];
     /** False only when the pre-submit readiness gate failed and Submit was never clicked. */
     submitAttempted: boolean;
+    /** Generic tag/type and static button text of the control actually activated -- never a
+     * typed or submitted value. "not_applicable: ..." when submit was never clicked. */
+    submitControlIdentity: string;
+    /** How the submit control was activated. Only "click" exists today; the field is kept
+     * generic for a future activation method. Null when submit was never attempted. */
+    submitActivationMethod: "click" | null;
+    /** True when at least one xhr/fetch request was observed during the submit window. */
+    submissionRequestStarted: boolean;
+    /** Sanitised xhr/fetch request evidence observed during the submit window -- same shape and
+     * sanitisation as dealerLookupTrace.execution.networkRequests; never a request/response
+     * body, never a typed or submitted value. */
+    submissionNetworkRequests: {
+      method: string;
+      endpointPattern: string;
+      resourceType: string;
+      startedAtMs: number;
+      outcome: "completed" | "failed" | "pending";
+      status: number | null;
+      contentType: string | null;
+      appearsToContainRecords: boolean | null;
+      recordCount: number | null;
+    }[];
+    /** True when the submission was cancelled and no xhr/fetch request was ever observed during
+     * the submit window -- a stronger signal that the cancellation happened client-side, before
+     * any request was ever sent, rather than after a request came back. */
+    submissionCanceledBeforeRequest: boolean;
+    /** Alias of validationCauseObserved, exposed under the submission-focused name the generic
+     * state machine spec uses. */
+    validationSurfaceDetected: boolean;
+    /** Which kind of validation surface was observed, or null when none was (or submit
+     * succeeded). */
+    validationSurfaceType: "field_validation" | "visible_message" | "unresolved_dependent_control" | null;
+    /** The dealer lookup's own hidden-identifier-commit evidence (see
+     * dealerLookupTrace.execution.hiddenFieldCommitDetected), carried through to submission time
+     * for correlation. Null when no dealer_search decision ever ran on this form. */
+    dealerCommitEvidence: boolean | null;
+    /** Generic, deterministic classification of this submission's final outcome. */
+    submissionOutcome: "succeeded" | "validation_failed" | "cancelled_unknown_cause" | "cancelled_before_request";
+    /** Human-readable explanation of submissionOutcome. */
+    submissionOutcomeReason: string;
+    /** True when a further retry would have had a real corrective action available (an
+     * uncommitted dealer selection or at least one invalid field), independent of whether the
+     * bounded retry budget was already spent. */
+    retryEligible: boolean;
+    /** Human-readable explanation of retryEligible -- always the same text as retryDecision. */
+    retryReason: string;
   };
   /**
    * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets
@@ -1811,7 +1863,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.48.0";
+  schemaVersion: "1.49.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

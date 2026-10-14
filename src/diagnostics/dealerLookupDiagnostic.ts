@@ -95,6 +95,13 @@ export interface DealerLookupExecutionSummary {
   dealerIdentifierStateBefore: "not_applicable" | "absent" | "present";
   dealerIdentifierStateAfter: "not_applicable" | "absent" | "present";
   hiddenFieldChangeDetected: boolean;
+  /** True only when resolveDealerLookup actually observed a hidden input within its own scope
+   * transition from empty to non-empty -- see DealerLookupExecutionTrace.hiddenFieldCommitDetected.
+   * Null when that check never ran (a result was selected via its own ARIA/native-checked state
+   * instead, which is already authoritative on its own). Backs dealerIdentifierStateBefore/After
+   * and hiddenFieldChangeDetected above with a real signal, rather than those two merely echoing
+   * dealerValueVerified/dealerAutoPopulated under a different name. */
+  hiddenFieldCommitDetected: boolean | null;
   networkResponseEvidence: string;
   positiveCompletionEvidenceUsed: string;
   preSubmitReadinessResult: "passed" | "blocked" | "not_evaluated";
@@ -399,7 +406,8 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     dealerSelectionOutcome: dealerLookupOutcome?.dealerLookupOutcome ?? "not_applicable",
     dealerIdentifierStateBefore: dealerLookupOutcome === undefined ? "not_applicable" : "absent",
     dealerIdentifierStateAfter: dealerLookupOutcome === undefined ? "not_applicable" : dealerLookupOutcome.dealerValueVerified ? "present" : "absent",
-    hiddenFieldChangeDetected: dealerLookupOutcome?.dealerAutoPopulated ?? false,
+    hiddenFieldChangeDetected: trace?.hiddenFieldCommitDetected ?? false,
+    hiddenFieldCommitDetected: trace?.hiddenFieldCommitDetected ?? null,
     networkResponseEvidence: trace ? summarizeDealerLookupNetworkActivity(trace.networkRequests) : "the dealer-lookup flow never ran, so no network observation ran either",
     positiveCompletionEvidenceUsed: dealerLookupOutcome?.dealerVerificationEvidence || "none: the dealer-lookup flow never ran for this form",
     preSubmitReadinessResult: preSubmitReadinessPassed === null ? "not_evaluated" : preSubmitReadinessPassed ? "passed" : "blocked",
