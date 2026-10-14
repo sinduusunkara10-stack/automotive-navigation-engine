@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="dealer-postcode">Postcode or city</label>
+      <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+      <button type="button" id="dealer-find-btn">Find a dealer</button>
+      <div id="dealer-results" hidden></div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        fetch("/dealer-lookup-results.json")
+          .then((r) => r.json())
+          .then((records) => {
+            const results = document.getElementById("dealer-results");
+            results.hidden = false;
+            results.innerHTML = records
+              .map((r, i) => `<div role="radio" id="dealer-result-${i}" tabindex="0">${r.name}</div>`)
+              .join("");
+            results.querySelectorAll('[role="radio"]').forEach((el) => {
+              el.addEventListener("click", (e) => {
+                e.target.setAttribute("aria-checked", "true");
+                document.getElementById("dealer-committed").value = "dealer-1";
+              });
+            });
+          });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>
