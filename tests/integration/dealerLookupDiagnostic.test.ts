@@ -45,7 +45,7 @@ class FillFormOnceProvider implements ReasoningProvider {
 
 function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.47.0",
+    schemaVersion: "1.48.0",
     taskId: "dealer-lookup-trace-engine-level",
     objective: "Submit the lead-capture form.",
     allowedDomains: ["127.0.0.1"],
@@ -58,7 +58,7 @@ function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "start
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.49.0",
+    outputSchemaVersion: "1.50.0",
     ...overrides,
   };
 }
@@ -608,7 +608,7 @@ test("dealerLookupTrace: a result container already present in the DOM at lookup
   }
 });
 
-test("dealerLookupTrace: a widget that only reacts to a real keyup event (not input/change/blur alone) is still opened, via the new synthetic keydown/keyup dispatch", async () => {
+test("dealerLookupTrace: a widget that only reacts to a real keyup event (not input/change/blur alone) is still opened, via real keyboard typing", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -621,8 +621,9 @@ test("dealerLookupTrace: a widget that only reacts to a real keyup event (not in
     assert.equal(result.success, true);
     const trace = result.dealerLookupTrace;
     assert.ok(trace, "dealerLookupTrace must be present");
-    assert.equal(trace!.execution.eventsDispatched.includes("dispatch_keyboard_events"), true);
-    assert.equal(trace!.execution.autoDropdownDetected, true, "the suggestion list must already be visible by the time the auto-dropdown check runs, proving the keyup dispatch -- not the trigger click, which this fixture makes a no-op -- is what revealed it");
+    assert.equal(trace!.execution.eventsDispatched.includes("type_with_keyboard"), true);
+    assert.equal(trace!.execution.inputMethod, "keyboard");
+    assert.equal(trace!.execution.autoDropdownDetected, true, "the suggestion list must already be visible by the time the auto-dropdown check runs, proving real typing's own keyup -- not the trigger click, which this fixture makes a no-op -- is what revealed it");
     assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
   } finally {
     await page.close();

@@ -696,17 +696,7 @@ export interface ActionResult {
       wasPreExistingHiddenElement: boolean | null;
       /** Sanitised xhr/fetch request evidence observed during the lookup -- never a request or
        * response body, never a typed or returned value (postcode, address, dealer name, etc.). */
-      networkRequests: {
-        method: string;
-        endpointPattern: string;
-        resourceType: string;
-        startedAtMs: number;
-        outcome: "completed" | "failed" | "pending";
-        status: number | null;
-        contentType: string | null;
-        appearsToContainRecords: boolean | null;
-        recordCount: number | null;
-      }[];
+      networkRequests: SanitizedNetworkRequestEvidenceWire[];
       /** True when the postcode/location field carried aria-invalid="true" at the moment a
        * stage timed out with no result -- never the validation message text itself. */
       fieldAriaInvalidAtTimeout: boolean;
@@ -719,6 +709,36 @@ export interface ActionResult {
        * result ever appeared. Null when this check never ran (an authoritative result's own
        * checked/aria-checked/aria-selected state already settled it). */
       hiddenFieldCommitDetected: boolean | null;
+      /** Every bounded activation/selection step actually run, in order, with what followed it --
+       * booleans, counts and lengths only, never a value or page text. */
+      activationSteps: DealerActivationStepWire[];
+      inputMethod: "keyboard" | "fill_fallback" | "none";
+      fieldValueRetainedAfterInput: boolean | null;
+      triggerClassification: "vocabulary_matched" | "textless_unknown" | "geolocation_control" | "other_text" | "no_trigger";
+      triggerClickSkippedReason: string | null;
+      /** Lead-form submit events / submit-control clicks the implicit-submission guard cancelled. */
+      implicitSubmitBlockedCount: number;
+      lookupActivityStep: string | null;
+      networkRequestsOmittedCount: number;
+      trackingRequestCount: number;
+      hiddenFieldCommitPurposes: ("dealer_identifier" | "location_identifier" | "unclassified" | "unrelated")[];
+      resultFoundInFrame: boolean | null;
+      retryRecommendation: "none" | "await_pending_lookup";
+      lookupFailureClassification:
+        | "field_value_not_retained"
+        | "trigger_requested_geolocation_and_nothing_else_reacted"
+        | "lookup_request_failed"
+        | "lookup_request_returned_empty_results"
+        | "lookup_request_returned_records_but_no_result_rendered"
+        | "lookup_request_still_pending_at_timeout"
+        | "field_reported_invalid"
+        | "no_results_message_observed"
+        | "result_selected_but_commit_not_verified"
+        | "location_selected_but_no_dealer_result_or_commit"
+        | "dom_changed_without_selectable_result"
+        | "no_reaction_to_any_activation"
+        | null;
+      lookupFailureExplanation: string;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -830,21 +850,17 @@ export interface ActionResult {
     /** Sanitised xhr/fetch request evidence observed during the submit window -- same shape and
      * sanitisation as dealerLookupTrace.execution.networkRequests; never a request/response
      * body, never a typed or submitted value. */
-    submissionNetworkRequests: {
-      method: string;
-      endpointPattern: string;
-      resourceType: string;
-      startedAtMs: number;
-      outcome: "completed" | "failed" | "pending";
-      status: number | null;
-      contentType: string | null;
-      appearsToContainRecords: boolean | null;
-      recordCount: number | null;
-    }[];
+    submissionNetworkRequests: SanitizedNetworkRequestEvidenceWire[];
     /** True when the submission was cancelled and no xhr/fetch request was ever observed during
      * the submit window -- a stronger signal that the cancellation happened client-side, before
      * any request was ever sent, rather than after a request came back. */
     submissionCanceledBeforeRequest: boolean;
+    /** Whether the submit control was enabled when the click was due (after one bounded final
+     * blur/commit event if it started disabled). Null when submit was never attempted. */
+    submitControlEnabled: boolean | null;
+    /** Status-class reading of the non-tracking submission requests -- never their bodies.
+     * "not_found" (404/405) is kept apart from a genuine data rejection. */
+    submissionServerResponseCategory: "no_request" | "accepted" | "server_validation_rejected" | "blocked_or_rate_limited" | "server_error" | "not_found" | "failed_or_pending";
     /** Alias of validationCauseObserved, exposed under the submission-focused name the generic
      * state machine spec uses. */
     validationSurfaceDetected: boolean;
@@ -856,7 +872,15 @@ export interface ActionResult {
      * for correlation. Null when no dealer_search decision ever ran on this form. */
     dealerCommitEvidence: boolean | null;
     /** Generic, deterministic classification of this submission's final outcome. */
-    submissionOutcome: "succeeded" | "validation_failed" | "cancelled_unknown_cause" | "cancelled_before_request";
+    submissionOutcome:
+      | "succeeded"
+      | "validation_failed"
+      | "server_rejected"
+      | "blocked_or_rate_limited"
+      | "server_error"
+      | "unconfirmed"
+      | "cancelled_unknown_cause"
+      | "cancelled_before_request";
     /** Human-readable explanation of submissionOutcome. */
     submissionOutcomeReason: string;
     /** True when a further retry would have had a real corrective action available (an
@@ -1863,7 +1887,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.49.0";
+  schemaVersion: "1.50.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
@@ -1883,4 +1907,59 @@ export interface TaskResponse {
    * still present for troubleshooting/backwards compatibility.
    */
   analyticsReportingRows: AnalyticsReportingRow[];
+}
+
+/** Sanitised request evidence as it appears on the wire -- see src/actions/dealerLookupNetwork.ts.
+ * Never a request or response body, never a typed, submitted or returned value. */
+export interface SanitizedNetworkRequestEvidenceWire {
+  method: string;
+  endpointPattern: string;
+  resourceType: string;
+  startedAtMs: number;
+  outcome: "completed" | "failed" | "pending";
+  status: number | null;
+  contentType: string | null;
+  appearsToContainRecords: boolean | null;
+  recordCount: number | null;
+  durationMs: number | null;
+  xmlRootElement: string | null;
+  structureElementNames: string[];
+  resultCategory: "records" | "empty" | "error" | "not_applicable" | "unknown";
+  purpose:
+    | "email_validation"
+    | "form_configuration"
+    | "location_lookup"
+    | "dealer_lookup"
+    | "location_results"
+    | "dealer_results"
+    | "empty_results"
+    | "validation_error"
+    | "server_error"
+    | "unrelated_tracking"
+    | "unknown";
+  purposeEvidence: string;
+  activationStep: string;
+  followedByObservableChange: boolean | null;
+}
+
+/** One dealer-lookup activation/selection step -- see src/actions/dealerLookup.ts. */
+export interface DealerActivationStepWire {
+  step: string;
+  durationMs: number;
+  fieldValueRetained: boolean | null;
+  focusInField: boolean;
+  fieldAriaExpanded: boolean | null;
+  fieldActiveDescendantPresent: boolean;
+  scopeTextLengthDelta: number;
+  domMutationCount: number;
+  hiddenFieldCommitObserved: boolean;
+  alertOrStatusSurfaceChanged: boolean;
+  noResultsMessageObserved: boolean;
+  loadingIndicatorVisible: boolean;
+  resultCandidateObserved: boolean;
+  requestsStarted: number;
+  lookupLikeRequestsStarted: number;
+  implicitSubmitBlocked: boolean;
+  geolocationRequested: boolean;
+  lookupActivityObserved: boolean;
 }

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <div class="dealer-row">
+        <div class="dealer-icon"><button id="icon-btn" class="btn-geolocation" title="Use my location"><svg width="16" height="16"><circle cx="8" cy="8" r="6"></circle></svg></button></div>
+        <div class="dealer-input"><input type="text" id="dealer-field" name="dealerField" required /></div>
+      </div>
+      <div id="dealer-message"></div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // The live trace's exact shape, language-neutral: the only control next to the field is a
+      // textless, type-less <button> (so a submit button by default) that asks for the device
+      // position. The field itself never starts any lookup. Whatever the engine does, the lead form
+      // must never be submitted during the lookup, and the result must say why nothing resolved.
+      window.__formSubmitted = 0;
+      window.__iconClicks = 0;
+      document.getElementById("icon-btn").addEventListener("click", () => {
+        window.__iconClicks += 1;
+        navigator.geolocation.getCurrentPosition(
+          () => {},
+          () => {
+            document.getElementById("dealer-message").textContent = "Position unavailable";
+          },
+        );
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.__formSubmitted += 1;
+      });
+    </script>
+  </body>
+</html>
