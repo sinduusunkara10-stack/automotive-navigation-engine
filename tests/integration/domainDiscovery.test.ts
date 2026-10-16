@@ -29,7 +29,7 @@ async function validateAgainstResponseSchema(response: unknown): Promise<void> {
 
 function baseTask(startUrl: string, overrides: Partial<TaskRequest> = {}): TaskRequest {
   return {
-    schemaVersion: "1.47.0",
+    schemaVersion: "1.48.0",
     taskId: "domain-discovery-poc",
     objective: "Reach the fixture's success page by following the visible continue control.",
     startUrl,
@@ -49,7 +49,7 @@ function baseTask(startUrl: string, overrides: Partial<TaskRequest> = {}): TaskR
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.49.0",
+    outputSchemaVersion: "1.50.0",
     ...overrides,
   };
 }

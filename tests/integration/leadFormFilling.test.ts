@@ -580,7 +580,7 @@ test("fill_form: a role=\"radio\" dealer widget that commits via aria-checked (n
   }
 });
 
-test("fill_form: no dealer results found retries the lookup bounded, then never clicks submit at all (never submit with an unverified dealer dependency)", async () => {
+test("fill_form: no dealer results found is not blindly retried, and never clicks submit at all (never submit with an unverified dealer dependency)", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -603,8 +603,11 @@ test("fill_form: no dealer results found retries the lookup bounded, then never 
     assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
     assert.equal(result.formPostSubmitDiagnostics?.preSubmitReadinessPassed, false);
     assert.ok(result.formPostSubmitDiagnostics?.preSubmitReadinessFailures.includes("dealer_dependency_unresolved"));
-    assert.equal(result.formRetriesUsed, 2);
+    // A lookup that completed without any result has no deterministic correction: re-running the
+    // identical input sequence would reproduce the same evidence and reset the widget.
+    assert.equal(result.formRetriesUsed, 0);
     assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /dealer-lookup retries/);
+    assert.match(result.formPostSubmitDiagnostics?.retryDecision ?? "", /no deterministic correction available/);
   } finally {
     await page.close();
     await browser.close();
@@ -612,7 +615,7 @@ test("fill_form: no dealer results found retries the lookup bounded, then never 
   }
 });
 
-test("fill_form: a clicked dealer result the widget never visibly commits is retried bounded, then never clicks submit at all", async () => {
+test("fill_form: a clicked dealer result the widget never visibly commits is not blindly retried, and never clicks submit at all", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -632,7 +635,7 @@ test("fill_form: a clicked dealer result the widget never visibly commits is ret
     assert.equal(result.formDealerSearchDiagnostics?.dealerSelected, true);
     assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
     assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
-    assert.equal(result.formRetriesUsed, 2);
+    assert.equal(result.formRetriesUsed, 0, "re-clicking a result that never commits is not a deterministic correction");
   } finally {
     await page.close();
     await browser.close();

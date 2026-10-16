@@ -68,7 +68,15 @@ jobs:
       # local fixtures under tests/fixtures — no real website, no real Claude API call,
       # and REASONING_PROVIDER/ANTHROPIC_API_KEY are never set anywhere in this job.
       - name: Run automated tests (mock reasoning provider only)
-        run: npm test
+        shell: bash
+        run: npm test 2>&1 | tee test-output.txt
+
+      # The job-log API only returns the tail of a long log, which never includes a failing
+      # test's TAP block when it fails early -- repeat every failure at the very end.
+      - name: Repeat failing tests at the end of the log
+        if: failure()
+        shell: bash
+        run: grep -A60 "^not ok" test-output.txt || echo "no 'not ok' line found in test-output.txt"
 
       - name: Build Docker image (validation only, not pushed anywhere)
         run: docker build -t navigation-engine:ci .

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Dealer results</title>
+  </head>
+  <body>
+    <div id="results"></div>
+    <script>
+      window.renderResults = () => {
+        const results = document.getElementById("results");
+        results.innerHTML = '<div role="radio" tabindex="0" aria-checked="false">Riverside</div><div role="radio" tabindex="0" aria-checked="false">Hillside</div>';
+        results.querySelectorAll('[role="radio"]').forEach((radio) => {
+          radio.addEventListener("click", () => {
+            radio.setAttribute("aria-checked", "true");
+            window.parent.document.getElementById("dealer-committed").value = "dealer-1";
+          });
+        });
+      };
+    </script>
+  </body>
+</html>

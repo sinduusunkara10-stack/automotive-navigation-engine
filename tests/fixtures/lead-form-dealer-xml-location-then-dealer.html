@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zapytanie ofertowe</title>
+  </head>
+  <body>
+    <h1>Zapytanie ofertowe</h1>
+    <form id="lead-form">
+      <label for="first-name">Imię</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nazwisko</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">E-mail</label>
+      <input type="email" id="email" name="email" required />
+      <div class="where">
+        <span class="pin"><button type="button" id="where-icon" tabindex="-1"><svg width="12" height="12"><path d="M6 0l6 12H0z"></path></svg></button></span>
+        <span class="box"><input type="text" id="where-field" name="whereField" autocomplete="off" required /></span>
+      </div>
+      <div id="dealer-step"></div>
+      <input type="hidden" id="location-key" name="localityKey" />
+      <input type="hidden" id="dealer-key" name="outletKey" />
+      <div id="confirmation" style="display: none">Dziekujemy! Skontaktujemy sie.</div>
+      <button type="submit" id="submit-lead">Wyslij</button>
+    </form>
+    <script>
+      // Two-request workflow: real typing (debounced) requests location suggestions as XML and
+      // renders them as plain, role-less divs in a body-level portal; selecting one commits a
+      // hidden locality key and requests dealers as XML, rendered as native radios; choosing a
+      // dealer commits a hidden outlet key. The icon button does nothing.
+      window.__locationRequests = 0;
+      window.__dealerRequests = 0;
+      const field = document.getElementById("where-field");
+      let timer = null;
+      field.addEventListener("keydown", (event) => {
+        if (!event.key || event.key.length !== 1) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          window.__locationRequests += 1;
+          fetch(`/geo/autocomplete?term=${encodeURIComponent(field.value)}`)
+            .then((r) => r.text())
+            .then((text) => {
+              const xml = new DOMParser().parseFromString(text, "text/xml");
+              const localities = Array.from(xml.getElementsByTagName("locality"));
+              document.getElementById("where-portal")?.remove();
+              const rect = field.getBoundingClientRect();
+              const portal = document.createElement("div");
+              portal.id = "where-portal";
+              portal.style.position = "absolute";
+              portal.style.left = `${rect.left}px`;
+              portal.style.top = `${rect.bottom + window.scrollY + 2}px`;
+              portal.innerHTML = localities.map((l, i) => `<div class="loc" data-i="${i}" style="cursor:pointer">${l.getElementsByTagName("label")[0]?.textContent ?? ""}</div>`).join("");
+              document.body.appendChild(portal);
+              portal.querySelectorAll(".loc").forEach((item) => {
+                item.addEventListener("click", () => {
+                  const locality = localities[Number(item.dataset.i)];
+                  document.getElementById("location-key").value = locality.getElementsByTagName("key")[0]?.textContent ?? "";
+                  portal.remove();
+                  window.__dealerRequests += 1;
+                  fetch("/api/dealers/near")
+                    .then((r) => r.text())
+                    .then((dealerText) => {
+                      const dealerXml = new DOMParser().parseFromString(dealerText, "text/xml");
+                      const dealers = Array.from(dealerXml.getElementsByTagName("dealer"));
+                      const step = document.getElementById("dealer-step");
+                      step.innerHTML = dealers.map((d, i) => `<label><input type="radio" name="outlet" value="${i}" /> ${d.getElementsByTagName("name")[0]?.textContent ?? ""}</label>`).join("");
+                      step.querySelectorAll('input[type="radio"]').forEach((radio) => {
+                        radio.addEventListener("change", () => {
+                          document.getElementById("dealer-key").value = dealers[Number(radio.value)].getElementsByTagName("code")[0]?.textContent ?? "";
+                        });
+                      });
+                    });
+                });
+              });
+            });
+        }, 250);
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("dealer-key").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

@@ -483,6 +483,7 @@ async function applyDecision(
   plannedField: PlannedField,
   hasCountryCodeSelector: boolean,
   language: SupportedLanguage,
+  dealerLookupMode: "full" | "await_pending_lookup" = "full",
 ): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome }> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
   switch (plannedField.decision.kind) {
@@ -526,11 +527,13 @@ async function applyDecision(
       await field.check();
       return { key: plannedField.matchedField };
     case "dealer_search": {
-      await field.fill(plannedField.decision.postcode);
+      // resolveDealerLookup enters the value itself, with real keyboard input -- a prior fill()
+      // here would already have fired input/change without any keystroke, and on a retry would
+      // reset a lookup the widget may still be running.
       const triggerIndex = plannedField.decision.triggerIndex;
       const trigger = triggerIndex ? await triggerByIndex(form, triggerIndex) : null;
       const scope = await dealerScopeFor(form, plannedField.descriptor.id);
-      const outcome = await resolveDealerLookup(page, scope, trigger, field, form);
+      const outcome = await resolveDealerLookup(page, scope, trigger, field, form, { value: plannedField.decision.postcode, mode: dealerLookupMode });
       return { key: "dealerSearch", dealerLookup: outcome };
     }
     default:
@@ -669,12 +672,34 @@ async function detectCaptchaOnPage(page: Page): Promise<boolean> {
   return detectCaptcha({ iframeSrcs, elementAttributes, visibleText });
 }
 
-async function detectConfirmationText(page: Page): Promise<boolean> {
-  const text = await page
-    .evaluate(() => document.body.innerText)
-    .then((t) => t.toLowerCase())
-    .catch(() => "");
-  return SUCCESS_TEXT_MARKERS.some((marker) => text.includes(marker));
+/** Total occurrences of confirmation vocabulary in the rendered (visible) text of the page and its
+ * same-origin frames. Compared before and after submit, so only newly appeared confirmation counts. */
+async function countConfirmationMarkers(page: Page): Promise<number> {
+  let total = 0;
+  let pageOrigin = "";
+  try {
+    pageOrigin = new URL(page.url()).origin;
+  } catch {
+    pageOrigin = "";
+  }
+  const frames = page.frames().filter((frame) => {
+    if (frame === page.mainFrame()) return true;
+    try {
+      return new URL(frame.url()).origin === pageOrigin;
+    } catch {
+      return false;
+    }
+  });
+  for (const frame of frames) {
+    const text = await frame
+      .evaluate(() => document.body?.innerText ?? "")
+      .then((t) => t.toLowerCase())
+      .catch(() => "");
+    SUCCESS_TEXT_MARKERS.forEach((marker) => {
+      total += text.split(marker).length - 1;
+    });
+  }
+  return total;
 }
 
 async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: number, captureModules: CaptureModuleName[]): Promise<void> {
@@ -688,6 +713,32 @@ async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: 
     const entries = await captureDataLayer(page, stepIndex, { contextId: `fill_form:${stepIndex}` });
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), ...entries];
   }
+}
+
+type SubmissionOutcome =
+  | "succeeded"
+  | "validation_failed"
+  | "server_rejected"
+  | "blocked_or_rate_limited"
+  | "server_error"
+  | "unconfirmed"
+  | "cancelled_unknown_cause"
+  | "cancelled_before_request";
+
+type SubmissionServerResponseCategory = "no_request" | "accepted" | "server_validation_rejected" | "blocked_or_rate_limited" | "server_error" | "not_found" | "failed_or_pending";
+
+/** Status-class reading of the non-tracking requests a submit click started -- never their bodies.
+ * 404/405 mean the endpoint itself is missing, which says nothing about the submitted data, so they
+ * are kept apart from a genuine validation rejection. */
+function classifySubmissionResponses(requests: SanitizedNetworkRequestEvidence[]): SubmissionServerResponseCategory {
+  if (requests.length === 0) return "no_request";
+  const statuses = requests.map((r) => r.status).filter((st): st is number => st !== null);
+  if (statuses.some((st) => st >= 500)) return "server_error";
+  if (statuses.some((st) => st === 401 || st === 403 || st === 429)) return "blocked_or_rate_limited";
+  if (statuses.some((st) => st === 400 || st === 409 || st === 422)) return "server_validation_rejected";
+  if (statuses.some((st) => st === 404 || st === 405)) return "not_found";
+  if (statuses.some((st) => st >= 200 && st < 300)) return "accepted";
+  return "failed_or_pending";
 }
 
 function scorePlan(plan: PlannedField[]): number {
@@ -1142,15 +1193,26 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // dealer lookup itself is retried, bounded, BEFORE Submit is ever clicked. Only once it
   // verifies (or the bound is exhausted, in which case Submit is never clicked at all) does
   // control reach the readiness gate below.
+  // A retry runs only when resolveDealerLookup reported a deterministic correction -- today, only
+  // "a lookup request was observably still in flight", answered by re-polling without re-entering
+  // the value. Re-running the identical input sequence after a lookup that completed without a
+  // result would reproduce the same evidence while resetting the widget, so it is never done.
   while (
     dealerLookupOutcome !== undefined &&
     dealerLookupOutcome.dealerLookupTriggered &&
     !dealerLookupOutcome.dealerValueVerified &&
+    dealerLookupOutcome.executionTrace.retryRecommendation !== "none" &&
     retries < MAX_RETRIES
   ) {
     retries += 1;
-    await rerunDealerSearch();
+    await rerunDealerSearch(dealerLookupOutcome.executionTrace.retryRecommendation);
   }
+  const dealerRetryExplanation =
+    dealerLookupOutcome && !dealerLookupOutcome.dealerValueVerified
+      ? dealerLookupOutcome.executionTrace.retryRecommendation === "none"
+        ? `no deterministic correction available (${dealerLookupOutcome.executionTrace.lookupFailureClassification ?? "unclassified"})`
+        : "the lookup was still in flight after the bounded re-polls"
+      : "";
 
   // Generic pre-submit readiness gate (see the "Required implementation" spec this follows):
   // submit is allowed only when every required text/select field resolved, the dealer dependency
@@ -1211,7 +1273,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         unresolvedDependentControlIds: [],
         validationCauseObserved: true,
         retryDecision: dealerDependencyUnresolved
-          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified`
+          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified -- ${dealerRetryExplanation}`
           : multiplePostcodeFieldsUnresolved
             ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
             : "not retried: submit was never attempted, the pre-submit readiness gate failed",
@@ -1223,6 +1285,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         submissionRequestStarted: false,
         submissionNetworkRequests: [] as SanitizedNetworkRequestEvidence[],
         submissionCanceledBeforeRequest: true,
+        submitControlEnabled: null,
+        submissionServerResponseCategory: "no_request" as const,
         validationSurfaceDetected: false,
         validationSurfaceType: null as "field_validation" | "visible_message" | "unresolved_dependent_control" | null,
         dealerCommitEvidence: dealerLookupOutcome?.executionTrace.hiddenFieldCommitDetected ?? null,
@@ -1230,7 +1294,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         submissionOutcomeReason: "the pre-submit readiness gate failed, so submit was never clicked at all",
         retryEligible: false,
         retryReason: dealerDependencyUnresolved
-          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified`
+          ? `not retried further: submit was never attempted after ${retries}/${MAX_RETRIES} dealer-lookup retries, the dependency never verified -- ${dealerRetryExplanation}`
           : multiplePostcodeFieldsUnresolved
             ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
             : "not retried: submit was never attempted, the pre-submit readiness gate failed",
@@ -1259,13 +1323,21 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     .catch(() => "unknown");
   const submitActivationMethod = "click" as const;
 
-  async function rerunDealerSearch(): Promise<void> {
+  async function rerunDealerSearch(mode: "full" | "await_pending_lookup"): Promise<void> {
     const { fields: raw } = await tagAndReadFieldsWithDealerLookup(form);
     const descriptors = raw.map(toDescriptor);
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector });
-    const dealerField = plan.find((p) => p.decision.kind === "dealer_search");
+    // The field already holds the typed value by now, so a fresh plan classifies it "prefilled"
+    // and drops the dealer_search decision; without falling back to the original decision every
+    // retry silently did nothing.
+    const freshDescriptor = dealerFieldPlanned ? descriptors.find((d) => d.id === dealerFieldPlanned.descriptor.id) : undefined;
+    const dealerField =
+      plan.find((p) => p.decision.kind === "dealer_search") ??
+      (dealerFieldPlanned && freshDescriptor && dealerFieldPlanned.decision.kind === "dealer_search"
+        ? { ...dealerFieldPlanned, descriptor: freshDescriptor }
+        : undefined);
     if (!dealerField) return;
-    const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector, language);
+    const outcome = await applyDecision(page, form, dealerField, hasCountryCodeSelector, language, mode);
     if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
   }
 
@@ -1274,12 +1346,33 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     succeeded: boolean;
     afterUrl: string;
     networkRequests: SanitizedNetworkRequestEvidence[];
+    submitControlEnabled: boolean;
+    submitBlockedBeforeClick: boolean;
+    confirmationAppeared: boolean;
   }> {
+    // A control disabled until the last field's change/blur fires is a real pattern: give the
+    // page that one commit event, briefly and bounded, instead of letting click() wait out its
+    // ~30s actionability timeout and then throw with no diagnosable cause.
+    let submitControlEnabled = await submit.isEnabled().catch(() => false);
+    if (!submitControlEnabled) {
+      await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.()).catch(() => {});
+      const deadline = Date.now() + 1500;
+      while (!submitControlEnabled && Date.now() < deadline) {
+        await page.waitForTimeout(150);
+        submitControlEnabled = await submit.isEnabled().catch(() => false);
+      }
+    }
+    if (!submitControlEnabled) {
+      const postSubmit = await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false);
+      return { postSubmit, succeeded: false, afterUrl: page.url(), networkRequests: [], submitControlEnabled, submitBlockedBeforeClick: true, confirmationAppeared: false };
+    }
+    const confirmationBefore = await countConfirmationMarkers(page);
     // Started before the click, stopped after settling -- correlates purely by "happened during
     // this submit attempt's window", never by URL/brand, same convention as the dealer-lookup
     // capture this reuses. Never a request/response body, never a typed or submitted value.
     const capture = startDealerLookupNetworkCapture(page);
-    await submit.click();
+    capture.setStep("submit_click");
+    await submit.click({ timeout: 10_000 }).catch(() => {});
     await waitForAdaptiveSettle(page);
     const networkRequests = await capture.stop().catch(() => []);
     const afterUrl = page.url();
@@ -1299,9 +1392,11 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           validationCauseObserved: true,
         }
       : await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false);
-    const hasConfirmationText = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await detectConfirmationText(page));
-    const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || hasConfirmationText);
-    return { postSubmit, succeeded, afterUrl, networkRequests };
+    // Confirmation counts only when its marker text newly appeared (in a modal, toast, portal, or a
+    // previously hidden region) -- marker text already on the page before the click proves nothing.
+    const confirmationAppeared = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await countConfirmationMarkers(page)) > confirmationBefore;
+    const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || confirmationAppeared);
+    return { postSubmit, succeeded, afterUrl, networkRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared };
   }
 
   let attempt = await attemptSubmit();
@@ -1316,8 +1411,12 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // re-fill. With neither, a retry would just resubmit the exact same state, so it's refused
   // rather than burning the bounded retry budget pretending to fix something.
   while (!attempt.succeeded && retries < MAX_RETRIES) {
-    const dealerUncommitted = dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified;
-    const correctiveActionAvailable = dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0;
+    const dealerUncommitted =
+      dealerLookupOutcome !== undefined &&
+      dealerLookupOutcome.dealerLookupTriggered &&
+      !dealerLookupOutcome.dealerValueVerified &&
+      dealerLookupOutcome.executionTrace.retryRecommendation !== "none";
+    const correctiveActionAvailable = !attempt.submitBlockedBeforeClick && (dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0);
 
     if (!correctiveActionAvailable) {
       retryDecision = "not retried: the submit was cancelled but no invalid field or uncommitted dealer selection was found to correct";
@@ -1326,7 +1425,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
     retries += 1;
     if (dealerUncommitted) {
-      await rerunDealerSearch();
+      await rerunDealerSearch("await_pending_lookup");
       retryDecision = `retried ${retries}/${MAX_RETRIES}: re-ran the dealer lookup/select/verify flow after an uncommitted selection`;
     } else {
       await fillAllRequired(new Set(attempt.postSubmit.invalidFieldIds));
@@ -1341,7 +1440,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // response, which previously made "the dealer flow never activated" indistinguishable from
   // "it activated and every step came back false".
   const formDealerSearchDiagnostics = buildDealerSearchDiagnostics();
-  const submissionRequestStarted = attempt.networkRequests.length > 0;
+  // Tracking beacons fired by the click itself are never "the submission request".
+  const submissionRequests = attempt.networkRequests.filter((r) => r.purpose !== "unrelated_tracking");
+  const submissionRequestStarted = submissionRequests.length > 0;
+  const submissionServerResponseCategory = classifySubmissionResponses(submissionRequests);
   const submissionCanceledBeforeRequest = !attempt.succeeded && !submissionRequestStarted;
   // Carries the dealer lookup's own hidden-identifier-commit evidence through to submission
   // time, for correlation -- null when no dealer_search decision ever ran on this form.
@@ -1359,20 +1461,42 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           ? "unresolved_dependent_control"
           : null
     : null;
-  const submissionOutcome: "succeeded" | "validation_failed" | "cancelled_unknown_cause" | "cancelled_before_request" = attempt.succeeded
+  const submissionOutcome: SubmissionOutcome = attempt.succeeded
     ? "succeeded"
-    : attempt.postSubmit.validationCauseObserved
-      ? "validation_failed"
-      : submissionCanceledBeforeRequest
-        ? "cancelled_before_request"
-        : "cancelled_unknown_cause";
+    : attempt.submitBlockedBeforeClick
+      ? "cancelled_before_request"
+      : attempt.postSubmit.validationCauseObserved
+        ? "validation_failed"
+        : submissionServerResponseCategory === "server_validation_rejected"
+          ? "server_rejected"
+          : submissionServerResponseCategory === "blocked_or_rate_limited"
+            ? "blocked_or_rate_limited"
+            : submissionServerResponseCategory === "server_error"
+              ? "server_error"
+              : submissionCanceledBeforeRequest
+                ? "cancelled_before_request"
+                : submissionServerResponseCategory === "accepted"
+                  ? "unconfirmed"
+                  : "cancelled_unknown_cause";
   const submissionOutcomeReason = attempt.succeeded
-    ? "submit resulted in a URL change or on-screen confirmation text"
-    : attempt.postSubmit.validationCauseObserved
-      ? "a native/aria-invalid field, visible validation text, or an unresolved dependent control was observed after submit"
-      : submissionCanceledBeforeRequest
-        ? "submit was cancelled and no xhr/fetch request was ever observed during the submit window"
-        : "submit was cancelled but no diagnosable cause was observed, even though a network request was sent";
+    ? attempt.afterUrl !== beforeUrl
+      ? "submit resulted in a URL change"
+      : "confirmation text newly appeared on the page after submit"
+    : attempt.submitBlockedBeforeClick
+      ? "the submit control stayed disabled after a final blur/commit event, so it was never clicked"
+      : attempt.postSubmit.validationCauseObserved
+        ? "a native/aria-invalid field, visible validation text, or an unresolved dependent control was observed after submit"
+        : submissionOutcome === "server_rejected"
+          ? "the submission request was answered with a client-error status that rejects the submitted data (400/409/422)"
+          : submissionOutcome === "blocked_or_rate_limited"
+            ? "the submission request was answered with an authorisation, anti-bot or rate-limit status (401/403/429)"
+            : submissionOutcome === "server_error"
+              ? "the submission request was answered with a server error (5xx)"
+              : submissionCanceledBeforeRequest
+                ? "submit was cancelled and no non-tracking request was ever observed during the submit window"
+                : submissionOutcome === "unconfirmed"
+                  ? "a submission request was accepted (2xx) but no URL change, new confirmation text, or validation surface followed -- the outcome cannot be confirmed either way"
+                  : "submit was cancelled but no diagnosable cause was observed, even though a network request was sent";
   const formPostSubmitDiagnostics = {
     submitCanceled: !attempt.succeeded,
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
@@ -1391,6 +1515,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     submissionRequestStarted,
     submissionNetworkRequests: attempt.networkRequests,
     submissionCanceledBeforeRequest,
+    submitControlEnabled: attempt.submitControlEnabled,
+    submissionServerResponseCategory,
     validationSurfaceDetected: attempt.postSubmit.validationCauseObserved,
     validationSurfaceType,
     dealerCommitEvidence,

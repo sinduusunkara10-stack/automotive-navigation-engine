@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>Solicitar presupuesto</title>
+  </head>
+  <body>
+    <h1>Solicitar presupuesto</h1>
+    <form id="lead-form">
+      <label for="nombre">Nombre</label>
+      <input type="text" id="nombre" name="nombre" required />
+      <label for="apellido">Apellido</label>
+      <input type="text" id="apellido" name="apellido" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <label for="buscar">Buscar concesionario</label>
+      <input type="text" id="buscar" name="buscar" role="combobox" aria-controls="sugerencias" aria-expanded="false" required />
+      <input type="hidden" id="concesionario-id" name="concesionarioId" />
+      <div id="confirmation" style="display: none">Gracias! Nos pondremos en contacto.</div>
+      <button type="submit" id="submit-lead">Enviar</button>
+    </form>
+    <ul id="sugerencias" role="listbox" hidden style="position: absolute; top: 260px; left: 8px">
+      <li role="option" id="op-1">Madrid Centro</li>
+      <li role="option" id="op-2">Madrid Norte</li>
+    </ul>
+    <script>
+      // The listbox is pre-rendered, hidden, and outside the form (no common ancestor with the
+      // field below <body>) -- it is only reachable through the field's own aria-controls. It
+      // becomes visible after typing, without any element ever being inserted.
+      const field = document.getElementById("buscar");
+      const list = document.getElementById("sugerencias");
+      field.addEventListener("input", () => {
+        setTimeout(() => {
+          list.hidden = false;
+          field.setAttribute("aria-expanded", "true");
+        }, 200);
+      });
+      list.querySelectorAll('[role="option"]').forEach((option) => {
+        option.addEventListener("click", () => {
+          option.setAttribute("aria-selected", "true");
+          document.getElementById("concesionario-id").value = "es-1";
+          list.hidden = true;
+          field.setAttribute("aria-expanded", "false");
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("concesionario-id").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

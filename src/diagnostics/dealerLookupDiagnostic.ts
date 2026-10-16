@@ -1,5 +1,15 @@
 import type { Locator, Page } from "playwright";
-import { FIELD_INDEX_ATTR, TRIGGER_INDEX_ATTR, type DealerLookupOutcome, type RawLookupTriggerCandidate, type TriggerFieldPairDebug } from "../actions/dealerLookup.js";
+import {
+  FIELD_INDEX_ATTR,
+  TRIGGER_INDEX_ATTR,
+  type DealerActivationStepRecord,
+  type DealerLookupExecutionTrace,
+  type DealerLookupFailureClassification,
+  type DealerLookupOutcome,
+  type DealerTriggerClassification,
+  type RawLookupTriggerCandidate,
+  type TriggerFieldPairDebug,
+} from "../actions/dealerLookup.js";
 import { summarizeDealerLookupNetworkActivity, type SanitizedNetworkRequestEvidence } from "../actions/dealerLookupNetwork.js";
 import type { PlannedField } from "../forms/fillPlan.js";
 import { isFormDiscoveryDiagnosticEnabled } from "./formDiscoveryDiagnostic.js";
@@ -117,6 +127,20 @@ export interface DealerLookupExecutionSummary {
   networkRequests: SanitizedNetworkRequestEvidence[];
   fieldAriaInvalidAtTimeout: boolean;
   fieldHasNativeValidationMessageAtTimeout: boolean;
+  activationSteps: DealerActivationStepRecord[];
+  inputMethod: DealerLookupExecutionTrace["inputMethod"];
+  fieldValueRetainedAfterInput: boolean | null;
+  triggerClassification: DealerTriggerClassification;
+  triggerClickSkippedReason: string | null;
+  implicitSubmitBlockedCount: number;
+  lookupActivityStep: string | null;
+  networkRequestsOmittedCount: number;
+  trackingRequestCount: number;
+  hiddenFieldCommitPurposes: DealerLookupExecutionTrace["hiddenFieldCommitPurposes"];
+  resultFoundInFrame: boolean | null;
+  retryRecommendation: DealerLookupExecutionTrace["retryRecommendation"];
+  lookupFailureClassification: DealerLookupFailureClassification | null;
+  lookupFailureExplanation: string;
 }
 
 export interface DealerLookupTrace {
@@ -346,6 +370,12 @@ function computeCompleteness(params: {
 
   if (preSubmitReadinessPassed === null) missingEvidence.push("the pre-submit readiness gate had not run yet at this capture point");
 
+  const trace = dealerLookupOutcome?.executionTrace;
+  if (trace && !dealerLookupOutcome.dealerValueVerified) {
+    if (trace.activationSteps.length === 0) missingEvidence.push("the lookup is unresolved but no per-step activation evidence was recorded");
+    if (trace.lookupFailureClassification === null) missingEvidence.push("the lookup is unresolved but no failure classification was derived");
+  }
+
   const acceptedCandidateCount = pairDebug.filter((p) => p.accepted).length;
   const rejectedCandidateCount = pairDebug.filter((p) => !p.accepted).length;
 
@@ -423,6 +453,20 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     fieldAriaInvalidAtTimeout: trace?.fieldAriaInvalidAtTimeout ?? false,
     fieldHasNativeValidationMessageAtTimeout: trace?.fieldHasNativeValidationMessageAtTimeout ?? false,
     stageWaitExtended: trace?.stageWaitExtended ?? false,
+    activationSteps: trace?.activationSteps ?? [],
+    inputMethod: trace?.inputMethod ?? "none",
+    fieldValueRetainedAfterInput: trace?.fieldValueRetainedAfterInput ?? null,
+    triggerClassification: trace?.triggerClassification ?? "no_trigger",
+    triggerClickSkippedReason: trace?.triggerClickSkippedReason ?? null,
+    implicitSubmitBlockedCount: trace?.implicitSubmitBlockedCount ?? 0,
+    lookupActivityStep: trace?.lookupActivityStep ?? null,
+    networkRequestsOmittedCount: trace?.networkRequestsOmittedCount ?? 0,
+    trackingRequestCount: trace?.trackingRequestCount ?? 0,
+    hiddenFieldCommitPurposes: trace?.hiddenFieldCommitPurposes ?? [],
+    resultFoundInFrame: trace?.resultFoundInFrame ?? null,
+    retryRecommendation: trace?.retryRecommendation ?? "none",
+    lookupFailureClassification: trace?.lookupFailureClassification ?? null,
+    lookupFailureExplanation: trace?.lookupFailureExplanation ?? "",
   };
 
   const completenessBeforeTruncation = computeCompleteness({

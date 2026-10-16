@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8" />
+    <title>Offerte aanvragen</title>
+  </head>
+  <body>
+    <h1>Offerte aanvragen</h1>
+    <form id="lead-form">
+      <label for="voornaam">Voornaam</label>
+      <input type="text" id="voornaam" name="voornaam" required />
+      <label for="achternaam">Achternaam</label>
+      <input type="text" id="achternaam" name="achternaam" required />
+      <label for="email">E-mail</label>
+      <input type="email" id="email" name="email" required />
+      <div id="dealer-widget">
+        <label for="dealer-zoeken">Dealer zoeken</label>
+        <input type="text" id="dealer-zoeken" name="dealerZoeken" required />
+        <ul id="dealer-lijst" role="listbox"></ul>
+      </div>
+      <input type="hidden" id="dealer-id" name="dealerId" />
+      <div id="confirmation" style="display: none">Bedankt! We nemen contact op.</div>
+      <button type="submit" id="submit-lead">Versturen</button>
+    </form>
+    <script>
+      // Only Enter starts the search, and the widget does NOT cancel Enter's default action -- so
+      // a real Enter in this field also triggers the browser's implicit submission of the whole
+      // lead form (a synthetic click on its submit button). The engine's guard must swallow that,
+      // or the lead would be submitted before any dealer was chosen.
+      window.__submitClicks = 0;
+      window.__formSubmitted = 0;
+      window.__prematureSubmits = 0;
+      document.getElementById("dealer-zoeken").addEventListener("keydown", (event) => {
+        if (event.key !== "Enter") return;
+        const list = document.getElementById("dealer-lijst");
+        if (list.children.length > 0) return;
+        list.innerHTML = '<li role="option" id="dealer-optie-1" tabindex="0">Dealer Centrum</li><li role="option" id="dealer-optie-2" tabindex="0">Dealer Noord</li>';
+        list.querySelectorAll('[role="option"]').forEach((option) => {
+          option.addEventListener("click", () => {
+            option.setAttribute("aria-selected", "true");
+            document.getElementById("dealer-id").value = "nl-1";
+          });
+        });
+      });
+      document.getElementById("submit-lead").addEventListener("click", () => {
+        window.__submitClicks += 1;
+        if (!document.getElementById("dealer-id").value) window.__prematureSubmits += 1;
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.__formSubmitted += 1;
+        if (!document.getElementById("dealer-id").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

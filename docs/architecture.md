@@ -3953,3 +3953,36 @@ selected form had a field mapped to the `dealerSearch` purpose. New
 a submit control was found and clicked. `schemaVersion`/`outputSchemaVersion` moved `1.36.0` ->
 `1.37.0`. All changes are additive except the `dealer_search` behaviour and the post-submit
 re-tag themselves. No existing field removed, renamed, or had its meaning changed.
+
+### Lead-form filling: dealer postcode workflow overhaul (schemaVersion 1.47.0 -> 1.48.0, outputSchemaVersion 1.49.0 -> 1.50.0)
+
+The full failure-mode review, with the confirmed root cause, the implemented sequence, and every
+predicted failure mode with its protection, tests and residual risk, is in
+[`docs/dealer-postcode-failure-mode-review.md`](dealer-postcode-failure-mode-review.md).
+
+Structure:
+
+- `src/actions/dealerLookup.ts`: trigger association plus the dealer-lookup state machine:
+  - real keyboard input;
+  - the activation ladder;
+  - tiered result discovery;
+  - commit verification by element state or keyed hidden-identifier commit only;
+  - failure classification and `retryRecommendation`.
+- `src/actions/dealerLookupNetwork.ts`: sanitised request capture and classification:
+  - purpose and result category;
+  - XML root, element names and record count;
+  - activation-step correlation.
+
+  It keeps no request or response body.
+- `src/actions/dealerLookupProbe.ts` (new): one in-page probe, evaluated as a string source.
+  It provides:
+  - a mutation observer;
+  - an implicit lead-form submission guard, active only during the lookup;
+  - a geolocation request counter;
+  - keyed hidden-input state with purpose classes;
+  - field-anchored discovery of portal, ARIA-linked and hidden-then-visible results.
+- `src/actions/fillForm.ts`:
+  - dealer retries run only on `await_pending_lookup` and never re-type the value;
+  - a disabled submit gets a final blur and is never clicked;
+  - success requires a URL change or a newly appeared confirmation;
+  - submission outcomes now also classify the server response.

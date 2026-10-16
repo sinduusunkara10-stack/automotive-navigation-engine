@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <div class="locator">
+        
+        <input type="text" id="locator-field" name="locatorField" required />
+        <button type="button" id="locator-go"><svg width="16" height="16"><path d="M2 2h12v12H2z"></path></svg></button>
+      </div>
+      <div id="locator-results"></div>
+      <input type="hidden" id="locator-committed" name="locatorSelection" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Language-neutral widget: an unlabelled field and a textless icon button sit together in one
+      // wrapper, while the visually nearer field in this CSS-less layout is "First name" -- the
+      // association must follow DOM structure. The button runs an XML lookup, and only renders
+      // native radios from the XML's own records. The first keystroke fires a burst of
+      // unrelated tracking beacons plus a configuration request -- the real lookup request must
+      // never be pushed out of the evidence by them. The test routes /api/dealers/search to the
+      // body/status/delay each scenario needs, and counts how many lookups were actually sent.
+      window.__lookupRequests = 0;
+      window.__fieldClears = 0;
+      let warmed = false;
+      const field = document.getElementById("locator-field");
+      field.addEventListener("input", () => {
+        if (warmed || field.value === "") return;
+        warmed = true;
+        for (let i = 0; i < 8; i += 1) new Image().src = `/pixel/collect.gif?n=${i}`;
+        fetch("/api/form/config").catch(() => {});
+      });
+      field.addEventListener("input", () => {
+        if (field.value === "") window.__fieldClears += 1;
+      });
+      document.getElementById("locator-go").addEventListener("click", () => {
+        window.__lookupRequests += 1;
+        const results = document.getElementById("locator-results");
+        results.innerHTML = '<span role="status">Searching</span>';
+        fetch(`/api/dealers/search?q=${encodeURIComponent(field.value)}`)
+          .then((response) => response.text())
+          .then((text) => {
+            const xml = new DOMParser().parseFromString(text, "text/xml");
+            const records = Array.from(xml.getElementsByTagName("dealer"));
+            if (records.length === 0) {
+              results.innerHTML = '<p role="status">No dealer found</p>';
+              return;
+            }
+            results.innerHTML = records
+              .map((record, i) => `<label><input type="radio" name="locatorChoice" value="${i}" /> ${record.getElementsByTagName("name")[0]?.textContent ?? ""}</label>`)
+              .join("");
+            results.querySelectorAll('input[type="radio"]').forEach((radio) => {
+              radio.addEventListener("change", () => {
+                const record = records[Number(radio.value)];
+                document.getElementById("locator-committed").value = record.getElementsByTagName("id")[0]?.textContent ?? "";
+              });
+            });
+          })
+          .catch(() => {
+            results.innerHTML = '<p role="status">Service unavailable</p>';
+          });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("locator-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

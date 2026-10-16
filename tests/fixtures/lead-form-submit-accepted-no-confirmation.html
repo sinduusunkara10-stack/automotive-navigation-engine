@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <header><p>Thank you for visiting -- confirmation of your booking is sent by email.</p></header>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Confirmation vocabulary is already on the page before submit, and the submission request
+      // is accepted (the test routes it to 200) -- but nothing on the page ever confirms it.
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        fetch("/lead/submit", { method: "POST", body: "{}" }).catch(() => {});
+      });
+    </script>
+  </body>
+</html>

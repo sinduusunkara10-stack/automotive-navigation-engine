@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <title>Angebot anfordern</title>
+  </head>
+  <body>
+    <h1>Angebot anfordern</h1>
+    <form id="lead-form">
+      <label for="vorname">Vorname</label>
+      <input type="text" id="vorname" name="vorname" required />
+      <label for="nachname">Nachname</label>
+      <input type="text" id="nachname" name="nachname" required />
+      <label for="email">E-Mail</label>
+      <input type="email" id="email" name="email" required />
+      <div class="dealer-row">
+        <div class="dealer-icon"><button id="locate-btn"></button></div>
+        <div class="dealer-input"><input type="text" id="dealer-plz" name="dealerPlz" required /></div>
+      </div>
+      <div id="dealer-card"></div>
+      <input type="hidden" id="haendler-id" name="haendlerId" />
+      <div id="confirmation" style="display: none">Danke! Wir melden uns.</div>
+      <button type="submit" id="submit-lead">Absenden</button>
+    </form>
+    <script>
+      // Shape of the live failure, in a non-French market: a textless, type-less <button> next to
+      // the field (a "locate me" control -- it asks for the device position, never searches the
+      // typed value), and an autocomplete that only reacts to real character keystrokes
+      // (event.key), debounced, and cancels its pending search on blur. Synthetic keydown events
+      // carry no key, and fill()+blur() cancels the debounce, so only real typing that keeps focus
+      // can open the suggestions. The suggestions render as plain divs in a body-level portal.
+      window.__geoClicks = 0;
+      window.__formSubmitted = 0;
+      const field = document.getElementById("dealer-plz");
+      let timer = null;
+      field.addEventListener("keydown", (event) => {
+        if (!event.key || event.key.length !== 1) return;
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (document.getElementById("plz-portal")) return;
+          const rect = field.getBoundingClientRect();
+          const portal = document.createElement("div");
+          portal.id = "plz-portal";
+          portal.style.position = "absolute";
+          portal.style.left = `${rect.left}px`;
+          portal.style.top = `${rect.bottom + window.scrollY + 4}px`;
+          portal.innerHTML = '<div class="row" style="cursor:pointer">Berlin Mitte</div><div class="row" style="cursor:pointer">Berlin Wedding</div>';
+          document.body.appendChild(portal);
+          portal.querySelectorAll(".row").forEach((row) => {
+            row.addEventListener("click", () => {
+              field.value = row.textContent;
+              portal.remove();
+              setTimeout(() => {
+                document.getElementById("haendler-id").value = "h-1";
+                document.getElementById("dealer-card").textContent = "Autohaus Beispiel";
+              }, 400);
+            });
+          });
+        }, 300);
+      });
+      field.addEventListener("blur", () => clearTimeout(timer));
+      document.getElementById("locate-btn").addEventListener("click", () => {
+        window.__geoClicks += 1;
+        document.getElementById("dealer-card").textContent = "Standort nicht verfügbar";
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.__formSubmitted += 1;
+        if (!document.getElementById("haendler-id").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

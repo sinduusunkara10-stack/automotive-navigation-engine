@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <div id="dealer-widget">
+        <label for="dealer-postcode">Postcode or city</label>
+        <input type="text" id="dealer-postcode" name="dealerPostcode" required />
+        <button type="button" id="dealer-find-btn">Find a dealer</button>
+        <ul id="dealer-list"></ul>
+        <p id="selected-dealer"></p>
+      </div>
+      <input type="hidden" id="dealer-committed" name="dealerId" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Clicking a result only rewrites visible text (the field value and a "selected" line) --
+      // no selected/checked state, no hidden identifier. A visible text change is never a commit.
+      window.__formSubmitted = 0;
+      document.getElementById("dealer-find-btn").addEventListener("click", () => {
+        const list = document.getElementById("dealer-list");
+        list.innerHTML = "<li>Dealer One</li><li>Dealer Two</li>";
+        list.querySelectorAll("li").forEach((item) => {
+          item.addEventListener("click", () => {
+            document.getElementById("dealer-postcode").value = item.textContent;
+            document.getElementById("selected-dealer").textContent = `Selected: ${item.textContent}`;
+          });
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        window.__formSubmitted += 1;
+      });
+    </script>
+  </body>
+</html>

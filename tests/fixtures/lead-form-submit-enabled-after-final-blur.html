@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead" disabled>Submit</button>
+    </form>
+    <script>
+      // The submit control is enabled only by a field's own blur once every required field holds
+      // a value -- the last field filled still has focus, so nothing has committed it yet.
+      const form = document.getElementById("lead-form");
+      form.addEventListener("focusout", () => {
+        const allFilled = Array.from(form.querySelectorAll("input[required]")).every((input) => input.value.trim().length > 0);
+        if (allFilled) document.getElementById("submit-lead").disabled = false;
+      });
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>
