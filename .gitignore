@@ -151,3 +151,4 @@ diagnostics/form-discovery/
 
 # Claude Code agent worktree scratch state (isolated background-agent checkouts)
 .claude/
+test-output.txt
