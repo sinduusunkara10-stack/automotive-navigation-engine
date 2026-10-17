@@ -690,6 +690,7 @@ function buildTerminalResponse(params: {
       dataLayerEvidence: captures.data_layer_evidence,
       startWindowGa4EndIndex,
       startWindowDataLayerEndIndex,
+      steps,
     }),
     diagnostics: {
       stepCount: state.stepCount,

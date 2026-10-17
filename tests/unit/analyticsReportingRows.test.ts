@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 import { classifyActionAnalyticsCapture, computeCaptureHealth } from "../../src/capture-modules/analyticsCaptureClassification.js";
 import { buildAnalyticsReportingRows, type AnalyticsReportingRow } from "../../src/capture-modules/analyticsReportingRows.js";
@@ -1189,5 +1192,54 @@ test("TEST24 [fixture label: live DS-shaped regression]: a dataLayer push and it
   assert.deepEqual(
     eventRows.map((row) => row.evidenceSource).sort(),
     ["main_frame", "main_frame"],
+  );
+});
+
+// TEST25 [regression, real-run data]: the exact captures/steps shape from a live DS production
+// run (consent click -> navigate dsn7 -> navigate dsn8 -> stop_success, no capture action, no
+// cta_clicks) that PR #93's first push shipped without actually wiring `steps` into the engine's
+// own call site -- buildAnalyticsReportingRows defaulted `steps` to `[]`, so the navigate-derived
+// PAGE_VISIT path never ran at all and every dsn7/dsn8 analytics event fell back to the start
+// window, UNRESOLVED. This loads the real response's own data, not a hand-built fixture.
+test("buildAnalyticsReportingRows: real DS navigate-only production run produces PAGE_VISIT rows for dsn7/dsn8 and correlates their page_view evidence", () => {
+  const fixturePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "live-ds-navigate-only-run.json");
+  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+    taskId: string;
+    startUrl: string;
+    steps: StepLog[];
+    pageVisits: PageVisitCapture[] | null;
+    ctaClicks: CtaClickCapture[] | null;
+    ga4NetworkEvents: Ga4NetworkEventCapture[];
+    dataLayerEvidence: DataLayerCapture[];
+  };
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: fixture.taskId,
+    startUrl: fixture.startUrl,
+    schemaVersion: "1.52.0",
+    pageVisits: fixture.pageVisits ?? [],
+    ctaClicks: fixture.ctaClicks ?? [],
+    steps: fixture.steps,
+    startPageUrl: fixture.startUrl,
+    ga4NetworkEvents: fixture.ga4NetworkEvents,
+    dataLayerEvidence: fixture.dataLayerEvidence,
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 2, "one PAGE_VISIT marker for dsn7, one for dsn8, derived from the navigate steps alone");
+  assert.deepEqual(
+    pageVisitRows.map((row) => row.sourcePageUrl).sort(),
+    ["https://www.dsautomobiles.fr/modeles-ds/dsn7.html", "https://www.dsautomobiles.fr/modeles-ds/dsn8.html"],
+  );
+
+  const dsn7Rows = rows.filter((row) => row.analyticsPageLocation === "https://www.dsautomobiles.fr/modeles-ds/dsn7.html");
+  assert.ok(dsn7Rows.length > 0, "dsn7's own analytics evidence is reported under its own page marker, not dropped");
+  assert.ok(
+    dsn7Rows.some((row) => row.eventName === "page_view" && row.correlationStatus !== "UNRESOLVED"),
+    "dsn7's page_view is correlated to its own page visit instead of landing UNRESOLVED in the start window",
+  );
+  assert.ok(
+    !dsn7Rows.some((row) => row.eventName === "page_view" && row.eventRole === "RAW_CAPTURE_IN_ACTION_WINDOW"),
+    "dsn7's page_view is page-load evidence (ASSOCIATED_RESULT), never a raw unclassified capture",
   );
 });
