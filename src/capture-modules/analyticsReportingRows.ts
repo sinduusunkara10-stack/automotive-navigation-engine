@@ -37,14 +37,15 @@ import {
  * BUNDLES" below) and producing a stable, canonical eventId per distinct event.
  */
 
-export type ReportingRecordType = "START_PAGE" | "CTA_CLICK" | "ANALYTICS_EVENT";
+export type ReportingRecordType = "START_PAGE" | "CTA_CLICK" | "ANALYTICS_EVENT" | "PAGE_VISIT";
 
 export type ReportingEventRole =
   | "START_PAGE"
   | "PRIMARY_CLICK"
   | "CLICK_CANDIDATE"
   | "ASSOCIATED_RESULT"
-  | "RAW_CAPTURE_IN_ACTION_WINDOW";
+  | "RAW_CAPTURE_IN_ACTION_WINDOW"
+  | "PAGE_VISIT";
 
 export type ReportingCorrelationStatus = "NOT_APPLICABLE" | "CONFIRMED" | "UNRESOLVED" | "WEBSITE_NO_OBSERVED_TAG";
 
@@ -66,7 +67,8 @@ export type ReportingCorrelationSource =
   | "engine_capture_gate"
   | "engine_no_observed_click_tag"
   | "engine_confirmed_associated_event"
-  | "engine_action_window_raw_capture";
+  | "engine_action_window_raw_capture"
+  | "engine_page_visit_marker";
 
 export interface AnalyticsReportingRow {
   runId: string;
@@ -331,6 +333,32 @@ function combineFields(
   };
 }
 
+interface FlattenedGa4Entry {
+  /** The body this flattened entry's eventName/fields come from, when it was split out of a multi-event request -- undefined for the ordinary single-event path. */
+  body?: Record<string, string>;
+  bodyIndex?: number;
+  bodyCount?: number;
+}
+
+/**
+ * GA4 BATCHED HITS: a sendBeacon/POST request can carry several independent event hits in one
+ * body (postDataParams[], one entry per newline-delimited hit -- see Ga4NetworkEventCapture's own
+ * doc comment). When the request has its own top-level event name (params.en) there is exactly
+ * one logical event and the existing single-entry path (readGa4EvidenceFields's own en fallback)
+ * already resolves it correctly. Otherwise, when more than one body is present, each body is its
+ * own distinct event (its own "en") and must become its own row -- collapsing them into one row
+ * using only the first body's "en" (the old behaviour) silently dropped every other event in the
+ * batch. A single-body request still takes the single-entry path unchanged: readGa4EvidenceFields
+ * already finds that one body's "en" with no splitting needed.
+ */
+function flattenGa4EventCapture(event: Ga4NetworkEventCapture): FlattenedGa4Entry[] {
+  const bodies = event.postDataParams ?? [];
+  if (event.params?.en || bodies.length <= 1) {
+    return [{}];
+  }
+  return bodies.map((body, bodyIndex) => ({ body, bodyIndex, bodyCount: bodies.length }));
+}
+
 function mergedGa4Params(event: Ga4NetworkEventCapture): Record<string, unknown> {
   const merged: Record<string, unknown> = {};
   for (const body of [event.params ?? {}, ...(event.postDataParams ?? [])]) {
@@ -414,55 +442,64 @@ function buildEvidenceEntries(params: {
   const entries: EvidenceEntry[] = [];
 
   for (const event of ga4Events) {
-    const classFields = readGa4EvidenceFields(event, ctaText, ctaAccessibleName);
-    const merged = mergedGa4Params(event);
-    const supplementary = readSupplementaryFields(merged);
-    supplementary.measurementId ??= event.measurementId;
-    const fields = combineFields(classFields, undefined, supplementary);
-    const classification = classifyEvidenceItem({
-      location: classFields.location,
-      eventDestinationUrl: classFields.eventDestinationUrl,
-      ctaIdentifierPresent: classFields.ctaIdentifierPresent,
-      ctaLabelMatch: classFields.ctaLabelMatch,
-      isInteractionEvent: classFields.isInteractionEvent,
-      eventName: classFields.eventName,
-      virtualMetadata: classFields.virtualMetadata,
-      targets,
-    });
-    entries.push({
-      eventId: computeEventId({
-        kind: "ga4",
-        actionId,
+    for (const flat of flattenGa4EventCapture(event)) {
+      // A synthetic single-body event so readGa4EvidenceFields's own "en" fallback resolves
+      // exactly this one batched hit's event name -- same reuse pattern flattenDataLayerCapture
+      // below uses for a bundled dataLayer push, never a second alias list.
+      const effectiveEvent: Ga4NetworkEventCapture = flat.body ? { ...event, postDataParams: [flat.body] } : event;
+      const classFields = readGa4EvidenceFields(effectiveEvent, ctaText, ctaAccessibleName);
+      const merged = mergedGa4Params(effectiveEvent);
+      const supplementary = readSupplementaryFields(merged);
+      supplementary.measurementId ??= event.measurementId;
+      const fields = combineFields(classFields, undefined, supplementary);
+      const classification = classifyEvidenceItem({
+        location: classFields.location,
+        eventDestinationUrl: classFields.eventDestinationUrl,
+        ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+        ctaLabelMatch: classFields.ctaLabelMatch,
+        isInteractionEvent: classFields.isInteractionEvent,
+        eventName: classFields.eventName,
+        virtualMetadata: classFields.virtualMetadata,
+        targets,
+      });
+      const effectivePostDataParams = flat.body ? [flat.body] : (event.postDataParams ?? []);
+      entries.push({
+        eventId: computeEventId({
+          kind: "ga4",
+          actionId,
+          evidenceSource: event.source,
+          contextId: event.contextId ?? null,
+          stepIndex: event.stepIndex,
+          timestamp: event.timestamp,
+          requestUrl: event.requestUrl,
+          method: event.method,
+          measurementId: event.measurementId ?? null,
+          params: canonicalizeValue(event.params ?? {}),
+          postDataParams: canonicalizeValue(effectivePostDataParams),
+          postDataRaw: event.postDataRaw ?? null,
+          ...(flat.bodyIndex !== undefined ? { batchedBodyIndex: flat.bodyIndex } : {}),
+        }),
+        classification,
         evidenceSource: event.source,
-        contextId: event.contextId ?? null,
+        ...(event.contextId ? { contextId: event.contextId } : {}),
         stepIndex: event.stepIndex,
         timestamp: event.timestamp,
-        requestUrl: event.requestUrl,
-        method: event.method,
-        measurementId: event.measurementId ?? null,
-        params: canonicalizeValue(event.params ?? {}),
-        postDataParams: canonicalizeValue(event.postDataParams ?? []),
-        postDataRaw: event.postDataRaw ?? null,
-      }),
-      classification,
-      evidenceSource: event.source,
-      ...(event.contextId ? { contextId: event.contextId } : {}),
-      stepIndex: event.stepIndex,
-      timestamp: event.timestamp,
-      triggerSegment: triggerLookup.ga4.get(event),
-      ctaIdentifierPresent: classFields.ctaIdentifierPresent,
-      ctaLabelMatch: classFields.ctaLabelMatch,
-      fields,
-      urlRelationship: bestRelationship(fields.pageLocation ?? fields.fullUrl ?? fields.eventDestinationUrl, targets),
-      collectionEndpoint: collectionEndpointOf(event.requestUrl),
-      rawEvidenceJson: stableStringify({
-        requestUrl: event.requestUrl,
-        method: event.method,
-        params: event.params,
-        postDataParams: event.postDataParams,
-        postDataRaw: event.postDataRaw,
-      }),
-    });
+        triggerSegment: triggerLookup.ga4.get(event),
+        ...(flat.bodyIndex !== undefined ? { rawEntryIndex: flat.bodyIndex } : {}),
+        ctaIdentifierPresent: classFields.ctaIdentifierPresent,
+        ctaLabelMatch: classFields.ctaLabelMatch,
+        fields,
+        urlRelationship: bestRelationship(fields.pageLocation ?? fields.fullUrl ?? fields.eventDestinationUrl, targets),
+        collectionEndpoint: collectionEndpointOf(event.requestUrl),
+        rawEvidenceJson: stableStringify({
+          requestUrl: event.requestUrl,
+          method: event.method,
+          params: event.params,
+          postDataParams: effectivePostDataParams,
+          postDataRaw: event.postDataRaw,
+        }),
+      });
+    }
   }
 
   for (const capture of dataLayerPushes) {
@@ -788,22 +825,28 @@ function emptyTriggerLookup(): TriggerSegmentLookup {
  * needs. Returns no rows at all when neither array captured anything -- never an empty
  * ANALYTICS_EVENT row with no evidence behind it.
  */
-function buildRowsForStartWindow(params: {
+/**
+ * Shared by the start-page window and every later page-visit window (see buildRowsForPageVisit):
+ * no click happened in either case, so there is no primary/candidate click-tag resolution --
+ * just a two-way split between page-load/state-change evidence (ASSOCIATED_RESULT) and
+ * everything else observed in the window (RAW_CAPTURE_IN_ACTION_WINDOW).
+ */
+function buildRowsForEvidenceWindow(params: {
   runId: string;
   taskId: string;
   schemaVersion: string;
   journeyType?: string;
+  actionId: string;
   ga4Events: Ga4NetworkEventCapture[];
   dataLayerPushes: DataLayerCapture[];
   targets: string[];
   stepIndex: number;
 }): AnalyticsReportingRow[] {
-  const { runId, taskId, schemaVersion, journeyType, ga4Events, dataLayerPushes, targets, stepIndex } = params;
+  const { runId, taskId, schemaVersion, journeyType, actionId, ga4Events, dataLayerPushes, targets, stepIndex } = params;
   if (ga4Events.length === 0 && dataLayerPushes.length === 0) {
     return [];
   }
 
-  const actionId = `${taskId}:start`;
   const base: Pick<AnalyticsReportingRow, "runId" | "taskId" | "schemaVersion" | "journeyType" | "actionId"> = {
     runId,
     taskId,
@@ -823,9 +866,6 @@ function buildRowsForStartWindow(params: {
   );
 
   return sortEntries(entries).map((entry) => {
-    // page_view / virtual-page-change evidence corroborates the start page itself and is
-    // reported the same way a CTA click's own associated page/state-change evidence is;
-    // everything else observed in this window (no click ever happened here) is raw context.
     const isPageEvidence = entry.classification === "PHYSICAL_PAGE_CHANGE" || entry.classification === "VIRTUAL_PAGE_CHANGE";
     return buildAnalyticsEventRow(
       base,
@@ -836,6 +876,64 @@ function buildRowsForStartWindow(params: {
       isPageEvidence ? "engine_confirmed_associated_event" : "engine_action_window_raw_capture",
     );
   });
+}
+
+function buildRowsForStartWindow(params: {
+  runId: string;
+  taskId: string;
+  schemaVersion: string;
+  journeyType?: string;
+  ga4Events: Ga4NetworkEventCapture[];
+  dataLayerPushes: DataLayerCapture[];
+  targets: string[];
+  stepIndex: number;
+}): AnalyticsReportingRow[] {
+  return buildRowsForEvidenceWindow({ ...params, actionId: `${params.taskId}:start` });
+}
+
+/**
+ * A page reached by any non-click action (most commonly "navigate") and then recorded via a
+ * "capture" action's own page_visits entry (src/actions/capture.ts) -- see buildAnalyticsReportingRows's
+ * own doc comment on how this page's own GA4/dataLayer window is carved out of the run's full
+ * capture arrays. Always produces a PAGE_VISIT marker row (mirrors the START_PAGE row for every
+ * later page in the journey); analytics rows are only appended when the window actually captured
+ * something, exactly like buildRowsForStartWindow never fabricates an empty ANALYTICS_EVENT row.
+ */
+function buildRowsForPageVisit(
+  visit: PageVisitCapture,
+  evidence: { ga4Events: Ga4NetworkEventCapture[]; dataLayerPushes: DataLayerCapture[] },
+  ctx: { runId: string; taskId: string; schemaVersion: string; journeyType?: string },
+): AnalyticsReportingRow[] {
+  const markerRow: AnalyticsReportingRow = {
+    runId: ctx.runId,
+    taskId: ctx.taskId,
+    schemaVersion: ctx.schemaVersion,
+    ...(ctx.journeyType ? { journeyType: ctx.journeyType } : {}),
+    journeySequence: 0,
+    recordType: "PAGE_VISIT",
+    stepIndex: visit.stepIndex,
+    timestamp: visit.timestamp,
+    sourcePageUrl: visit.url,
+    ...(visit.title ? { destinationPageTitle: visit.title } : {}),
+    eventRole: "PAGE_VISIT",
+    eventClassification: "JOURNEY_MARKER",
+    correlationStatus: "NOT_APPLICABLE",
+    correlationSource: "engine_page_visit_marker",
+  };
+
+  const evidenceRows = buildRowsForEvidenceWindow({
+    runId: ctx.runId,
+    taskId: ctx.taskId,
+    schemaVersion: ctx.schemaVersion,
+    journeyType: ctx.journeyType,
+    actionId: `${ctx.taskId}:page:${visit.stepIndex}`,
+    ga4Events: evidence.ga4Events,
+    dataLayerPushes: evidence.dataLayerPushes,
+    targets: [visit.url],
+    stepIndex: visit.stepIndex,
+  });
+
+  return [markerRow, ...evidenceRows];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -926,8 +1024,47 @@ export function buildAnalyticsReportingRows(params: {
     }),
   );
 
-  for (const ctaClick of ctaClicks) {
-    rows.push(...buildRowsForCtaClick(ctaClick, { runId, taskId, schemaVersion, journeyType }));
+  // Every page reached in the journey -- by a CTA click or by any other action (most commonly
+  // "navigate") -- gets its own marker row plus associated analytics rows, not just the start
+  // page and CTA-click destinations. A CTA click already produces its own full row set from its
+  // own actionAnalytics window (buildRowsForCtaClick), so pageVisits beyond the start page are
+  // handled here as their own, structurally equivalent journey entries, merged into one
+  // chronological sequence by stepIndex so the final journeySequence reflects when each page was
+  // actually reached, not "all clicks, then all navigated pages".
+  type JourneyEntry =
+    | { kind: "cta_click"; stepIndex: number; ctaClick: CtaClickCapture }
+    | { kind: "page_visit"; stepIndex: number; visit: PageVisitCapture };
+
+  const journeyEntries: JourneyEntry[] = [
+    ...ctaClicks.map((ctaClick): JourneyEntry => ({ kind: "cta_click", stepIndex: ctaClick.stepIndex, ctaClick })),
+    ...pageVisits.slice(1).map((visit): JourneyEntry => ({ kind: "page_visit", stepIndex: visit.stepIndex, visit })),
+  ].sort((a, b) => a.stepIndex - b.stepIndex);
+
+  // A click's own window is fully resolved elsewhere (actionAnalytics.ga4RequestsObservedDuringActionWindow/
+  // dataLayerPushesObservedDuringActionWindow) -- its own stepIndex's evidence must never also be
+  // pulled into a later page-visit window, or the same physical event would be reported twice.
+  const clickStepIndexes = new Set(ctaClicks.map((ctaClick) => ctaClick.stepIndex));
+
+  let previousStepIndex = startStepIndex;
+  for (const entry of journeyEntries) {
+    if (entry.kind === "cta_click") {
+      rows.push(...buildRowsForCtaClick(entry.ctaClick, { runId, taskId, schemaVersion, journeyType }));
+    } else {
+      const windowGa4 = ga4NetworkEvents.filter(
+        (event) => event.stepIndex > previousStepIndex && event.stepIndex <= entry.stepIndex && !clickStepIndexes.has(event.stepIndex),
+      );
+      const windowDataLayer = dataLayerEvidence.filter(
+        (push) => push.stepIndex > previousStepIndex && push.stepIndex <= entry.stepIndex && !clickStepIndexes.has(push.stepIndex),
+      );
+      rows.push(
+        ...buildRowsForPageVisit(
+          entry.visit,
+          { ga4Events: windowGa4, dataLayerPushes: windowDataLayer },
+          { runId, taskId, schemaVersion, journeyType },
+        ),
+      );
+    }
+    previousStepIndex = entry.stepIndex;
   }
 
   return rows.map((row, index) => ({ ...row, journeySequence: index + 1 }));

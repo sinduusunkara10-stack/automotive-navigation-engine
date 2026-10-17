@@ -10,15 +10,21 @@ directly, using this document as the spec.
 
 ## 1. What the engine now guarantees
 
-Every row in `analyticsReportingRows` is one of `recordType`: `START_PAGE`, `CTA_CLICK`, or
-`ANALYTICS_EVENT` (the latter further distinguished by `eventRole`: `PRIMARY_CLICK` —
-merged into its own `CTA_CLICK` row, never a separate row — `CLICK_CANDIDATE`,
-`ASSOCIATED_RESULT`, or `RAW_CAPTURE_IN_ACTION_WINDOW`). Rows are already:
+Every row in `analyticsReportingRows` is one of `recordType`: `START_PAGE`, `CTA_CLICK`,
+`PAGE_VISIT`, or `ANALYTICS_EVENT` (the latter further distinguished by `eventRole`:
+`PRIMARY_CLICK` — merged into its own `CTA_CLICK` row, never a separate row —
+`CLICK_CANDIDATE`, `ASSOCIATED_RESULT`, or `RAW_CAPTURE_IN_ACTION_WINDOW`). `PAGE_VISIT`
+(added in 1.51.0) is the marker row for a page the engine reached by any non-click action —
+most commonly `navigate` — and then recorded via a `capture` action's own `page_visits` entry:
+structurally the same kind of journey marker `START_PAGE` is, just for every later page in the
+journey, each with its own associated `ANALYTICS_EVENT` rows. Rows are already:
 
-- **Ordered**: `START_PAGE` first, then per journey-relevant action in step order
-  (`CTA_CLICK`, its `CLICK_CANDIDATE` rows, its `ASSOCIATED_RESULT` rows, then any remaining
-  `RAW_CAPTURE_IN_ACTION_WINDOW` rows), with a contiguous 1-based `journeySequence` already
-  assigned across the whole run.
+- **Ordered**: `START_PAGE` first, then every later journey entry — a `CTA_CLICK` (with its
+  `CLICK_CANDIDATE` rows, its `ASSOCIATED_RESULT` rows, then any remaining
+  `RAW_CAPTURE_IN_ACTION_WINDOW` rows) or a `PAGE_VISIT` (with its own `ASSOCIATED_RESULT`/
+  `RAW_CAPTURE_IN_ACTION_WINDOW` rows) — in the chronological order those pages/clicks were
+  actually reached, with a contiguous 1-based `journeySequence` already assigned across the
+  whole run.
 - **Deduplicated**: the same logical analytics event observed more than once (e.g. two
   different capture shapes of one `dataLayer.push()`) is exactly one row, identified by a
   stable, deterministic `eventId`.

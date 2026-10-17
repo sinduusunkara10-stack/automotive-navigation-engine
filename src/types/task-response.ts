@@ -1804,14 +1804,15 @@ export interface Diagnostics {
  * directly -- see docs/n8n-analytics-reporting-migration.md -- and must never reconstruct,
  * re-classify, correlate, canonicalise, or deduplicate analytics evidence itself again.
  */
-export type ReportingRecordType = "START_PAGE" | "CTA_CLICK" | "ANALYTICS_EVENT";
+export type ReportingRecordType = "START_PAGE" | "CTA_CLICK" | "ANALYTICS_EVENT" | "PAGE_VISIT";
 
 export type ReportingEventRole =
   | "START_PAGE"
   | "PRIMARY_CLICK"
   | "CLICK_CANDIDATE"
   | "ASSOCIATED_RESULT"
-  | "RAW_CAPTURE_IN_ACTION_WINDOW";
+  | "RAW_CAPTURE_IN_ACTION_WINDOW"
+  | "PAGE_VISIT";
 
 export type ReportingCorrelationStatus = "NOT_APPLICABLE" | "CONFIRMED" | "UNRESOLVED" | "WEBSITE_NO_OBSERVED_TAG";
 
@@ -1825,7 +1826,8 @@ export type ReportingCorrelationSource =
   | "engine_capture_gate"
   | "engine_no_observed_click_tag"
   | "engine_confirmed_associated_event"
-  | "engine_action_window_raw_capture";
+  | "engine_action_window_raw_capture"
+  | "engine_page_visit_marker";
 
 /** One flattened, deduplicated, deterministically-ordered reporting record -- see analyticsReportingRows.ts's own doc comment on every field. */
 export interface AnalyticsReportingRow {
@@ -1887,7 +1889,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.50.0";
+  schemaVersion: "1.51.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;
