@@ -66,7 +66,7 @@ function baseTask(
   overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">,
 ): TaskRequest {
   return {
-    schemaVersion: "1.49.0",
+    schemaVersion: "1.50.0",
     taskId: "ordered-milestone-enforcement",
     objective: "",
     allowedDomains: ["127.0.0.1"],
@@ -79,7 +79,7 @@ function baseTask(
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.51.0",
+    outputSchemaVersion: "1.52.0",
     ...overrides,
   };
 }

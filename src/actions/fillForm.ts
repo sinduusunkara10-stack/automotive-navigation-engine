@@ -5,7 +5,6 @@ import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
-import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
 import { detectCaptcha } from "../forms/captcha.js";
 import { detectPageLanguage } from "../forms/fieldMapper.js";
 import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
@@ -13,6 +12,7 @@ import { marketDataFor, resolveMarket, type SupportedLanguage } from "../forms/t
 import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import { resolveConsentGroups } from "../forms/consentGroups.js";
+import { callInPageFunction } from "../forms/inPageFunction.js";
 import {
   DEALER_RESULT_SELECTOR,
   DEALER_SCOPE_ATTR,
@@ -33,6 +33,7 @@ import {
 } from "../diagnostics/formDiscoveryDiagnostic.js";
 import { buildDealerLookupTrace } from "../diagnostics/dealerLookupDiagnostic.js";
 import { startDealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
+import { installSubmissionObserver, selectBusinessRequests, observeSubmissionOutcome, type PostSubmitObservation, type SubmissionObservationConfig } from "./submissionObserver.js";
 import {
   computeFormScore,
   resolveAmbiguousFormSelection,
@@ -69,6 +70,22 @@ const SUCCESS_TEXT_MARKERS = [
   "confermato",
   "confirmado",
   "potwierdzenie",
+  "vielen dank",
+  "successfully",
+  "has been received",
+  "has been sent",
+  "bien ete enregistree",
+  "bien ete envoyee",
+  "bien été enregistrée",
+  "bien été envoyée",
+  "erfolgreich",
+  "succesvol",
+  "con successo",
+  "con éxito",
+  "con exito",
+  "pomyślnie",
+  "pomyslnie",
+  "com sucesso",
 ];
 
 const SUBMIT_TEXT_MARKERS = ["submit", "send", "soumettre", "envoyer", "senden", "versturen", "invia", "inviare", "enviar", "wyslij", "wyślij"];
@@ -125,12 +142,109 @@ export interface PostSubmitDiagnostics {
   postSubmitValidationMessages: string[];
   /** Field ids carrying aria-invalid="true" after the last submit attempt, independent of whether tagAndReadFields' own requiredness evidence flagged them (findInvalidFieldIds only looks at fields it already believes are required). */
   ariaInvalidFieldIds: string[];
-  /** Non-empty hidden-input values on the form after the last submit attempt, keyed by name/id -- e.g. a dealer/location widget's own "committed selection" field, which is often the only visible trace of an unresolved dependency once a submit is cancelled. */
-  hiddenFieldValues: Record<string, string>;
+  /** Sanitised per-hidden-input evidence -- purpose category, a safe identifier-shaped name, and populated/changed/committed booleans. Never a value: hidden inputs routinely carry dealer identifiers, tracking/client ids and tokens. */
+  hiddenFieldEvidence: HiddenFieldEvidence[];
   /** DEALER_SCOPE_ATTR-tagged widget scopes (see dealerLookup.ts) that show at least one accessible selectable result but none of them ended up checked/selected -- an unresolved dependent control, independent of whatever this run's own dealerLookupOutcome already tracked (this is a direct DOM re-scan, not a memory of what resolveDealerLookup saw earlier). */
   unresolvedDependentControlIds: string[];
   /** False only when none of the signals above (native/aria-invalid, visible validation text, or an unresolved dependent control) produced any evidence at all -- i.e. the submission was cancelled for a reason this engine could not observe. formFillOutcome then reports "validation_cause_not_observed" instead of "form_validation_failed", so a genuinely silent cancellation is never misreported as a diagnosed validation failure. */
   validationCauseObserved: boolean;
+}
+
+export type HiddenFieldPurpose = "dealer_or_location_selection" | "consent_state" | "security_token" | "tracking_or_session" | "form_routing" | "other";
+
+export interface HiddenFieldEvidence {
+  purpose: HiddenFieldPurpose;
+  /** The input's own name/id reduced to an identifier shape (letters/underscore/hyphen, digits replaced, capped), or null when nothing safe remains. */
+  safeName: string | null;
+  presentBefore: boolean;
+  presentAfter: boolean;
+  populatedBefore: boolean;
+  populatedAfter: boolean;
+  changed: boolean;
+  /** Blank (or absent) before the fill and populated after it -- the shape a widget's own committed selection takes. */
+  committed: boolean;
+}
+
+/** Positional hidden-input state, compared in memory only: a value fingerprint, never the value, and never emitted. */
+interface HiddenFieldStateEntry {
+  key: string;
+  safeName: string | null;
+  purpose: HiddenFieldPurpose;
+  populated: boolean;
+  fingerprint: string;
+}
+
+const EMPTY_POST_SUBMIT_DIAGNOSTICS: PostSubmitDiagnostics = {
+  invalidFieldIds: [],
+  nativeValidationMessages: {},
+  postSubmitValidationMessages: [],
+  ariaInvalidFieldIds: [],
+  hiddenFieldEvidence: [],
+  unresolvedDependentControlIds: [],
+  validationCauseObserved: false,
+};
+
+const READ_HIDDEN_FIELD_STATE_SOURCE = `(formEl) => {
+  const PURPOSE_STEMS = [
+    ["security_token", ["csrf", "xsrf", "token", "nonce", "captcha", "recaptcha", "signature", "hmac"]],
+    ["tracking_or_session", ["utm", "gclid", "fbclid", "msclkid", "ttclid", "tracking", "track", "client", "visitor", "session", "sid", "cid", "ga", "analytics", "campaign", "source", "medium", "referrer", "referer", "abtest", "variant"]],
+    ["dealer_or_location_selection", ["dealer", "retailer", "site", "outlet", "store", "shop", "agency", "concession", "pdv", "branch", "location", "geo", "lat", "lng", "lon", "postcode", "postal", "zip", "city", "place"]],
+    ["consent_state", ["consent", "optin", "opt", "privacy", "gdpr", "rgpd", "marketing", "newsletter"]],
+    ["form_routing", ["form", "lead", "type", "brand", "model", "market", "country", "language", "lang", "locale", "context", "page", "origin", "channel", "request"]],
+  ];
+  const tokensOf = (raw) => raw.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const fingerprint = (v) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < v.length; i += 1) {
+      h ^= v.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16);
+  };
+  return Array.from(formEl.querySelectorAll('input[type="hidden"]')).map((el, i) => {
+    const rawName = el.getAttribute("name") || el.getAttribute("id") || "";
+    const safe = rawName.replace(/[0-9]+/g, "#").replace(/[^A-Za-z_#.\\-\\[\\]]/g, "").slice(0, 48);
+    const tokens = tokensOf(rawName);
+    const match = PURPOSE_STEMS.find((entry) => tokens.some((t) => entry[1].includes(t)));
+    const value = el.value || "";
+    return { key: i + ":" + rawName, safeName: safe.length > 0 ? safe : null, purpose: match ? match[0] : "other", populated: value.trim().length > 0, fingerprint: fingerprint(value) };
+  });
+}`;
+
+async function readHiddenFieldState(form: Locator): Promise<HiddenFieldStateEntry[]> {
+  return callInPageFunction<HiddenFieldStateEntry[]>(form, "__navEngineReadHiddenFieldState", READ_HIDDEN_FIELD_STATE_SOURCE, null).catch(() => []);
+}
+
+function compareHiddenFieldState(before: HiddenFieldStateEntry[] | null, after: HiddenFieldStateEntry[]): HiddenFieldEvidence[] {
+  const beforeByKey = new Map((before ?? []).map((e) => [e.key, e]));
+  const afterKeys = new Set(after.map((e) => e.key));
+  const evidence: HiddenFieldEvidence[] = after.map((a) => {
+    const b = beforeByKey.get(a.key);
+    return {
+      purpose: a.purpose,
+      safeName: a.safeName,
+      presentBefore: before === null ? false : b !== undefined,
+      presentAfter: true,
+      populatedBefore: b?.populated ?? false,
+      populatedAfter: a.populated,
+      changed: b === undefined ? a.populated : b.fingerprint !== a.fingerprint,
+      committed: !(b?.populated ?? false) && a.populated,
+    };
+  });
+  for (const b of before ?? []) {
+    if (afterKeys.has(b.key)) continue;
+    evidence.push({
+      purpose: b.purpose,
+      safeName: b.safeName,
+      presentBefore: true,
+      presentAfter: false,
+      populatedBefore: b.populated,
+      populatedAfter: false,
+      changed: b.populated,
+      committed: false,
+    });
+  }
+  return evidence.slice(0, 40);
 }
 
 const EMPTY_DEALER_SEARCH_DIAGNOSTICS: DealerSearchDiagnostics = {
@@ -168,6 +282,8 @@ export interface ExecuteFillFormParams {
   taskId?: string;
   /** Diagnostic-only -- the pre-dispatch observation's own activeSurface. */
   activeSurfaceInfo?: ActiveSurfaceInfo;
+  /** Overrides the post-submit observation windows (see submissionObserver.ts); production uses the defaults. */
+  submissionObservationConfig?: SubmissionObservationConfig;
 }
 
 /** Where a field's `required: true` came from -- see RawFieldDescriptor.requiredEvidence below. */
@@ -566,6 +682,24 @@ async function findInvalidFieldIds(form: Locator): Promise<string[]> {
   }, FIELD_INDEX_ATTR);
 }
 
+/** A site's validation text can echo the submitted value back ("12345 is not a valid postcode"):
+ * e-mail addresses and digit runs are masked before any message leaves this module. */
+function redactEchoedValues(text: string): string {
+  return text
+    .replace(/[^\s@]+@[^\s@]+/g, "{email}")
+    .replace(/\+?\d[\d\s().-]{2,}\d/g, "{number}")
+    .slice(0, 300);
+}
+
+export const REDACTED_OPTION_LABEL = "{option_label}";
+
+/** A radio's label is an answer, not a field name: on a dealer or location widget it is a dealer's
+ * name or address, so it is never returned. Every other label gets the same masking as messages. */
+export function diagnosticFieldLabel(label: string, type: string | undefined): string {
+  if (type === "radio") return label ? REDACTED_OPTION_LABEL : "";
+  return redactEchoedValues(label);
+}
+
 /**
  * Post-submit evidence, read fresh right after a submit click -- re-tagging (tagAndReadFields)
  * immediately before this is called is what lets a field a dynamic widget only revealed after
@@ -574,7 +708,7 @@ async function findInvalidFieldIds(form: Locator): Promise<string[]> {
  * at the start of the run, and silently reports zero invalid fields even though the site
  * cancelled the submit.
  */
-async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVerified: boolean): Promise<PostSubmitDiagnostics> {
+async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVerified: boolean, hiddenStateBeforeFill: HiddenFieldStateEntry[] | null): Promise<PostSubmitDiagnostics> {
   await tagAndReadFields(form).catch(() => []);
   const invalidFieldIds = await findInvalidFieldIds(form).catch(() => []);
   const nativeValidationMessages = await form
@@ -588,11 +722,15 @@ async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVer
     }, FIELD_INDEX_ATTR)
     .catch(() => ({}));
   const postSubmitValidationMessages = await form
-    .evaluate((formEl: HTMLFormElement) => {
-      const nodes = Array.from(formEl.querySelectorAll('[role="alert"], [aria-live], .error, .error-message, .invalid-feedback'));
+    .evaluate((formEl: HTMLFormElement, scopeAttr: string) => {
+      // A dealer widget's own live region announces the selected dealer's name/address; its
+      // unresolved state is reported through unresolvedDependentControlIds instead.
+      const nodes = Array.from(formEl.querySelectorAll('[role="alert"], [aria-live], .error, .error-message, .invalid-feedback')).filter((n) => !n.closest(`[${scopeAttr}]`));
       return nodes.map((n) => n.textContent?.trim() ?? "").filter((t) => t.length > 0);
-    })
+    }, DEALER_SCOPE_ATTR)
     .catch(() => []);
+  const sanitizedValidationMessages = postSubmitValidationMessages.map(redactEchoedValues);
+  const sanitizedNativeMessages = Object.fromEntries(Object.entries(nativeValidationMessages).map(([k, v]) => [k, redactEchoedValues(v as string)]));
   const ariaInvalidFieldIds = await form
     .evaluate((formEl: HTMLFormElement, attr: string) => {
       const found: string[] = [];
@@ -602,16 +740,7 @@ async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVer
       return found;
     }, FIELD_INDEX_ATTR)
     .catch(() => []);
-  const hiddenFieldValues = await form
-    .evaluate((formEl: HTMLFormElement) => {
-      const values: Record<string, string> = {};
-      Array.from(formEl.querySelectorAll('input[type="hidden"]')).forEach((el, i) => {
-        const value = (el as HTMLInputElement).value;
-        if (value.trim().length > 0) values[el.getAttribute("name") || el.getAttribute("id") || `hidden-${i}`] = value;
-      });
-      return values;
-    })
-    .catch(() => ({}));
+  const hiddenFieldEvidence = compareHiddenFieldState(hiddenStateBeforeFill, await readHiddenFieldState(form));
   const unresolvedDependentControlIds = await form
     .evaluate(
       (formEl: HTMLFormElement, attrs: { scopeAttr: string; resultSelector: string; dealerValueAlreadyVerified: boolean }) => {
@@ -654,10 +783,10 @@ async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVer
 
   return {
     invalidFieldIds,
-    nativeValidationMessages,
-    postSubmitValidationMessages,
+    nativeValidationMessages: sanitizedNativeMessages,
+    postSubmitValidationMessages: sanitizedValidationMessages,
     ariaInvalidFieldIds,
-    hiddenFieldValues,
+    hiddenFieldEvidence,
     unresolvedDependentControlIds,
     validationCauseObserved,
   };
@@ -746,7 +875,7 @@ function scorePlan(plan: PlannedField[]): number {
 }
 
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
-  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo } = params;
+  const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo, submissionObservationConfig } = params;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
   const diagnosticRunId = taskId ?? "unknown";
   logFormDiscoveryDiagnosticEnabled({ runId: diagnosticRunId, taskId: diagnosticRunId });
@@ -967,6 +1096,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const form = forms.nth(selection.chosenIndex);
   const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
+  const preSubmitHiddenSnapshot = await readHiddenFieldState(form);
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
@@ -1118,7 +1248,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       .map((p) => ({ id: p.descriptor.id, reason: p.decision.reason })),
     fieldDiagnostics: initialPlan.map((p) => ({
       id: p.descriptor.id,
-      label: p.descriptor.label ?? "",
+      label: diagnosticFieldLabel(p.descriptor.label ?? "", p.descriptor.type),
       type: p.descriptor.tagName === "input" ? p.descriptor.type ?? "text" : p.descriptor.tagName,
       visible: p.descriptor.visible,
       requiredEvidence: p.descriptor.requiredEvidence ?? "none",
@@ -1269,7 +1399,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         nativeValidationMessages: {},
         postSubmitValidationMessages: [],
         ariaInvalidFieldIds: [],
-        hiddenFieldValues: {},
+        hiddenFieldEvidence: [],
         unresolvedDependentControlIds: [],
         validationCauseObserved: true,
         retryDecision: dealerDependencyUnresolved
@@ -1298,6 +1428,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           : multiplePostcodeFieldsUnresolved
             ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
             : "not retried: submit was never attempted, the pre-submit readiness gate failed",
+        postSubmitObservation: null,
       },
     };
   }
@@ -1346,9 +1477,11 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     succeeded: boolean;
     afterUrl: string;
     networkRequests: SanitizedNetworkRequestEvidence[];
+    businessRequests: SanitizedNetworkRequestEvidence[];
     submitControlEnabled: boolean;
     submitBlockedBeforeClick: boolean;
     confirmationAppeared: boolean;
+    observation: PostSubmitObservation | null;
   }> {
     // A control disabled until the last field's change/blur fires is a real pattern: give the
     // page that one commit event, briefly and bounded, instead of letting click() wait out its
@@ -1363,20 +1496,52 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       }
     }
     if (!submitControlEnabled) {
-      const postSubmit = await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false);
-      return { postSubmit, succeeded: false, afterUrl: page.url(), networkRequests: [], submitControlEnabled, submitBlockedBeforeClick: true, confirmationAppeared: false };
+      const postSubmit = await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false, preSubmitHiddenSnapshot);
+      return {
+        postSubmit,
+        succeeded: false,
+        afterUrl: page.url(),
+        networkRequests: [],
+        businessRequests: [],
+        submitControlEnabled,
+        submitBlockedBeforeClick: true,
+        confirmationAppeared: false,
+        observation: null,
+      };
     }
     const confirmationBefore = await countConfirmationMarkers(page);
-    // Started before the click, stopped after settling -- correlates purely by "happened during
-    // this submit attempt's window", never by URL/brand, same convention as the dealer-lookup
-    // capture this reuses. Never a request/response body, never a typed or submitted value.
-    const capture = startDealerLookupNetworkCapture(page);
+    const formActionUrl = await form
+      .evaluate((el: Element) => {
+        const action = el.getAttribute("action");
+        if (!action) return null;
+        try {
+          return new URL(action, document.baseURI).href;
+        } catch {
+          return null;
+        }
+      })
+      .catch(() => null);
+    const { ariaInvalidBefore } = await installSubmissionObserver(form, submit);
+    // Started before the click -- correlates purely by "happened during this submit attempt's
+    // window", never by URL/brand. Never a request/response body, never a typed or submitted value.
+    const capture = startDealerLookupNetworkCapture(page, { includeDocumentRequests: true });
     capture.setStep("submit_click");
     await submit.click({ timeout: 10_000 }).catch(() => {});
-    await waitForAdaptiveSettle(page);
+    const { observation, urlChanged, confirmationAppeared: observedConfirmation } = await observeSubmissionOutcome({
+      page,
+      capture,
+      beforeUrl,
+      formActionUrl,
+      confirmationBefore,
+      ariaInvalidBefore,
+      countConfirmationMarkers,
+      detectChallenge: detectCaptchaOnPage,
+      config: submissionObservationConfig,
+    });
+    const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
+    const businessRequests = selectBusinessRequests(allRequests, { pageUrl: beforeUrl, formActionUrl });
     const afterUrl = page.url();
-    const urlChanged = afterUrl !== beforeUrl;
     // A URL change already proves the submit went through -- `form` now refers to whatever
     // (if anything) matches the same index on the page we navigated to, not the form that was
     // submitted, so reading post-submit diagnostics from it here would just be evaluating
@@ -1387,16 +1552,18 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
           nativeValidationMessages: {},
           postSubmitValidationMessages: [],
           ariaInvalidFieldIds: [],
-          hiddenFieldValues: {},
+          hiddenFieldEvidence: [],
           unresolvedDependentControlIds: [],
           validationCauseObserved: true,
         }
-      : await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false);
-    // Confirmation counts only when its marker text newly appeared (in a modal, toast, portal, or a
-    // previously hidden region) -- marker text already on the page before the click proves nothing.
-    const confirmationAppeared = !urlChanged && postSubmit.invalidFieldIds.length === 0 && (await countConfirmationMarkers(page)) > confirmationBefore;
-    const succeeded = postSubmit.invalidFieldIds.length === 0 && (urlChanged || confirmationAppeared);
-    return { postSubmit, succeeded, afterUrl, networkRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared };
+      : observation.terminalState === "succeeded" && !observation.formStillPresentAtEnd
+        ? EMPTY_POST_SUBMIT_DIAGNOSTICS
+        : await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false, preSubmitHiddenSnapshot);
+    // Confirmation counts only when it newly appeared after the click -- marker text already on the
+    // page before the click proves nothing.
+    const confirmationAppeared = !urlChanged && postSubmit.invalidFieldIds.length === 0 && observedConfirmation;
+    const succeeded = postSubmit.invalidFieldIds.length === 0 && observation.terminalState === "succeeded";
+    return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation };
   }
 
   let attempt = await attemptSubmit();
@@ -1417,7 +1584,20 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       !dealerLookupOutcome.dealerValueVerified &&
       dealerLookupOutcome.executionTrace.retryRecommendation !== "none";
     const correctiveActionAvailable = !attempt.submitBlockedBeforeClick && (dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0);
+    // A business request the site accepted, or that was still pending, may already have created
+    // the lead: resubmitting could duplicate it, so no retry is ever attempted after one.
+    const businessRequestMayHaveLanded =
+      attempt.observation !== null &&
+      attempt.observation.businessRequestDetected &&
+      (attempt.observation.businessRequest?.outcome === "pending" ||
+        (attempt.observation.businessRequest?.status !== null &&
+          attempt.observation.businessRequest?.status !== undefined &&
+          attempt.observation.businessRequest.status < 400));
 
+    if (businessRequestMayHaveLanded) {
+      retryDecision = "not retried: a business submission request was already sent and not rejected, so resubmitting could duplicate the lead";
+      break;
+    }
     if (!correctiveActionAvailable) {
       retryDecision = "not retried: the submit was cancelled but no invalid field or uncommitted dealer selection was found to correct";
       break;
@@ -1440,10 +1620,12 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // response, which previously made "the dealer flow never activated" indistinguishable from
   // "it activated and every step came back false".
   const formDealerSearchDiagnostics = buildDealerSearchDiagnostics();
-  // Tracking beacons fired by the click itself are never "the submission request".
-  const submissionRequests = attempt.networkRequests.filter((r) => r.purpose !== "unrelated_tracking");
+  // Only the correlated business request counts: tracking, advertising and third-party analytics
+  // fired by the same click are never "the submission request".
+  const submissionRequests = attempt.businessRequests;
   const submissionRequestStarted = submissionRequests.length > 0;
   const submissionServerResponseCategory = classifySubmissionResponses(submissionRequests);
+  const observedTerminal = attempt.observation?.terminalState ?? null;
   const submissionCanceledBeforeRequest = !attempt.succeeded && !submissionRequestStarted;
   // Carries the dealer lookup's own hidden-identifier-commit evidence through to submission
   // time, for correlation -- null when no dealer_search decision ever ran on this form.
@@ -1465,26 +1647,28 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     ? "succeeded"
     : attempt.submitBlockedBeforeClick
       ? "cancelled_before_request"
-      : attempt.postSubmit.validationCauseObserved
-        ? "validation_failed"
-        : submissionServerResponseCategory === "server_validation_rejected"
+      : observedTerminal === "blocked_or_challenged" || submissionServerResponseCategory === "blocked_or_rate_limited"
+        ? "blocked_or_rate_limited"
+        : observedTerminal === "server_rejected" || submissionServerResponseCategory === "server_validation_rejected"
           ? "server_rejected"
-          : submissionServerResponseCategory === "blocked_or_rate_limited"
-            ? "blocked_or_rate_limited"
-            : submissionServerResponseCategory === "server_error"
-              ? "server_error"
+          : observedTerminal === "server_error" || submissionServerResponseCategory === "server_error"
+            ? "server_error"
+            : observedTerminal === "validation_failed" || attempt.postSubmit.validationCauseObserved
+              ? "validation_failed"
               : submissionCanceledBeforeRequest
                 ? "cancelled_before_request"
-                : submissionServerResponseCategory === "accepted"
+                : submissionServerResponseCategory === "accepted" || submissionServerResponseCategory === "failed_or_pending"
                   ? "unconfirmed"
                   : "cancelled_unknown_cause";
   const submissionOutcomeReason = attempt.succeeded
     ? attempt.afterUrl !== beforeUrl
       ? "submit resulted in a URL change"
-      : "confirmation text newly appeared on the page after submit"
+      : `positive completion evidence appeared after submit (${attempt.observation?.successSignals.join(", ") ?? "confirmation"})`
     : attempt.submitBlockedBeforeClick
       ? "the submit control stayed disabled after a final blur/commit event, so it was never clicked"
-      : attempt.postSubmit.validationCauseObserved
+      : submissionOutcome === "blocked_or_rate_limited" && observedTerminal === "blocked_or_challenged" && attempt.observation?.businessRequest?.status == null
+        ? "a challenge/CAPTCHA surface appeared after submit"
+        : submissionOutcome === "validation_failed"
         ? "a native/aria-invalid field, visible validation text, or an unresolved dependent control was observed after submit"
         : submissionOutcome === "server_rejected"
           ? "the submission request was answered with a client-error status that rejects the submitted data (400/409/422)"
@@ -1493,9 +1677,9 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
             : submissionOutcome === "server_error"
               ? "the submission request was answered with a server error (5xx)"
               : submissionCanceledBeforeRequest
-                ? "submit was cancelled and no non-tracking request was ever observed during the submit window"
+                ? "no business submission request (same-site or form-action state-changing request) was observed after submit, and nothing was in progress when observation ended"
                 : submissionOutcome === "unconfirmed"
-                  ? "a submission request was accepted (2xx) but no URL change, new confirmation text, or validation surface followed -- the outcome cannot be confirmed either way"
+                  ? `the business submission request was ${submissionServerResponseCategory === "accepted" ? "accepted (2xx)" : "still pending or failed in transport"} but no confirmation state followed within the adaptive observation window -- the outcome cannot be confirmed either way`
                   : "submit was cancelled but no diagnosable cause was observed, even though a network request was sent";
   const formPostSubmitDiagnostics = {
     submitCanceled: !attempt.succeeded,
@@ -1503,7 +1687,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     nativeValidationMessages: attempt.postSubmit.nativeValidationMessages,
     postSubmitValidationMessages: attempt.postSubmit.postSubmitValidationMessages,
     ariaInvalidFieldIds: attempt.postSubmit.ariaInvalidFieldIds,
-    hiddenFieldValues: attempt.postSubmit.hiddenFieldValues,
+    hiddenFieldEvidence: attempt.postSubmit.hiddenFieldEvidence,
     unresolvedDependentControlIds: attempt.postSubmit.unresolvedDependentControlIds,
     validationCauseObserved: attempt.postSubmit.validationCauseObserved,
     retryDecision,
@@ -1524,6 +1708,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     submissionOutcomeReason,
     retryEligible,
     retryReason: retryDecision,
+    postSubmitObservation: attempt.observation,
   };
 
   if (!attempt.succeeded) {

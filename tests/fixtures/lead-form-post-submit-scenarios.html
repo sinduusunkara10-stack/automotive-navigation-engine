@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a quote</title>
+    <style>
+      .spinner { width: 24px; height: 24px; }
+    </style>
+  </head>
+  <body>
+    <h1>Request a quote</h1>
+    <div id="region">
+      <form id="lead-form" action="/api/lead" method="post">
+        <label for="first-name">First name</label>
+        <input type="text" id="first-name" name="firstName" required />
+        <label for="last-name">Last name</label>
+        <input type="text" id="last-name" name="lastName" required />
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" required />
+        <input type="hidden" name="dealerCode" value="DLR-778899" />
+        <input type="hidden" name="trackingClientId" value="GA1.2.55501234.1700000000" />
+        <input type="hidden" name="selectedSite" value="" />
+        <p id="error" role="alert"></p>
+        <button type="submit" id="submit-lead">Send request</button>
+      </form>
+      <div id="hidden-confirmation" style="display: none">Thank you, your request has been received.</div>
+    </div>
+    <script>
+      // The scenario is chosen by the test through the query string; every scenario is a generic
+      // lead-service behaviour, none is tied to a brand or market.
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || "quick";
+      const delay = Number(params.get("delay") || "0");
+      const status = Number(params.get("status") || "200");
+      const form = document.getElementById("lead-form");
+      const submit = document.getElementById("submit-lead");
+      window.dataLayer = window.dataLayer || [];
+
+      const confirm = (text) => {
+        const box = document.createElement("div");
+        box.setAttribute("role", "status");
+        box.textContent = text || "Thank you, your request has been received.";
+        document.getElementById("region").appendChild(box);
+      };
+      const spinner = () => {
+        const s = document.createElement("div");
+        s.className = "spinner";
+        s.setAttribute("role", "progressbar");
+        s.setAttribute("aria-busy", "true");
+        s.id = "spinner";
+        document.getElementById("region").appendChild(s);
+        return s;
+      };
+      const track = () =>
+        Promise.all([
+          fetch("https://tracker.example-analytics.test/collect?e=submit", { method: "POST", mode: "no-cors", body: "x" }).catch(() => {}),
+          fetch("https://ads.example-adnetwork.test/pixel/event", { method: "POST", mode: "no-cors", body: "x" }).catch(() => {}),
+        ]);
+      const business = () => fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lead: true }) });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        switch (scenario) {
+          case "quick":
+            setTimeout(() => confirm(), 300);
+            break;
+          case "spinner_then_confirmation": {
+            submit.disabled = true;
+            const s = spinner();
+            setTimeout(() => {
+              s.remove();
+              confirm();
+            }, delay);
+            break;
+          }
+          case "request_in_flight":
+            await business();
+            confirm();
+            break;
+          case "request_then_delayed_dom": {
+            const s = spinner();
+            await business();
+            setTimeout(() => {
+              s.remove();
+              confirm();
+            }, delay);
+            break;
+          }
+          case "form_replaced":
+            await business();
+            form.remove();
+            document.getElementById("region").insertAdjacentHTML("beforeend", "<section><h2>Reference QX</h2><p>Your dealer will call you.</p></section>");
+            break;
+          case "hidden_container":
+            setTimeout(() => {
+              document.getElementById("hidden-confirmation").style.display = "block";
+            }, 500);
+            break;
+          case "modal": {
+            setTimeout(() => {
+              const dialog = document.createElement("div");
+              dialog.setAttribute("role", "dialog");
+              dialog.textContent = "Merci, votre demande a bien été enregistrée.";
+              document.body.appendChild(dialog);
+            }, 400);
+            break;
+          }
+          case "iframe":
+            setTimeout(() => {
+              const frame = document.createElement("iframe");
+              frame.src = "/post-submit-confirmation-frame.html";
+              document.body.appendChild(frame);
+            }, 300);
+            break;
+          case "virtual_page":
+            setTimeout(() => {
+              window.dataLayer.push({ event: "virtualPageview", virtualPagePath: "/request/thank-you" });
+            }, 300);
+            break;
+          case "tracking_then_business":
+            await track();
+            await business();
+            confirm();
+            break;
+          case "tracking_only":
+            await track();
+            break;
+          case "accepted_no_ui":
+            await business();
+            break;
+          case "validation_error":
+            await business();
+            document.getElementById("email").setAttribute("aria-invalid", "true");
+            document.getElementById("error").textContent = "The e-mail address is invalid.";
+            break;
+          case "server_reject":
+            await business();
+            break;
+          case "echo_error":
+            await business();
+            document.getElementById("error").textContent =
+              "We could not process " + document.getElementById("email").value + " for area 75008, please call +33 1 23 45 67 89.";
+            break;
+          case "endless_spinner":
+            spinner();
+            submit.disabled = true;
+            break;
+          case "nothing":
+          default:
+            break;
+        }
+      });
+      void status;
+    </script>
+  </body>
+</html>

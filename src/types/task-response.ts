@@ -18,6 +18,36 @@ export type RunStatus =
   | "max_duration_reached"
   | "container_memory_threshold_reached";
 
+/** Wire shape of actions/submissionObserver.ts's PostSubmitObservation -- timings are ms from the submit click. */
+export interface PostSubmitObservationWire {
+  baseWindowMs: number;
+  extensionMs: number;
+  hardCapMs: number;
+  extensionCount: number;
+  extensionReasons: ("business_request_in_flight" | "submit_control_disabled" | "loading_indicator_active" | "dom_mutations_continuing" | "form_replacement_in_progress")[][];
+  totalObservationMs: number;
+  businessRequestDetected: boolean;
+  businessRequestCount: number;
+  businessRequest: {
+    method: string;
+    endpointPattern: string;
+    resourceType: string;
+    status: number | null;
+    outcome: "completed" | "failed" | "pending";
+    startedAtMs: number;
+    durationMs: number | null;
+    classificationReason: string;
+  } | null;
+  businessRequestStartedAtMs: number | null;
+  businessRequestFinishedAtMs: number | null;
+  excludedTrackingOrThirdPartyRequestCount: number;
+  confirmationDetectedAtMs: number | null;
+  successSignals: ("url_change" | "confirmation_message" | "success_status_surface" | "virtual_page_success_event" | "form_replaced_after_accepted_business_response")[];
+  formStillPresentAtEnd: boolean;
+  terminalState: "succeeded" | "validation_failed" | "server_rejected" | "server_error" | "blocked_or_challenged" | "unknown_outcome";
+  terminalReason: string;
+}
+
 export interface InteractiveElement {
   id: string;
   role: string;
@@ -771,12 +801,42 @@ export interface ActionResult {
     consentGroupsInitiallyVisible: number;
     consentGroupDiagnostics: {
       groupId: string;
-      questionText: string;
+      /** Consent purpose. Optional commercial purposes are always declined; required processing/terms accepted only when marked required; ambiguous never touched. */
+      purpose:
+        | "required_privacy_processing"
+        | "terms_and_conditions"
+        | "optional_marketing"
+        | "optional_profiling"
+        | "optional_third_party"
+        | "customer_qualification"
+        | "journey_intent"
+        | "ambiguous";
+      /** The dictionary term or group-name token that decided purpose -- never page text. */
+      purposeEvidence: string;
+      /** Whether a question was associated with the group (the question text itself is never returned). */
+      questionFound: boolean;
+      questionSource: "fieldset_legend" | "radiogroup_label" | "aria_reference" | "group_container_text" | "preceding_text" | "nearest_heading" | "none";
       requiredEvidence: "attribute" | "marker" | "none";
+      optionCount: number;
+      visibleOptionCount: number;
+      /** Hidden members repeating a visible option (e.g. responsive copies) -- never interacted with. */
+      hiddenDuplicateCount: number;
+      checkedBefore: "positive" | "negative" | "unknown" | "none";
+      checkedAfter: "positive" | "negative" | "unknown" | "none";
+      interaction:
+        | "selected_decline"
+        | "flipped_preselected_accept_to_decline"
+        | "committed_preselected_decline"
+        | "accepted_required"
+        | "kept_preselected_accept_required"
+        | "selected_by_policy"
+        | "left_untouched";
+      /** The intended option read back as checked after the interaction; null when no interaction was attempted. */
+      checkedStateVerified: boolean | null;
       resolved: boolean;
       selectedMemberFieldId: string | null;
-      /** Three-way radio-group taxonomy result (see forms/radioGroupClassifier.ts). "ambiguous" is never resolved by this engine. */
-      classification: "marketing_consent" | "journey_intent" | "customer_qualification" | "ambiguous";
+      /** Coarse taxonomy kept for compatibility; purpose is the finer decision. "ambiguous" is never resolved by this engine. */
+      classification: "marketing_consent" | "required_consent" | "journey_intent" | "customer_qualification" | "ambiguous";
       classificationEvidence: string;
       /** Present only when resolved: why this option was selected. */
       selectionReason?: string;
@@ -825,8 +885,17 @@ export interface ActionResult {
     postSubmitValidationMessages: string[];
     /** Field ids carrying aria-invalid="true" after the last submit attempt, independent of whether they were already flagged required. */
     ariaInvalidFieldIds: string[];
-    /** Non-empty hidden-input values on the form after the last submit attempt, keyed by name/id -- often the only visible trace of an unresolved dependent widget once a submit is cancelled. */
-    hiddenFieldValues: Record<string, string>;
+    /** Sanitised hidden-input evidence after the last submit attempt, compared positionally with the state captured before the fill began. Never a value. */
+    hiddenFieldEvidence: {
+      purpose: "dealer_or_location_selection" | "consent_state" | "security_token" | "tracking_or_session" | "form_routing" | "other";
+      safeName: string | null;
+      presentBefore: boolean;
+      presentAfter: boolean;
+      populatedBefore: boolean;
+      populatedAfter: boolean;
+      changed: boolean;
+      committed: boolean;
+    }[];
     /** Dealer/location widget scopes showing at least one accessible selectable result but none checked/selected after the last submit attempt. */
     unresolvedDependentControlIds: string[];
     /** False only when none of invalidFieldIds/ariaInvalidFieldIds/postSubmitValidationMessages/nativeValidationMessages/unresolvedDependentControlIds produced any evidence -- the cancellation's cause could not be observed. See formFillOutcome "validation_cause_not_observed". */
@@ -889,6 +958,8 @@ export interface ActionResult {
     retryEligible: boolean;
     /** Human-readable explanation of retryEligible -- always the same text as retryDecision. */
     retryReason: string;
+    /** The adaptive post-submit observation of the last submit attempt (see actions/submissionObserver.ts). Null when submit was never clicked. */
+    postSubmitObservation: PostSubmitObservationWire | null;
   };
   /**
    * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets
@@ -1889,7 +1960,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.51.0";
+  schemaVersion: "1.52.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

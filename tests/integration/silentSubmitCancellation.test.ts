@@ -145,7 +145,7 @@ test("fill_form: a dealer-lookup scope that never surfaces a single selectable r
   }
 });
 
-test("fill_form: the new submission diagnostics (network evidence, submit-control identity, outcome/retry reasons) never carry any typed personal value, request body, or response body -- hiddenFieldValues is pre-existing, documented, out of this fix's scope", async () => {
+test("fill_form: the new submission diagnostics (network evidence, submit-control identity, outcome/retry reasons) never carry any typed personal value, request body, or response body -- including hidden-field evidence, which carries no values", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
@@ -155,17 +155,7 @@ test("fill_form: the new submission diagnostics (network evidence, submit-contro
 
     const diagnostics = result.formPostSubmitDiagnostics;
     assert.ok(diagnostics);
-    const newFieldsOnly = {
-      submitControlIdentity: diagnostics.submitControlIdentity,
-      submitActivationMethod: diagnostics.submitActivationMethod,
-      submissionNetworkRequests: diagnostics.submissionNetworkRequests,
-      validationSurfaceType: diagnostics.validationSurfaceType,
-      dealerCommitEvidence: diagnostics.dealerCommitEvidence,
-      submissionOutcome: diagnostics.submissionOutcome,
-      submissionOutcomeReason: diagnostics.submissionOutcomeReason,
-      retryReason: diagnostics.retryReason,
-    };
-    const serialized = JSON.stringify(newFieldsOnly);
+    const serialized = JSON.stringify(diagnostics);
     assert.equal(serialized.includes("dealer-1"), false, "the committed dealer identifier's own value must never appear");
     assert.equal(serialized.toLowerCase().includes("@"), false, "no email address should appear");
     // The sanitised network evidence must only ever carry the shape the dealerLookupNetwork

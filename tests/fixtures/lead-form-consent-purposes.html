@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis</title>
+    <style>
+      .mobile-only { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Demande de devis</h1>
+    <form id="lead-form">
+      <label for="first-name">Prénom</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Nom</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">E-mail</label>
+      <input type="email" id="email" name="email" required />
+
+      <fieldset>
+        <legend>Souhaitez-vous recevoir nos offres commerciales par e-mail ?</legend>
+        <label><input type="radio" name="grpA" value="1" id="grpA-yes" /> Oui</label>
+        <label><input type="radio" name="grpA" value="0" id="grpA-no" /> Non</label>
+      </fieldset>
+
+      <div role="radiogroup" aria-labelledby="q-b">
+        <span id="q-b">Dürfen wir Ihre Daten für personalisierte Angebote auswerten (Profilierung)?</span>
+        <label><input type="radio" name="grpB" value="J" id="grpB-yes" /> Ja</label>
+        <label><input type="radio" name="grpB" value="N" id="grpB-no" /> Nein</label>
+      </div>
+
+      <div class="question">
+        <p>Share my details with selected partner companies</p>
+        <label><input type="radio" name="grpC" value="a" id="grpC-yes" /> Yes</label>
+        <label><input type="radio" name="grpC" value="b" id="grpC-no" /> No</label>
+      </div>
+
+      <div class="question"><label><input type="radio" name="consent_flag_mrkt_prfl" value="true" id="tokA-yes" /> Oui</label><label><input type="radio" name="consent_flag_mrkt_prfl" value="false" id="tokA-no" /> Non</label></div>
+      <div class="question"><label><input type="radio" name="consent_flag_thirdparty" value="true" id="tokB-yes" /> Oui</label><label><input type="radio" name="consent_flag_thirdparty" value="false" id="tokB-no" /> Non</label></div>
+
+      <fieldset>
+        <legend>J'ai lu la politique de confidentialité et j'accepte le traitement de ma demande *</legend>
+        <label><input type="radio" name="grpReq" value="1" id="grpReq-yes" required /> Oui</label>
+        <label><input type="radio" name="grpReq" value="0" id="grpReq-no" required /> Non</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>I accept the terms and conditions of the newsletter programme</legend>
+        <label><input type="radio" name="grpBundled" value="1" id="grpBundled-yes" /> Yes</label>
+        <label><input type="radio" name="grpBundled" value="0" id="grpBundled-no" /> No</label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Please choose the colour you prefer</legend>
+        <label><input type="radio" name="grpAmb" value="x" id="grpAmb-1" /> Blue</label>
+        <label><input type="radio" name="grpAmb" value="y" id="grpAmb-2" /> Green</label>
+      </fieldset>
+
+      <fieldset class="mobile-only">
+        <legend>Souhaitez-vous recevoir nos offres commerciales par SMS ?</legend>
+        <label><input type="radio" name="grpD" value="1" id="grpD-yes-mobile" /> Oui</label>
+        <label><input type="radio" name="grpD" value="0" id="grpD-no-mobile" /> Non</label>
+      </fieldset>
+      <fieldset>
+        <legend>Souhaitez-vous recevoir nos offres commerciales par SMS ?</legend>
+        <label><input type="radio" name="grpD" value="1" id="grpD-yes" /> Oui</label>
+        <label><input type="radio" name="grpD" value="0" id="grpD-no" /> Non</label>
+      </fieldset>
+
+      <div id="confirmation" style="display: none">Merci ! Votre demande a bien été enregistrée.</div>
+      <button type="submit" id="submit-lead">Valider</button>
+    </form>
+    <script>
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.querySelector('input[name="grpReq"]:checked')) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

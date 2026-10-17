@@ -3986,3 +3986,50 @@ Structure:
   - a disabled submit gets a final blur and is never clicked;
   - success requires a URL change or a newly appeared confirmation;
   - submission outcomes now also classify the server response.
+
+### Lead-form filling: optional consent and delayed submission confirmation (schemaVersion 1.48.0 -> 1.49.0, outputSchemaVersion 1.50.0 -> 1.51.0)
+
+A live run after the dealer postcode overhaul passed the dealer flow but was reported as
+unconfirmed. The site confirmed the lead on the same page about a minute after Submit, while the
+engine stopped after a settle of at most 3 s. Two optional commercial consent radio groups were
+also left unanswered, and tracking pings fired by the click were read as the submission request.
+
+Structure:
+
+- `src/actions/submissionObserver.ts` (new): the adaptive post-submit state machine.
+  - States: submit activated, business-request discovery, submission in progress, then one
+    terminal state: `succeeded`, `validation_failed`, `server_rejected`, `server_error`,
+    `blocked_or_challenged` or `unknown_outcome`.
+  - It polls every 250 ms inside a 10 s base window and stops on the first decisive signal.
+  - At the deadline it extends by 10 s only while progress is observed: a business request in
+    flight, a disabled submit control, a loading indicator, DOM changes around the form, or the
+    form being replaced. The hard cap is 75 s. With nothing in progress it stops at the base
+    window.
+  - The business request is the state-changing request sent to the page's own registrable
+    domain or to the host the form's `action` names. Tracking, advertising, analytics and other
+    third-party hosts never qualify.
+  - HTTP 2xx alone is never success. Success needs a URL change, newly appeared confirmation
+    text, a new success status/alert/dialog surface, a dataLayer success or virtual-page event, or
+    the form being replaced after an accepted business response.
+  - A business request that was accepted or is still pending blocks any retry, so the lead is
+    never submitted twice.
+- `src/forms/consentGroups.ts`: radio consent groups are resolved by purpose.
+  - The question is found through fieldset/legend, `role="radiogroup"` labelling, aria
+    references, the group's own exclusive container, preceding text, or the nearest heading.
+  - Only visible options are used. A hidden responsive copy is never touched.
+  - Optional marketing, profiling and third-party groups always end on the decline option. A
+    pre-selected accept is flipped; a pre-selected decline is explicitly clicked to commit it.
+  - Required processing and terms are accepted only when the form marks them required.
+  - Ambiguous groups, including bundled required-plus-optional wording, are never touched.
+  - Every interaction is read back.
+- `src/forms/radioGroupClassifier.ts`: `classifyConsentPurpose` matches question text, option
+  labels and generic group-name tokens (such as `mrkt`, `prfl` or `thirdparty`) across every
+  supported language, whatever the detected page language.
+- `src/forms/inPageFunction.ts` (new): installs a string-source in-page helper through the
+  frame and calls it on a locator's element.
+- `src/actions/fillForm.ts`:
+  - `hiddenFieldValues` is replaced by `hiddenFieldEvidence`, which carries a purpose, a safe
+    name and populated/changed/committed booleans, never a value;
+  - post-submit validation text has e-mail addresses and digit runs masked.
+
+Consent diagnostics no longer return the question text.
