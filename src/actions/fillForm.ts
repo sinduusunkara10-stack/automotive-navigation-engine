@@ -1187,10 +1187,11 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // Generic dependent-control catch-up: selecting one <select> can cause the page's own JS to
   // populate or enable a DEPENDENT <select> (e.g. a narrower choice whose options only exist
   // once a broader one is picked) that had no selectable options at the initial scan. Bounded
-  // polling re-checks every still-required, still-unfilled select a few times, stopping as
-  // soon as a poll resolves nothing new -- never brand/field-specific, just re-running the same
-  // generic fill plan against freshly-read options.
-  const MAX_DEPENDENT_SELECT_POLLS = 3;
+  // polling re-checks every still-required, still-unfilled select within a bounded budget --
+  // never brand/field-specific, just re-running the same generic fill plan against freshly-read
+  // options. An empty poll does not end it: the page's own population delay can outlast one poll
+  // interval, which made this a timing race on a loaded machine.
+  const MAX_DEPENDENT_SELECT_POLLS = 10;
   for (let attempt = 0; attempt < MAX_DEPENDENT_SELECT_POLLS; attempt += 1) {
     const pendingSelectIds = new Set(
       initialPlan
@@ -1200,7 +1201,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     if (pendingSelectIds.size === 0) break;
     await page.waitForTimeout(150);
     const { plan: pollPlan, filledIds: pollFilledIds } = await fillAllRequired(pendingSelectIds);
-    if (pollFilledIds.size === 0) break;
+    if (pollFilledIds.size === 0) continue;
     initialFilledIds = new Set([...initialFilledIds, ...pollFilledIds]);
     const pollById = new Map(pollPlan.map((p) => [p.descriptor.id, p]));
     initialPlan = initialPlan.map((p) => pollById.get(p.descriptor.id) ?? p);

@@ -1078,6 +1078,22 @@ test("fill_form: a real, non-placeholder preselected option on a required select
   }
 });
 
+test("fill_form: a dependent select populated slower than one poll interval is still filled, because an empty poll does not end the bounded polling", async () => {
+  const { baseUrl, close } = await startStaticServer(fixturesDir);
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${baseUrl}/lead-form-select-dependent.html?delay=700`);
+    const result = await executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [] });
+    assert.equal(result.success, true);
+    assert.ok(["petrol", "diesel"].includes(new URL(result.resultingUrl!).searchParams.get("engine") ?? ""));
+  } finally {
+    await page.close();
+    await browser.close();
+    await close();
+  }
+});
+
 test("fill_form: a dependent select that only gains real options after an earlier select changes is caught by bounded polling and filled", async () => {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
