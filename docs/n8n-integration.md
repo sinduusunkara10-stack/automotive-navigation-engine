@@ -1351,3 +1351,26 @@ run can never enter personal data regardless of what any reasoning provider prop
   "outputSchemaVersion": "1.5.0"
 }
 ```
+
+## 12. Authorised test-data lead runs: the optional-consent opt-in fallback
+
+Request schemaVersion `1.51.0` (outputSchemaVersion `1.53.0`) adds one optional safety flag.
+Default to `false` and never set it for a production run. For an authorised test-data
+`fill_form` journey whose test lead downstream teams filter, the Build node adds it to the
+`safety` block it already sends, beside the existing lead-form flags:
+
+```json
+"safety": {
+  "allowFormSubmission": true,
+  "allowPersonalDataEntry": true,
+  "allowOptionalConsentOptInFallbackForTest": true
+}
+```
+
+The flag is a JSON boolean (`true`), not the string `"true"`. It only permits one guarded second
+Submit with the optional marketing, profiling and partner consents accepted, when the first
+Submit (all optional consents declined) demonstrably never reached the business-submission
+stage. Read the outcome from `formPostSubmitDiagnostics.submitAttemptSummary`, for example
+`fallbackUsed`, `fallbackEligibilityChecks`, `firstAttemptOutcome`, `secondAttemptOutcome` and
+`totalSubmitAttempts`.
+

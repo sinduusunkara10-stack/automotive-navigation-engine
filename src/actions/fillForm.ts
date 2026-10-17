@@ -11,7 +11,7 @@ import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../f
 import { marketDataFor, resolveMarket, type SupportedLanguage } from "../forms/testData.js";
 import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
-import { resolveConsentGroups } from "../forms/consentGroups.js";
+import { applyOptionalConsentOptInForTest, resolveConsentGroups, type OptionalConsentOptInResult } from "../forms/consentGroups.js";
 import { callInPageFunction } from "../forms/inPageFunction.js";
 import {
   DEALER_RESULT_SELECTOR,
@@ -33,7 +33,22 @@ import {
 } from "../diagnostics/formDiscoveryDiagnostic.js";
 import { buildDealerLookupTrace } from "../diagnostics/dealerLookupDiagnostic.js";
 import { startDealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
-import { installSubmissionObserver, selectBusinessRequests, observeSubmissionOutcome, type PostSubmitObservation, type SubmissionObservationConfig } from "./submissionObserver.js";
+import {
+  installSubmissionObserver,
+  observeSubmissionOutcome,
+  resolveSubmissionObservationConfig,
+  selectBusinessRequests,
+  type PostSubmitObservation,
+  type SubmissionObservationConfig,
+} from "./submissionObserver.js";
+import {
+  MAX_SUBMIT_ATTEMPTS,
+  classifySubmitAttempt,
+  evaluateFallbackEligibility,
+  submitNeverAttemptedSummary,
+  type FallbackEligibilityChecks,
+  type SubmitAttemptSummary,
+} from "./submitAttemptPlan.js";
 import {
   computeFormScore,
   resolveAmbiguousFormSelection,
@@ -50,6 +65,7 @@ import { firstSelectableOption } from "../forms/vehicleSelection.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 const MAX_RETRIES = 2;
+const OPTIONAL_COMMERCIAL_PURPOSES = new Set(["optional_marketing", "optional_profiling", "optional_third_party"]);
 
 const SUCCESS_TEXT_MARKERS = [
   "thank you",
@@ -284,6 +300,12 @@ export interface ExecuteFillFormParams {
   activeSurfaceInfo?: ActiveSurfaceInfo;
   /** Overrides the post-submit observation windows (see submissionObserver.ts); production uses the defaults. */
   submissionObservationConfig?: SubmissionObservationConfig;
+  /**
+   * safety.allowOptionalConsentOptInFallbackForTest: permits one guarded second Submit with the
+   * optional commercial consents switched to accept, for an authorised test-data journey only
+   * (see submitAttemptPlan.ts for every guard). Omitted means false.
+   */
+  optionalConsentOptInFallbackForTest?: boolean;
 }
 
 /** Where a field's `required: true` came from -- see RawFieldDescriptor.requiredEvidence below. */
@@ -876,6 +898,7 @@ function scorePlan(plan: PlannedField[]): number {
 
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
   const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo, submissionObservationConfig } = params;
+  const fallbackFlagEnabled = params.optionalConsentOptInFallbackForTest === true;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
   const diagnosticRunId = taskId ?? "unknown";
   logFormDiscoveryDiagnosticEnabled({ runId: diagnosticRunId, taskId: diagnosticRunId });
@@ -1429,6 +1452,11 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
             ? "not retried: submit was never attempted, the pre-submit readiness gate failed (multiple unresolved postcode-purpose fields)"
             : "not retried: submit was never attempted, the pre-submit readiness gate failed",
         postSubmitObservation: null,
+        submitAttemptSummary: submitNeverAttemptedSummary(
+          fallbackFlagEnabled,
+          consentResult.consentGroupDiagnostics.some((g) => OPTIONAL_COMMERCIAL_PURPOSES.has(g.purpose)),
+          consentResult.optionalDeclineNotCommittedGroups.length === 0,
+        ),
       },
     };
   }
@@ -1472,7 +1500,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
   }
 
-  async function attemptSubmit(): Promise<{
+  const observationConfig = resolveSubmissionObservationConfig(submissionObservationConfig);
+  // With the test-only opt-in enabled, a silent first attempt is the one case that can lead to a
+  // second Submit, so it is watched up to the hard cap: a confirmation arriving after the 50 s
+  // minimum must never be mistaken for a cancellation and answered with a duplicate lead.
+  const firstAttemptConfig: SubmissionObservationConfig = fallbackFlagEnabled ? { ...observationConfig, baseWindowMs: observationConfig.hardCapMs } : observationConfig;
+
+  async function attemptSubmit(config: SubmissionObservationConfig): Promise<{
     postSubmit: PostSubmitDiagnostics;
     succeeded: boolean;
     afterUrl: string;
@@ -1536,7 +1570,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       ariaInvalidBefore,
       countConfirmationMarkers,
       detectChallenge: detectCaptchaOnPage,
-      config: submissionObservationConfig,
+      config,
     });
     const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
@@ -1566,7 +1600,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation };
   }
 
-  let attempt = await attemptSubmit();
+  let attempt = await attemptSubmit(firstAttemptConfig);
+  const firstAttempt = attempt;
+  let submitClicks = attempt.submitBlockedBeforeClick ? 0 : 1;
+  let correctiveRetriesAfterSubmit = 0;
   await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
 
   let retryDecision = "not needed: the first submit succeeded";
@@ -1602,8 +1639,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       retryDecision = "not retried: the submit was cancelled but no invalid field or uncommitted dealer selection was found to correct";
       break;
     }
+    if (submitClicks >= MAX_SUBMIT_ATTEMPTS) {
+      retryDecision = `not retried: the ceiling of ${MAX_SUBMIT_ATTEMPTS} Submit clicks per form was reached`;
+      break;
+    }
 
     retries += 1;
+    correctiveRetriesAfterSubmit += 1;
     if (dealerUncommitted) {
       await rerunDealerSearch("await_pending_lookup");
       retryDecision = `retried ${retries}/${MAX_RETRIES}: re-ran the dealer lookup/select/verify flow after an uncommitted selection`;
@@ -1611,8 +1653,70 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       await fillAllRequired(new Set(attempt.postSubmit.invalidFieldIds));
       retryDecision = `retried ${retries}/${MAX_RETRIES}: re-read live validation state and re-filled ${attempt.postSubmit.invalidFieldIds.join(", ")}`;
     }
-    attempt = await attemptSubmit();
+    attempt = await attemptSubmit(observationConfig);
+    if (!attempt.submitBlockedBeforeClick) submitClicks += 1;
   }
+
+  // Test-only optional-consent opt-in: one more Submit, only when the first attempt demonstrably
+  // never reached the business-submission stage (see submitAttemptPlan.ts). Never a third.
+  const optionalGroupsPresent = consentResult.consentGroupDiagnostics.some((g) => OPTIONAL_COMMERCIAL_PURPOSES.has(g.purpose));
+  const firstAttemptOutcome = classifySubmitAttempt(firstAttempt, consentResult.optionalDeclineNotCommittedGroups.length > 0);
+  let fallbackEligibilityChecks: FallbackEligibilityChecks | null = null;
+  let fallbackEligible = false;
+  let fallbackUsed = false;
+  let fallbackDecision = "not considered: the first submit succeeded";
+  let optIn: OptionalConsentOptInResult | null = null;
+  if (!firstAttempt.succeeded) {
+    const evaluated = evaluateFallbackEligibility({
+      firstAttempt,
+      firstAttemptOutcome,
+      challengeVisibleNow: await detectCaptchaOnPage(page).catch(() => true),
+      formVisibleNow: await form.isVisible().catch(() => false),
+      submitEnabledNow: await submit.isEnabled().catch(() => false),
+      optionalConsentGroupPresent: optionalGroupsPresent,
+      fallbackFlagEnabled,
+      submitAttemptsSoFar: submitClicks,
+      correctiveRetriesAfterSubmit,
+    });
+    fallbackEligibilityChecks = evaluated.checks;
+    fallbackEligible = evaluated.eligible;
+    const failed = Object.entries(evaluated.checks).filter(([, ok]) => !ok).map(([name]) => name);
+    if (!fallbackEligible) {
+      fallbackDecision = `not used: ${failed.join(", ")} did not hold`;
+    } else {
+      optIn = await applyOptionalConsentOptInForTest(form, language, fieldByIndex);
+      if (!optIn.allVerified) {
+        fallbackDecision = "not used: at least one optional consent did not read back as accepted, so Submit was not clicked again";
+      } else {
+        fallbackUsed = true;
+        fallbackDecision = "used once: test_only_optional_consent_fallback -- every optional consent read back as accepted before the second Submit";
+        retryDecision = `retried once with the test-only optional-consent opt-in after the first attempt was classified ${firstAttemptOutcome}`;
+        attempt = await attemptSubmit(observationConfig);
+        if (!attempt.submitBlockedBeforeClick) submitClicks += 1;
+      }
+    }
+  }
+  const submitAttemptSummary: SubmitAttemptSummary = {
+    firstAttemptConsentMode: optionalGroupsPresent ? "decline" : "no_optional_consent_groups",
+    firstAttemptConsentCommitted: consentResult.optionalDeclineNotCommittedGroups.length === 0,
+    firstAttemptObservationMs: firstAttempt.observation?.totalObservationMs ?? null,
+    firstAttemptBusinessRequestDetected: firstAttempt.observation?.businessRequestDetected ?? false,
+    firstAttemptOutcome,
+    fallbackFlagEnabled,
+    fallbackEligibilityChecks,
+    fallbackEligible,
+    fallbackUsed,
+    fallbackOutcomeTag: fallbackUsed ? "test_only_optional_consent_fallback" : null,
+    fallbackDecision,
+    fallbackConsentGroups: optIn?.groups ?? [],
+    secondAttemptConsentMode: fallbackUsed ? "opt_in_test_only" : null,
+    secondAttemptObservationMs: attempt !== firstAttempt ? (attempt.observation?.totalObservationMs ?? null) : null,
+    secondAttemptBusinessRequestDetected: attempt !== firstAttempt ? (attempt.observation?.businessRequestDetected ?? false) : null,
+    secondAttemptOutcome: attempt !== firstAttempt ? classifySubmitAttempt(attempt, false) : null,
+    confirmationDetectedAtMs: attempt.observation?.confirmationDetectedAtMs ?? null,
+    totalSubmitAttempts: submitClicks,
+    firstAttemptObservation: attempt !== firstAttempt ? firstAttempt.observation : null,
+  };
 
   // Always present, even when the dealer_search decision never ran at all (e.g. no dealer
   // widget was structurally detected on this form) -- a promised diagnostic field must appear
@@ -1709,6 +1813,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     retryEligible,
     retryReason: retryDecision,
     postSubmitObservation: attempt.observation,
+    submitAttemptSummary,
   };
 
   if (!attempt.succeeded) {

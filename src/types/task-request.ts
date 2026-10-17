@@ -122,6 +122,15 @@ export interface Safety {
    * surface closing/returning. Omitted means the engine's own small fixed default (5).
    */
   maxAdoptedSurfacesPerRun?: number;
+  /**
+   * Authorised test-data journeys only: permits fill_form one guarded second Submit with the
+   * optional marketing/profiling/third-party consents switched to accept, and only when the first
+   * Submit (with every optional consent declined) demonstrably never reached the business-
+   * submission stage -- see src/actions/submitAttemptPlan.ts for every guard. Required processing
+   * and terms controls are never changed by it. Never set this for a production run. Omitted
+   * means false.
+   */
+  allowOptionalConsentOptInFallbackForTest?: boolean;
 }
 
 /**
@@ -139,7 +148,7 @@ export interface Settling {
 }
 
 export interface TaskRequest {
-  schemaVersion: "1.50.0";
+  schemaVersion: "1.51.0";
   taskId: string;
   objective: string;
   startUrl: string;
@@ -163,7 +172,7 @@ export interface TaskRequest {
   safety: Safety;
   /** See Settling above. Omitted means every settle point uses the engine default ceiling. */
   settling?: Settling;
-  outputSchemaVersion: "1.52.0";
+  outputSchemaVersion: "1.53.0";
   metadata?: Record<string, string | number | boolean>;
 }
 

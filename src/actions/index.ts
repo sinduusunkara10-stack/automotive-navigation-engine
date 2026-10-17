@@ -48,6 +48,8 @@ export interface DispatchParams {
   taskId?: string;
   /** Diagnostic-only, only meaningful for a `fill_form` action -- the pre-dispatch observation's own activeSurface. */
   activeSurfaceInfo?: ActiveSurfaceInfo;
+  /** Only meaningful for a `fill_form` action -- task.safety.allowOptionalConsentOptInFallbackForTest, see ExecuteFillFormParams in actions/fillForm.ts. */
+  optionalConsentOptInFallbackForTest?: boolean;
 }
 
 function safePageUrl(page: Page): string | undefined {
@@ -116,6 +118,7 @@ async function dispatchByType(params: DispatchParams): Promise<ActionExecutorRes
     formSelectionAmbiguityResolver,
     taskId,
     activeSurfaceInfo,
+    optionalConsentOptInFallbackForTest,
   } = params;
   switch (action.type) {
     case "click":
@@ -165,6 +168,7 @@ async function dispatchByType(params: DispatchParams): Promise<ActionExecutorRes
         selectionAmbiguityResolver: formSelectionAmbiguityResolver,
         taskId,
         activeSurfaceInfo,
+        optionalConsentOptInFallbackForTest,
       });
     case "stop_success":
       return executeStopSuccess();

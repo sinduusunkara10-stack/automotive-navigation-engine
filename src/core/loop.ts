@@ -2002,6 +2002,7 @@ export async function runStep(params: {
           // never read by any scoring/selection/fill logic.
           taskId: effectiveAction.type === "fill_form" ? task.taskId : undefined,
           activeSurfaceInfo: effectiveAction.type === "fill_form" ? observation.activeSurface : undefined,
+          optionalConsentOptInFallbackForTest: effectiveAction.type === "fill_form" ? task.safety.allowOptionalConsentOptInFallbackForTest === true : undefined,
         });
 
   // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured

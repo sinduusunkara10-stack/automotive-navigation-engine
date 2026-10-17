@@ -20,6 +20,9 @@ export type RunStatus =
 
 /** Wire shape of actions/submissionObserver.ts's PostSubmitObservation -- timings are ms from the submit click. */
 export interface PostSubmitObservationWire {
+  /** Kept even through silent periods; only a decisive terminal signal ends observation sooner. */
+  minimumObservationMs: number;
+  pollIntervalMs: number;
   baseWindowMs: number;
   extensionMs: number;
   hardCapMs: number;
@@ -44,8 +47,88 @@ export interface PostSubmitObservationWire {
   confirmationDetectedAtMs: number | null;
   successSignals: ("url_change" | "confirmation_message" | "success_status_surface" | "virtual_page_success_event" | "form_replaced_after_accepted_business_response")[];
   formStillPresentAtEnd: boolean;
+  /** Progress evidence still present when observation ended. */
+  finalProgressReasons: ("business_request_in_flight" | "submit_control_disabled" | "loading_indicator_active" | "dom_mutations_continuing" | "form_replacement_in_progress")[];
+  submitControlDisabledAtEnd: boolean;
   terminalState: "succeeded" | "validation_failed" | "server_rejected" | "server_error" | "blocked_or_challenged" | "unknown_outcome";
   terminalReason: string;
+}
+
+export type ConsentVerificationResultWire = "verified" | "not_committed" | "contradicted";
+
+/** Wire shape of forms/consentGroups.ts's ConsentActivationDiagnostic -- never a label, value or question text. */
+export interface ConsentActivationDiagnosticWire {
+  intendedAnswer: "decline" | "accept" | "policy_option";
+  attempts: {
+    clickedElementType: "native_input" | "label" | "wrapper" | "keyboard" | "programmatic";
+    activationMethod: "pointer_click" | "focus_and_space" | "dispatched_click_input_change";
+    verificationResult: ConsentVerificationResultWire;
+  }[];
+  clickedElementType: "native_input" | "label" | "wrapper" | "keyboard" | "programmatic" | null;
+  activationMethod: "pointer_click" | "focus_and_space" | "dispatched_click_input_change" | null;
+  intendedOptionCheckedBefore: boolean;
+  intendedOptionCheckedAfter: boolean;
+  verificationMethods: ("native_checked" | "radio_name_selected_value" | "checked_attribute" | "aria_checked" | "selected_class" | "framework_state")[];
+  hiddenConsentFieldChanged: boolean | null;
+  verificationResult: ConsentVerificationResultWire;
+}
+
+export type SubmitAttemptOutcomeWire =
+  | "succeeded"
+  | "submit_blocked_before_click"
+  | "validation_failed"
+  | "server_rejected"
+  | "server_error"
+  | "blocked_or_challenged"
+  | "business_request_pending"
+  | "business_request_accepted_unconfirmed"
+  | "business_request_outcome_unknown"
+  | "cancelled_before_business_request"
+  | "consent_state_not_committed";
+
+/** Wire shape of actions/submitAttemptPlan.ts's SubmitAttemptSummary. */
+export interface SubmitAttemptSummaryWire {
+  firstAttemptConsentMode: "decline" | "no_optional_consent_groups";
+  firstAttemptConsentCommitted: boolean;
+  firstAttemptObservationMs: number | null;
+  firstAttemptBusinessRequestDetected: boolean;
+  firstAttemptOutcome: SubmitAttemptOutcomeWire;
+  fallbackFlagEnabled: boolean;
+  fallbackEligibilityChecks: {
+    observedAtLeastMinimum: boolean;
+    noConfirmation: boolean;
+    noBusinessRequestStarted: boolean;
+    noBusinessRequestPending: boolean;
+    noBusinessAcceptance: boolean;
+    noDelayedSuccessEmerging: boolean;
+    noValidationOrRejection: boolean;
+    noChallengeDuplicateOrRateLimit: boolean;
+    formPresentAndUsable: boolean;
+    firstAttemptClassificationEligible: boolean;
+    optionalConsentGroupPresent: boolean;
+    fallbackFlagEnabled: boolean;
+    noPreviousRetry: boolean;
+  } | null;
+  fallbackEligible: boolean;
+  fallbackUsed: boolean;
+  fallbackOutcomeTag: "test_only_optional_consent_fallback" | null;
+  fallbackDecision: string;
+  fallbackConsentGroups: {
+    groupId: string;
+    purpose: "optional_marketing" | "optional_profiling" | "optional_third_party" | "required_privacy_processing" | "terms_and_conditions" | "customer_qualification" | "journey_intent" | "ambiguous";
+    intendedAnswer: "accept";
+    checkedBefore: "positive" | "negative" | "unknown" | "none";
+    checkedAfter: "positive" | "negative" | "unknown" | "none";
+    verified: boolean;
+    activation: ConsentActivationDiagnosticWire | null;
+  }[];
+  secondAttemptConsentMode: "opt_in_test_only" | null;
+  secondAttemptObservationMs: number | null;
+  secondAttemptBusinessRequestDetected: boolean | null;
+  secondAttemptOutcome: SubmitAttemptOutcomeWire | null;
+  confirmationDetectedAtMs: number | null;
+  totalSubmitAttempts: number;
+  firstAttemptObservation: PostSubmitObservationWire | null;
 }
 
 export interface InteractiveElement {
@@ -842,11 +925,17 @@ export interface ActionResult {
       selectionReason?: string;
       /** Present only when not resolved: why this group was left unresolved rather than guessed. */
       unresolvedReason?: string;
+      /** How the intended option was activated and read back; present whenever an interaction was attempted. */
+      activation?: ConsentActivationDiagnosticWire;
+      /** Set when an optional commercial purpose's decline never read back as selected. */
+      outcomeTag?: "consent_decline_not_committed";
     }[];
     consentGroupsCompleted: number;
     conditionalConsentGroupsRevealed: number;
     consentRescanCount: number;
     unresolvedRequiredConsentGroups: string[];
+    /** Optional commercial groups whose decline was attempted but never read back as selected. */
+    optionalDeclineNotCommittedGroups: string[];
   };
   /**
    * Generic location/postcode-gate discovery/resolution diagnostics (see
@@ -960,6 +1049,8 @@ export interface ActionResult {
     retryReason: string;
     /** The adaptive post-submit observation of the last submit attempt (see actions/submissionObserver.ts). Null when submit was never clicked. */
     postSubmitObservation: PostSubmitObservationWire | null;
+    /** Both Submit attempts (at most two), the test-only opt-in fallback's guards and its outcome. */
+    submitAttemptSummary: SubmitAttemptSummaryWire;
   };
   /**
    * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets
@@ -1960,7 +2051,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.52.0";
+  schemaVersion: "1.53.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

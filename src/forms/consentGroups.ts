@@ -13,6 +13,7 @@ import { callInPageFunction } from "./inPageFunction.js";
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 const CONSENT_LABEL_ATTR = "data-nav-engine-consent-label";
+const CONSENT_WRAPPER_ATTR = "data-nav-engine-consent-wrapper";
 
 export type QuestionSource = "fieldset_legend" | "radiogroup_label" | "aria_reference" | "group_container_text" | "preceding_text" | "nearest_heading" | "none";
 
@@ -24,8 +25,12 @@ export interface ConsentGroupMember {
   value: string;
   /** The radio itself, or its associated label for a custom-styled control, is rendered. */
   visible: boolean;
-  /** The radio input itself is rendered (false for a custom control whose input is hidden behind its label). */
+  /** The radio input itself is rendered on the document and not visually clipped, so it can take a direct pointer click. */
   inputVisible: boolean;
+  /** The option's associated label is rendered on the document. */
+  labelVisible: boolean;
+  /** The option's own component wrapper (an ancestor holding this option and no other radio) is rendered on the document and distinct from the label. */
+  wrapperVisible: boolean;
   checked: boolean;
 }
 
@@ -52,6 +57,18 @@ const DISCOVER_SOURCE = `(formEl, attrs) => {
     const st = window.getComputedStyle(el);
     return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
   };
+  const docW = Math.max(document.documentElement.scrollWidth, window.innerWidth);
+  const docH = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+  const onDocument = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.right + window.scrollX > 0 && r.bottom + window.scrollY > 0 && r.left + window.scrollX < docW && r.top + window.scrollY < docH;
+  };
+  const clipped = (el) => {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    return (r.width <= 2 && r.height <= 2) || /rect\\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\\)/.test(st.clip || "") || /inset\\(50%/.test(st.clipPath || "");
+  };
+  const shown = (el) => Boolean(el) && rendered(el) && onDocument(el) && !clipped(el);
   const textOfIds = (ids) =>
     norm((ids || "").split(/\\s+/).filter(Boolean).map((id) => { const el = document.getElementById(id); return el ? el.textContent : ""; }).join(" "));
   const radios = Array.from(formEl.querySelectorAll('input[type="radio"]'));
@@ -71,9 +88,19 @@ const DISCOVER_SOURCE = `(formEl, attrs) => {
       const labelEl = byFor || m.closest("label");
       const fieldId = m.getAttribute(attr) || "";
       if (labelEl && fieldId) labelEl.setAttribute(attrs.labelAttr, fieldId);
-      const label = norm((labelEl && labelEl.textContent) || m.getAttribute("aria-label") || textOfIds(m.getAttribute("aria-labelledby")) || "");
-      const inputVisible = rendered(m);
-      return { fieldId, label, value: m.value || "", inputVisible, visible: inputVisible || rendered(labelEl), checked: m.checked, el: m };
+      const exclusive = (el) => Array.from(el.querySelectorAll('input[type="radio"]')).every((r) => r === m);
+      const usableWrapper = (el) => Boolean(el) && el !== formEl && formEl.contains(el) && exclusive(el);
+      let wrapper = labelEl ? (labelEl.contains(m) ? labelEl : labelEl.parentElement) : m.parentElement;
+      while (wrapper && wrapper !== formEl && !wrapper.contains(m)) wrapper = wrapper.parentElement;
+      if (!usableWrapper(wrapper)) wrapper = null;
+      while (wrapper && (wrapper === labelEl || !rendered(wrapper)) && usableWrapper(wrapper.parentElement)) wrapper = wrapper.parentElement;
+      if (wrapper === labelEl) wrapper = null;
+      if (wrapper && fieldId) wrapper.setAttribute(attrs.wrapperAttr, fieldId);
+      const label = norm((labelEl && labelEl.textContent) || m.getAttribute("aria-label") || textOfIds(m.getAttribute("aria-labelledby")) || (wrapper && wrapper.textContent) || "");
+      const inputVisible = shown(m);
+      const labelVisible = shown(labelEl);
+      const wrapperVisible = shown(wrapper);
+      return { fieldId, label, value: m.value || "", inputVisible, labelVisible, wrapperVisible, visible: inputVisible || labelVisible || wrapperVisible, checked: m.checked, el: m };
     });
     const optionTexts = new Set(members.map((m) => m.label.toLowerCase()).filter(Boolean));
     const stripOptions = (text) => {
@@ -138,7 +165,7 @@ const DISCOVER_SOURCE = `(formEl, attrs) => {
     const checked = members.find((m) => m.checked);
     results.push({
       groupId,
-      members: members.map((m) => ({ fieldId: m.fieldId, label: m.label, value: m.value, visible: m.visible, inputVisible: m.inputVisible, checked: m.checked })),
+      members: members.map((m) => ({ fieldId: m.fieldId, label: m.label, value: m.value, visible: m.visible, inputVisible: m.inputVisible, labelVisible: m.labelVisible, wrapperVisible: m.wrapperVisible, checked: m.checked })),
       memberFieldIds: members.map((m) => m.fieldId),
       memberLabels: members.map((m) => m.label),
       visible: members.some((m) => m.visible),
@@ -157,14 +184,15 @@ const DISCOVER_SOURCE = `(formEl, attrs) => {
  * the actual question lives elsewhere, so the field-level keyword matcher can never identify
  * these. Groups by the native `name`, then associates the question through fieldset/legend,
  * role="radiogroup" labelling, aria references, the group's own exclusive container, preceding
- * text, and finally the nearest preceding heading. A member counts as visible when the radio or
- * its own label is rendered, so a custom-styled control is not lost and a hidden responsive
- * duplicate is.
+ * text, and finally the nearest preceding heading. A member counts as visible when the radio, its
+ * label or its own component wrapper is rendered on the document and not clipped away, so a
+ * custom-styled control is not lost while a hidden responsive duplicate or an off-screen copy is.
  */
 export async function discoverConsentGroups(form: Locator): Promise<ConsentGroupDescriptor[]> {
   return callInPageFunction<ConsentGroupDescriptor[]>(form, "__navEngineDiscoverConsentGroups", DISCOVER_SOURCE, {
     fieldAttr: FIELD_INDEX_ATTR,
     labelAttr: CONSENT_LABEL_ATTR,
+    wrapperAttr: CONSENT_WRAPPER_ATTR,
   }).catch(() => []);
 }
 
@@ -264,6 +292,10 @@ export interface ConsentGroupDiagnostic {
   classificationEvidence: string;
   selectionReason?: string;
   unresolvedReason?: string;
+  /** How the intended option was activated and read back; present whenever an interaction was attempted. */
+  activation?: ConsentActivationDiagnostic;
+  /** Set when an optional commercial purpose's decline could not be read back as selected. */
+  outcomeTag?: "consent_decline_not_committed";
 }
 
 export interface ConsentGroupResolutionResult {
@@ -274,6 +306,8 @@ export interface ConsentGroupResolutionResult {
   conditionalConsentGroupsRevealed: number;
   consentRescanCount: number;
   unresolvedRequiredConsentGroups: string[];
+  /** Optional commercial groups whose decline was attempted but never read back as selected. */
+  optionalDeclineNotCommittedGroups: string[];
 }
 
 const MAX_RESCANS = 5;
@@ -292,6 +326,8 @@ interface GroupOutcome {
   completed: boolean;
   selectionReason?: string;
   unresolvedReason?: string;
+  activation?: ConsentActivationDiagnostic;
+  outcomeTag?: "consent_decline_not_committed";
 }
 
 function checkedPolarity(group: ConsentGroupDescriptor): OptionPolarity | "none" {
@@ -299,16 +335,245 @@ function checkedPolarity(group: ConsentGroupDescriptor): OptionPolarity | "none"
   return checked ? optionPolarity(checked.label, checked.value) : "none";
 }
 
-async function activateMember(form: Locator, fieldByIndex: (form: Locator, index: string) => Promise<Locator>, member: ConsentGroupMember): Promise<boolean> {
+export type ConsentActivationElement = "native_input" | "label" | "wrapper" | "keyboard" | "programmatic";
+export type ConsentActivationMethod = "pointer_click" | "focus_and_space" | "dispatched_click_input_change";
+export type ConsentVerificationMethod =
+  | "native_checked"
+  | "radio_name_selected_value"
+  | "checked_attribute"
+  | "aria_checked"
+  | "selected_class"
+  | "framework_state";
+export type ConsentVerificationResult = "verified" | "not_committed" | "contradicted";
+export type ConsentIntendedAnswer = "decline" | "accept" | "policy_option";
+
+export interface ConsentActivationDiagnostic {
+  intendedAnswer: ConsentIntendedAnswer;
+  /** Every activation tried, in order, until the intended option read back as selected. */
+  attempts: { clickedElementType: ConsentActivationElement; activationMethod: ConsentActivationMethod; verificationResult: ConsentVerificationResult }[];
+  /** The last activation tried; null when no activation route was available at all. */
+  clickedElementType: ConsentActivationElement | null;
+  activationMethod: ConsentActivationMethod | null;
+  intendedOptionCheckedBefore: boolean;
+  intendedOptionCheckedAfter: boolean;
+  /** Which independent state signals read the intended option back as selected. */
+  verificationMethods: ConsentVerificationMethod[];
+  /** Whether a hidden input inside the group's own container changed value -- recorded only, never a value. Null when the container holds no hidden input. */
+  hiddenConsentFieldChanged: boolean | null;
+  verificationResult: ConsentVerificationResult;
+}
+
+interface SelectionSignals {
+  nativeChecked: boolean;
+  selectedValueMatches: boolean;
+  groupSelectedOther: boolean;
+  checkedAttribute: boolean;
+  aria: boolean;
+  ariaFalse: boolean;
+  ariaExposed: boolean;
+  selectedClass: boolean;
+  framework: boolean;
+  frameworkExposed: boolean;
+  otherAria: boolean;
+  otherSelectedClass: boolean;
+  otherFramework: boolean;
+  hiddenCount: number;
+  hiddenHash: number;
+}
+
+const VERIFY_SOURCE = `(formEl, a) => {
+  const input = formEl.querySelector("[" + a.fieldAttr + '="' + CSS.escape(a.fieldId) + '"]');
+  if (!input) return null;
+  const name = input.getAttribute("name");
+  const members = Array.from(formEl.querySelectorAll('input[type="radio"]')).filter((r) => r.getAttribute("name") === name);
+  const partsOf = (r) => {
+    const id = r.getAttribute(a.fieldAttr) || "";
+    const label = id ? formEl.querySelector("[" + a.labelAttr + '="' + CSS.escape(id) + '"]') : null;
+    const wrapper = id ? formEl.querySelector("[" + a.wrapperAttr + '="' + CSS.escape(id) + '"]') : null;
+    return [r, label, wrapper].filter(Boolean);
+  };
+  const withDescendants = (els) => {
+    const out = [];
+    els.forEach((e) => { out.push(e); e.querySelectorAll("[aria-checked], [data-state], [data-checked], [data-selected]").forEach((d) => out.push(d)); });
+    return out;
+  };
+  const selectedToken = (token) => /(^|[_-])(checked|selected|active)$/i.test(token) && !/(^|[_-])(un|not|non|no)[_-]?(checked|selected|active)$/i.test(token);
+  const hasSelectedClass = (e) => typeof e.className === "string" && e.className.split(/\\s+/).some(selectedToken);
+  const fwOn = (e) => ["checked", "on", "selected", "active"].includes((e.getAttribute("data-state") || "").toLowerCase()) || e.getAttribute("data-checked") === "true" || e.getAttribute("data-selected") === "true";
+  const fwAttr = (e) => e.hasAttribute("data-state") || e.hasAttribute("data-checked") || e.hasAttribute("data-selected");
+  const signalsOf = (r) => {
+    const parts = partsOf(r);
+    const all = withDescendants(parts);
+    return {
+      aria: all.some((e) => e.getAttribute("aria-checked") === "true"),
+      ariaFalse: all.some((e) => e.getAttribute("aria-checked") === "false"),
+      ariaExposed: all.some((e) => e.hasAttribute("aria-checked")),
+      cls: parts.slice(1).some(hasSelectedClass),
+      fw: all.some(fwOn),
+      fwExposed: all.some(fwAttr),
+    };
+  };
+  const own = signalsOf(input);
+  const others = members.filter((r) => r !== input && r.value !== input.value);
+  const otherSignals = others.map(signalsOf);
+  const selected = members.find((r) => r.checked) || null;
+  let selectedValueMatches = false;
+  const ownerForm = input.form;
+  if (ownerForm && name) {
+    try { selectedValueMatches = input.value !== "" && new FormData(ownerForm).get(name) === input.value; } catch (e) { selectedValueMatches = false; }
+  }
+  let container = input.parentElement;
+  while (container && container !== formEl && !members.every((m) => container.contains(m))) container = container.parentElement;
+  const hidden = container && container !== formEl ? Array.from(container.querySelectorAll('input[type="hidden"]')) : [];
+  let hash = 2166136261;
+  hidden.map((h) => h.value || "").join("\\u0001").split("").forEach((ch) => { hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619) >>> 0; });
+  return {
+    nativeChecked: input.checked,
+    selectedValueMatches,
+    groupSelectedOther: selected !== null && selected !== input && selected.value !== input.value,
+    checkedAttribute: input.hasAttribute("checked") && !others.some((o) => o.hasAttribute("checked")),
+    aria: own.aria,
+    ariaFalse: own.ariaFalse,
+    ariaExposed: own.ariaExposed || otherSignals.some((o) => o.ariaExposed),
+    selectedClass: own.cls,
+    framework: own.fw,
+    frameworkExposed: own.fwExposed || otherSignals.some((o) => o.fwExposed),
+    otherAria: otherSignals.some((o) => o.aria),
+    otherSelectedClass: otherSignals.some((o) => o.cls),
+    otherFramework: otherSignals.some((o) => o.fw),
+    hiddenCount: hidden.length,
+    hiddenHash: hash,
+  };
+}`;
+
+async function readSelectionSignals(form: Locator, fieldId: string): Promise<SelectionSignals | null> {
+  return callInPageFunction<SelectionSignals | null>(form, "__navEngineVerifyConsentOption", VERIFY_SOURCE, {
+    fieldAttr: FIELD_INDEX_ATTR,
+    labelAttr: CONSENT_LABEL_ATTR,
+    wrapperAttr: CONSENT_WRAPPER_ATTR,
+    fieldId,
+  }).catch(() => null);
+}
+
+/**
+ * Reads the intended option back from independent state signals. Native state (the input's own
+ * checked flag, or the form's selected value for the shared name) or a component state (ARIA,
+ * framework data attribute, selected class on the option's own label/wrapper) can verify, but
+ * never while another option of the group reads as selected. `strict` (the test-only opt-in)
+ * needs native state, plus every component state the widget exposes.
+ */
+export function assessSelection(signals: SelectionSignals | null, strict: boolean): { result: ConsentVerificationResult; methods: ConsentVerificationMethod[] } {
+  if (!signals) return { result: "not_committed", methods: [] };
+  const methods: ConsentVerificationMethod[] = [];
+  if (signals.nativeChecked) methods.push("native_checked");
+  if (signals.selectedValueMatches) methods.push("radio_name_selected_value");
+  if (signals.checkedAttribute) methods.push("checked_attribute");
+  if (signals.aria) methods.push("aria_checked");
+  if (signals.selectedClass) methods.push("selected_class");
+  if (signals.framework) methods.push("framework_state");
+  const nativeOk = signals.nativeChecked || signals.selectedValueMatches;
+  const componentOk = signals.aria || signals.framework || signals.selectedClass;
+  const contradicted =
+    signals.groupSelectedOther ||
+    (signals.ariaFalse && !signals.aria) ||
+    signals.otherAria ||
+    signals.otherFramework ||
+    (signals.otherSelectedClass && !signals.selectedClass);
+  if (contradicted) return { result: (nativeOk || componentOk) ? "contradicted" : "not_committed", methods };
+  if (strict) {
+    const ok = nativeOk && (!signals.ariaExposed || signals.aria) && (!signals.frameworkExposed || signals.framework);
+    return { result: ok ? "verified" : "not_committed", methods };
+  }
+  return { result: nativeOk || componentOk ? "verified" : "not_committed", methods };
+}
+
+const RECONCILE_WINDOW_MS = 1_200;
+const RECONCILE_POLL_MS = 100;
+const RECONCILE_STABLE_MS = 250;
+
+async function waitForReconciledSelection(page: Page, form: Locator, fieldId: string, strict: boolean): Promise<{ result: ConsentVerificationResult; methods: ConsentVerificationMethod[]; signals: SelectionSignals | null }> {
+  const deadline = Date.now() + RECONCILE_WINDOW_MS;
+  let last = { result: "not_committed" as ConsentVerificationResult, methods: [] as ConsentVerificationMethod[], signals: null as SelectionSignals | null };
+  while (true) {
+    const signals = await readSelectionSignals(form, fieldId);
+    last = { ...assessSelection(signals, strict), signals };
+    if (last.result === "verified") {
+      // A framework that re-renders from its own state can revert a native change a moment later.
+      await page.waitForTimeout(RECONCILE_STABLE_MS);
+      const again = await readSelectionSignals(form, fieldId);
+      const settled = assessSelection(again, strict);
+      if (settled.result === "verified") return { ...settled, signals: again };
+      last = { ...settled, signals: again };
+    }
+    if (Date.now() >= deadline) return last;
+    await page.waitForTimeout(RECONCILE_POLL_MS);
+  }
+}
+
+async function activateMember(
+  form: Locator,
+  fieldByIndex: (form: Locator, index: string) => Promise<Locator>,
+  member: ConsentGroupMember,
+  intendedAnswer: ConsentIntendedAnswer,
+  strict = false,
+): Promise<{ verified: boolean; activation: ConsentActivationDiagnostic }> {
+  const page = form.page();
   const input = await fieldByIndex(form, member.fieldId);
   const label = form.locator(`[${CONSENT_LABEL_ATTR}="${member.fieldId}"]`).first();
-  // A real click even on an already-checked option: some widgets record the answer only from their
-  // own click handler, so a pre-rendered default is not necessarily a committed one.
-  if (member.inputVisible) await input.click({ timeout: 3_000 }).catch(() => {});
-  else await label.click({ timeout: 3_000 }).catch(() => {});
-  if (await input.isChecked().catch(() => false)) return true;
-  await input.check({ force: true, timeout: 3_000 }).catch(() => {});
-  return input.isChecked().catch(() => false);
+  const wrapper = form.locator(`[${CONSENT_WRAPPER_ATTR}="${member.fieldId}"]`).first();
+  const before = await readSelectionSignals(form, member.fieldId);
+  const steps: { clickedElementType: ConsentActivationElement; activationMethod: ConsentActivationMethod; run: () => Promise<unknown> }[] = [];
+  // An off-screen or clipped native input (a common "visually hidden" custom-radio pattern) cannot
+  // take a real pointer click: Playwright waits out its timeout and the label is never tried.
+  if (member.inputVisible) steps.push({ clickedElementType: "native_input", activationMethod: "pointer_click", run: () => input.click({ timeout: 1_500 }) });
+  if (member.labelVisible) steps.push({ clickedElementType: "label", activationMethod: "pointer_click", run: () => label.click({ timeout: 1_500 }) });
+  if (member.wrapperVisible) steps.push({ clickedElementType: "wrapper", activationMethod: "pointer_click", run: () => wrapper.click({ timeout: 1_500 }) });
+  steps.push({
+    clickedElementType: "keyboard",
+    activationMethod: "focus_and_space",
+    run: async () => {
+      await input.focus({ timeout: 1_000 });
+      await page.keyboard.press("Space");
+    },
+  });
+  steps.push({
+    clickedElementType: "programmatic",
+    activationMethod: "dispatched_click_input_change",
+    // HTMLElement.click() on a radio runs the browser's own activation behaviour: click, then input
+    // and change only if the click was not cancelled -- never a forced checked flag.
+    run: () => input.evaluate((el: Element) => (el as HTMLElement).click(), undefined, { timeout: 1_000 }),
+  });
+
+  const attempts: ConsentActivationDiagnostic["attempts"] = [];
+  let final: { result: ConsentVerificationResult; methods: ConsentVerificationMethod[]; signals: SelectionSignals | null } = {
+    result: "not_committed",
+    methods: [],
+    signals: before,
+  };
+  for (const step of steps) {
+    // A real activation even on an already-checked option: some widgets record the answer only from
+    // their own click handler, so a pre-rendered default is not necessarily a committed one.
+    await step.run().catch(() => {});
+    final = await waitForReconciledSelection(page, form, member.fieldId, strict);
+    attempts.push({ clickedElementType: step.clickedElementType, activationMethod: step.activationMethod, verificationResult: final.result });
+    if (final.result === "verified") break;
+  }
+  const after = final.signals;
+  const lastAttempt = attempts[attempts.length - 1];
+  return {
+    verified: final.result === "verified",
+    activation: {
+      intendedAnswer,
+      attempts,
+      clickedElementType: lastAttempt?.clickedElementType ?? null,
+      activationMethod: lastAttempt?.activationMethod ?? null,
+      intendedOptionCheckedBefore: before?.nativeChecked ?? false,
+      intendedOptionCheckedAfter: after?.nativeChecked ?? false,
+      verificationMethods: final.methods,
+      hiddenConsentFieldChanged: before && after && (before.hiddenCount > 0 || after.hiddenCount > 0) ? before.hiddenHash !== after.hiddenHash : null,
+      verificationResult: final.result,
+    },
+  };
 }
 
 /**
@@ -387,12 +652,15 @@ export async function resolveConsentGroups(
         ...(resolved
           ? { selectionReason: outcome.selectionReason ?? "already selected on the page; left as is" }
           : { unresolvedReason: outcome.unresolvedReason ?? "left unanswered" }),
+        ...(outcome.activation ? { activation: outcome.activation } : {}),
+        ...(outcome.outcomeTag ? { outcomeTag: outcome.outcomeTag } : {}),
       };
     }),
     consentGroupsCompleted: [...outcomes.values()].filter((o) => o.completed && o.interaction !== "left_untouched").length,
     conditionalConsentGroupsRevealed: conditionalRevealedCount,
     consentRescanCount: rescanCount,
     unresolvedRequiredConsentGroups: unresolvedRequired.map((g) => g.groupId),
+    optionalDeclineNotCommittedGroups: [...outcomes.entries()].filter(([, o]) => o.outcomeTag === "consent_decline_not_committed").map(([id]) => id),
   };
 }
 
@@ -441,11 +709,19 @@ async function resolveOneGroup(
     completed,
     ...(completed ? { selectionReason: reason } : { unresolvedReason: reason }),
   });
-  const act = async (target: ConsentGroupMember, interaction: ConsentInteraction, reason: string): Promise<GroupOutcome> => {
-    const verified = await activateMember(form, fieldByIndex, target);
+  const act = async (target: ConsentGroupMember, interaction: ConsentInteraction, reason: string, intendedAnswer: ConsentIntendedAnswer): Promise<GroupOutcome> => {
+    const { verified, activation } = await activateMember(form, fieldByIndex, target, intendedAnswer);
     return verified
-      ? { ...base, interaction, checkedStateVerified: true, completed: true, selectionReason: reason }
-      : { ...base, interaction, checkedStateVerified: false, completed: false, unresolvedReason: "the intended option did not read back as checked after the interaction" };
+      ? { ...base, interaction, checkedStateVerified: true, completed: true, selectionReason: reason, activation }
+      : {
+          ...base,
+          interaction,
+          checkedStateVerified: false,
+          completed: false,
+          unresolvedReason: `the intended option did not read back as selected after ${activation.attempts.length} activation routes (${activation.verificationResult})`,
+          activation,
+          ...(intendedAnswer === "decline" ? { outcomeTag: "consent_decline_not_committed" as const } : {}),
+        };
   };
 
   if (OPTIONAL_COMMERCIAL_PURPOSES.has(classified.purpose)) {
@@ -453,7 +729,7 @@ async function resolveOneGroup(
     if (!decline) return untouched("optional commercial purpose, but no visible decline option could be recognised; left untouched rather than guessed");
     const interaction: ConsentInteraction =
       base.checkedBefore === "negative" ? "committed_preselected_decline" : base.checkedBefore === "none" ? "selected_decline" : "flipped_preselected_accept_to_decline";
-    return act(decline, interaction, `${classified.purpose}: declined`);
+    return act(decline, interaction, `${classified.purpose}: declined`, "decline");
   }
 
   if (REQUIRED_PURPOSES.has(classified.purpose)) {
@@ -463,7 +739,7 @@ async function resolveOneGroup(
     }
     const accept = pickByPolarity(group.members, "positive");
     return accept
-      ? act(accept, "accepted_required", `${classified.purpose} marked required (${group.requiredEvidence}): accepted`)
+      ? act(accept, "accepted_required", `${classified.purpose} marked required (${group.requiredEvidence}): accepted`, "accept")
       : untouched("required acknowledgement, but no visible accept option could be recognised; left untouched rather than guessed");
   }
 
@@ -473,7 +749,7 @@ async function resolveOneGroup(
     const resolution = classified.purpose === "journey_intent" ? resolveJourneyIntentOption(labels, journeyContext, language) : resolvePrivateCustomerOption(labels, language);
     const target = resolution ? visibleMembers[resolution.index] : undefined;
     return target && resolution
-      ? act(target, "selected_by_policy", resolution.reason)
+      ? act(target, "selected_by_policy", resolution.reason, "policy_option")
       : untouched(`classified as ${classified.classification} but no option could be confidently resolved; left unresolved rather than guessed`);
   }
 
@@ -488,4 +764,60 @@ export const EMPTY_CONSENT_GROUP_RESULT: ConsentGroupResolutionResult = {
   conditionalConsentGroupsRevealed: 0,
   consentRescanCount: 0,
   unresolvedRequiredConsentGroups: [],
+  optionalDeclineNotCommittedGroups: [],
 };
+
+export interface OptionalConsentOptInGroup {
+  groupId: string;
+  purpose: ConsentPurpose;
+  intendedAnswer: "accept";
+  checkedBefore: OptionPolarity | "none";
+  checkedAfter: OptionPolarity | "none";
+  verified: boolean;
+  /** Null when no visible accept option could be recognised, so nothing was clicked. */
+  activation: ConsentActivationDiagnostic | null;
+}
+
+export interface OptionalConsentOptInResult {
+  groups: OptionalConsentOptInGroup[];
+  /** True only when at least one optional group exists and every one of them reads back as accepted under strict verification. */
+  allVerified: boolean;
+}
+
+/**
+ * Test-only opt-in (safety.allowOptionalConsentOptInFallbackForTest): switches every visible
+ * optional commercial group -- marketing, profiling, third-party sharing -- to its accept option,
+ * read back strictly (native state plus every component state the widget exposes). Required
+ * processing, terms and every other purpose are never touched. Fails closed: a group with no
+ * recognisable accept option counts as unverified.
+ */
+export async function applyOptionalConsentOptInForTest(
+  form: Locator,
+  language: SupportedLanguage,
+  fieldByIndex: (form: Locator, index: string) => Promise<Locator>,
+): Promise<OptionalConsentOptInResult> {
+  const groups = (await discoverConsentGroups(form)).filter((g) => g.visible);
+  const results: OptionalConsentOptInGroup[] = [];
+  for (const group of groups) {
+    const classified = classifyGroup(group, language);
+    if (!OPTIONAL_COMMERCIAL_PURPOSES.has(classified.purpose)) continue;
+    const checkedBefore = checkedPolarity(group);
+    const accept = pickByPolarity(group.members, "positive");
+    if (!accept) {
+      results.push({ groupId: group.groupId, purpose: classified.purpose, intendedAnswer: "accept", checkedBefore, checkedAfter: checkedBefore, verified: false, activation: null });
+      continue;
+    }
+    const { verified, activation } = await activateMember(form, fieldByIndex, accept, "accept", true);
+    const reread = (await discoverConsentGroups(form)).find((g) => g.groupId === group.groupId);
+    results.push({
+      groupId: group.groupId,
+      purpose: classified.purpose,
+      intendedAnswer: "accept",
+      checkedBefore,
+      checkedAfter: reread ? checkedPolarity(reread) : "none",
+      verified,
+      activation,
+    });
+  }
+  return { groups: results, allVerified: results.length > 0 && results.every((r) => r.verified) };
+}
