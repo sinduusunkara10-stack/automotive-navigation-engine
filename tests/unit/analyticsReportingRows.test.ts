@@ -10,6 +10,7 @@ import type {
   DataLayerCapture,
   Ga4NetworkEventCapture,
   PageVisitCapture,
+  StepLog,
   TaskResponse,
 } from "../../src/types/task-response.js";
 
@@ -112,6 +113,33 @@ function ctaClick(overrides: Partial<CtaClickCapture> = {}): CtaClickCapture {
   };
 }
 
+/** A minimal real StepLog -- only the fields buildAnalyticsReportingRows' navigate-marker derivation reads (stepIndex/timestamp/selectedAction/actionResult) are ever meaningful here. */
+function navigateStep(stepIndex: number, timestamp: string, resultingUrl: string, overrides: Partial<StepLog["actionResult"]> = {}): StepLog {
+  return {
+    stepIndex,
+    timestamp,
+    currentUrl: resultingUrl,
+    observation: { url: resultingUrl, title: "", interactiveElements: [] },
+    decision: "navigate",
+    selectedAction: { type: "navigate", target: resultingUrl },
+    actionResult: { success: true, resultingUrl, interactionOutcome: "NAVIGATION", ...overrides },
+    progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
+  };
+}
+
+function clickStep(stepIndex: number, timestamp: string): StepLog {
+  return {
+    stepIndex,
+    timestamp,
+    currentUrl: "https://example.com",
+    observation: { url: "https://example.com", title: "", interactiveElements: [] },
+    decision: "click",
+    selectedAction: { type: "click", target: "el-1" },
+    actionResult: { success: true, interactionOutcome: "IN_PAGE_STATE_CHANGE" },
+    progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
+  };
+}
+
 function analyticsEventRows(rows: AnalyticsReportingRow[]): AnalyticsReportingRow[] {
   return rows.filter((row) => row.recordType === "ANALYTICS_EVENT");
 }
@@ -132,7 +160,7 @@ test("TEST1 [fixture label: Vauxhall-style bundled configurator push]: a genuine
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -172,7 +200,7 @@ test("TEST2 [fixture label: Nissan-style duplicate virtual-page capture]: raw:[e
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -199,7 +227,7 @@ test("TEST3: two click candidates with genuinely different destinations leave th
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -234,7 +262,7 @@ test("TEST4: exactly one confirmed click candidate is merged into the CTA_CLICK 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -266,7 +294,7 @@ test("TEST5: a confirmed GA4 page_view with rich metadata preserves its fields o
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -303,7 +331,7 @@ test("TEST6: a confirmed click and an unrelated CORRELATION_UNRESOLVED event in 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -337,7 +365,7 @@ test("TEST7: equivalent objects with different (including nested) key order prod
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -360,7 +388,7 @@ test("TEST8: same timestamp but different payloads produce different eventIds, b
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -385,7 +413,7 @@ test("TEST9: raw:[event] and raw:event produce identical eventIds for the same l
     return buildAnalyticsReportingRows({
       taskId: "task-1",
       startUrl: "https://example.com/source",
-      schemaVersion: "1.51.0",
+      schemaVersion: "1.52.0",
       pageVisits: [],
       ctaClicks: [ctaClick({ actionAnalytics: action })],
     });
@@ -419,7 +447,7 @@ test("TEST10: a genuine 3-event dataLayer array expands into three distinct rows
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -443,7 +471,7 @@ test("TEST11: no observed analytics evidence produces WEBSITE_NO_OBSERVED_TAG, n
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action, actionSucceeded: true })],
   });
@@ -466,7 +494,7 @@ test("TEST12: exactly one START_PAGE row is built from the actual journey start,
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits,
     ctaClicks: [],
   });
@@ -499,7 +527,7 @@ test("TEST13 [fixture label: Stellantis-style GA4 CTA fixture]: a rich GA4 click
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ ctaText: "DÉCOUVREZ-LA", actionAnalytics: action })],
   });
@@ -570,7 +598,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
     taskId: "task-1",
     journeyType: "configurator_completion",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits,
     ctaClicks,
   });
@@ -594,7 +622,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
   assert.equal(secondActionRows[2]!.eventRole, "CLICK_CANDIDATE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -649,7 +677,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [
       ctaClick({
@@ -697,7 +725,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   assert.equal(new Set(allEventIds).size, allEventIds.length);
 
   const response: TaskResponse = {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -749,7 +777,7 @@ test("TEST16: a start-page page_view produces a stepIndex 0 ANALYTICS_EVENT row,
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [],
     startPageUrl: "https://example.com/start",
@@ -797,7 +825,7 @@ test("TEST17: action 1's rows contain no duplicate of a stepIndex 0 start-window
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [
       ctaClick({ actionAnalytics: action, destinationUrl: "https://example.com/destination", resultingUrl: "https://example.com/destination" }),
@@ -828,7 +856,7 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     pageVisits: [],
     ctaClicks: [],
     startPageUrl: "https://example.com/start",
@@ -843,7 +871,7 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   assert.equal(rows[0]!.recordType, "START_PAGE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -857,4 +885,309 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   };
   const validated = await validateAgainstTaskResponseSchema(response);
   assert.ok(validated.valid, validated.errorsText);
+});
+
+// TEST19-22: navigate-reached-page analytics reporting fix (see this module's own
+// buildRowsForPageVisit/buildRowsForEvidenceWindow and the top-level buildAnalyticsReportingRows
+// doc comment). Previously a page reached by a non-click action (most commonly "navigate") and
+// then recorded via a "capture" action's own page_visits entry produced no row at all, even
+// though its GA4/dataLayer evidence was captured -- only pageVisits[0] (the start page) was ever
+// turned into a row.
+
+// TEST19: a navigate-only journey across three pages (no CTA clicks at all) must produce a
+// PAGE_VISIT marker row plus its own ANALYTICS_EVENT row for every page beyond the start page,
+// each scoped to only the evidence captured since the previous page marker.
+test("TEST19: a navigate-only 3-page journey produces a PAGE_VISIT row (plus its own analytics rows) for every page reached, not just the start page", async () => {
+  const startPageView = ga4Event({
+    stepIndex: 0,
+    timestamp: "2026-01-01T00:00:00.100Z",
+    params: { en: "page_view", dl: "https://example.com/page-1", tid: "G-START" },
+  });
+  // Fires during the "navigate" action that lands on page 2 (stepIndex 1) -- the gap this fix
+  // closes: a non-click action's own evidence was never assigned to any window before.
+  const page2View = ga4Event({
+    stepIndex: 1,
+    timestamp: "2026-01-01T00:01:00.000Z",
+    params: { en: "page_view", dl: "https://example.com/page-2", tid: "G-START" },
+  });
+  const page3View = ga4Event({
+    stepIndex: 3,
+    timestamp: "2026-01-01T00:02:00.000Z",
+    params: { en: "page_view", dl: "https://example.com/page-3", tid: "G-START" },
+  });
+  const allGa4Events = [startPageView, page2View, page3View];
+
+  const pageVisits: PageVisitCapture[] = [
+    { stepIndex: 0, url: "https://example.com/page-1", title: "Page 1", timestamp: "2026-01-01T00:00:00.000Z" },
+    { stepIndex: 2, url: "https://example.com/page-2", title: "Page 2", timestamp: "2026-01-01T00:01:30.000Z" },
+    { stepIndex: 4, url: "https://example.com/page-3", title: "Page 3", timestamp: "2026-01-01T00:02:30.000Z" },
+  ];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/page-1",
+    schemaVersion: "1.52.0",
+    pageVisits,
+    ctaClicks: [],
+    startPageUrl: "https://example.com/page-1",
+    startPageTitle: "Page 1",
+    ga4NetworkEvents: allGa4Events,
+    startWindowGa4EndIndex: 1,
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 2);
+  assert.deepEqual(pageVisitRows.map((row) => row.sourcePageUrl), ["https://example.com/page-2", "https://example.com/page-3"]);
+  assert.ok(pageVisitRows.every((row) => row.eventRole === "PAGE_VISIT" && row.eventClassification === "JOURNEY_MARKER"));
+
+  // 3 rows: the start page's own page_view (from the start window, unchanged pre-existing
+  // behaviour) plus one for each of the two later pages this fix adds.
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 3);
+  assert.deepEqual(eventRows.map((row) => row.stepIndex).sort((a, b) => a - b), [0, 2, 4]);
+  assert.ok(eventRows.every((row) => row.eventRole === "ASSOCIATED_RESULT" && row.eventClassification === "PHYSICAL_PAGE_CHANGE"));
+
+  // Chronological order: START_PAGE, start-window event (none here beyond stepIndex 0 itself),
+  // page-2 marker + its event, page-3 marker + its event -- journeySequence contiguous from 1.
+  assert.deepEqual(
+    rows.map((row) => row.journeySequence),
+    rows.map((_, index) => index + 1),
+  );
+  assert.equal(rows[0]!.recordType, "START_PAGE");
+
+  const response: TaskResponse = {
+    schemaVersion: "1.52.0",
+    taskId: "task-1",
+    status: "success",
+    statusReason: "stop_success_action",
+    startUrl: "https://example.com/page-1",
+    finalUrl: "https://example.com/page-3",
+    steps: [],
+    captures: {},
+    engineAssessment: { objectiveAchieved: true, confidence: 1, summary: "done" },
+    diagnostics: { stepCount: 4, backtrackCount: 0, totalDurationMs: 1000, finishReason: "stop_success_action" },
+    analyticsReportingRows: rows,
+  };
+  const validated = await validateAgainstTaskResponseSchema(response);
+  assert.ok(validated.valid, validated.errorsText);
+});
+
+// TEST20: a GA4 request with a blank top-level event name falls back to the single
+// postDataParams[0].en, exactly as before this fix (readGa4EvidenceFields's own existing
+// fallback) -- proving the new batched-hit splitting logic leaves the single-body case alone.
+test("TEST20: a blank top-level eventName falls back to the lone postDataParams[0].en", () => {
+  const event = ga4Event({
+    stepIndex: 1,
+    params: { dl: "https://example.com/destination" },
+    postDataParams: [{ en: "vehicle_view", dl: "https://example.com/destination" }],
+  });
+  const action = buildAction({ ga4Events: [event] });
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/source",
+    schemaVersion: "1.52.0",
+    pageVisits: [],
+    ctaClicks: [ctaClick({ actionAnalytics: action })],
+  });
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 1);
+  assert.equal(eventRows[0]!.eventName, "vehicle_view");
+});
+
+// TEST21: one GA4 request batching several distinct event hits in its body (postDataParams[],
+// each with its own "en") must produce one ANALYTICS_EVENT row per hit, never collapsed into a
+// single row using only the first hit's event name.
+test("TEST21: a single GA4 request body carrying multiple events produces one row per event, not one row for the whole request", () => {
+  const event = ga4Event({
+    stepIndex: 1,
+    params: { dl: "https://example.com/destination" },
+    postDataParams: [
+      { en: "page_view", dl: "https://example.com/destination" },
+      { en: "vehicle_view", dl: "https://example.com/destination" },
+      { en: "showroom_view", dl: "https://example.com/destination" },
+    ],
+  });
+  const action = buildAction({ ga4Events: [event] });
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/source",
+    schemaVersion: "1.52.0",
+    pageVisits: [],
+    ctaClicks: [ctaClick({ actionAnalytics: action })],
+  });
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 3);
+  assert.deepEqual(
+    eventRows.map((row) => row.eventName).sort(),
+    ["page_view", "showroom_view", "vehicle_view"],
+  );
+  assert.equal(new Set(eventRows.map((row) => row.eventId)).size, 3, "each batched hit must get its own distinct eventId");
+});
+
+// TEST22: a CTA click journey with no page_visits beyond the start page is completely
+// unaffected by this fix -- same row shape, same ordering, same eventIds as before -- and a
+// click interleaved with a later navigated-to page correctly attributes each window's evidence
+// to the right row, with no event double-reported.
+test("TEST22: an existing click-journey's own rows are unchanged, and a click interleaved with a later navigated page attributes evidence correctly with no duplication", () => {
+  const clickEvent = ga4Event({
+    stepIndex: 1,
+    timestamp: "2026-01-01T00:00:10.000Z",
+    params: { en: "page_view", dl: "https://example.com/step2", tid: "G-START" },
+  });
+  const action = buildAction({ ctaElementDestinationUrl: "https://example.com/step2", ga4Events: [clickEvent] });
+
+  // Fires during a later "navigate" action (stepIndex 2), never inside the click's own window.
+  const navigatedPageView = ga4Event({
+    stepIndex: 2,
+    timestamp: "2026-01-01T00:01:00.000Z",
+    params: { en: "page_view", dl: "https://example.com/step3", tid: "G-START" },
+  });
+
+  const pageVisits: PageVisitCapture[] = [
+    { stepIndex: 0, url: "https://example.com/step1", timestamp: "2026-01-01T00:00:00.000Z" },
+    { stepIndex: 3, url: "https://example.com/step3", timestamp: "2026-01-01T00:01:30.000Z" },
+  ];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/step1",
+    schemaVersion: "1.52.0",
+    pageVisits,
+    ctaClicks: [
+      ctaClick({
+        stepIndex: 1,
+        timestamp: "2026-01-01T00:00:05.000Z",
+        actionAnalytics: action,
+        destinationUrl: "https://example.com/step2",
+        resultingUrl: "https://example.com/step2",
+      }),
+    ],
+    startPageUrl: "https://example.com/step1",
+    ga4NetworkEvents: [clickEvent, navigatedPageView],
+    startWindowGa4EndIndex: 0,
+  });
+
+  // The click's own window only ever observed a page_view (no click-tag evidence), exactly
+  // like TEST1/TEST16's own fixtures -- the CTA_CLICK row itself stays unresolved for a click
+  // tag, while the page_view still surfaces as its own confirmed ASSOCIATED_RESULT row below.
+  const ctaRow = rows.find((row) => row.recordType === "CTA_CLICK")!;
+  assert.equal(ctaRow.correlationStatus, "WEBSITE_NO_OBSERVED_TAG");
+  assert.equal(ctaRow.eventRole, "PRIMARY_CLICK");
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 1);
+  assert.equal(pageVisitRows[0]!.sourcePageUrl, "https://example.com/step3");
+
+  // One ASSOCIATED_RESULT row from the click's own window (its page_view to step2) and one
+  // from the later page-visit window (its page_view to step3) -- never duplicated between them.
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  assert.deepEqual(
+    eventRows.map((row) => row.analyticsPageLocation).sort(),
+    ["https://example.com/step2", "https://example.com/step3"],
+  );
+  assert.equal(new Set(eventRows.map((row) => row.eventId)).size, 2, "no event should be reported under both windows");
+
+  assert.deepEqual(
+    rows.map((row) => row.journeySequence),
+    rows.map((_, index) => index + 1),
+  );
+});
+
+// TEST23-24: live-run corrective pass (the "capture" action was never requested at all, so
+// page_visits was empty for the whole run; attribution must not rely on stepIndex ranges).
+
+// TEST23 [fixture label: live DS-shaped regression]: a real run's steps were exactly
+// navigate -> consent click -> navigate -> stop_success, with NO "capture" action at any point
+// and therefore an empty page_visits array. Both navigate-reached pages must still get their
+// own PAGE_VISIT row, derived from steps[].actionResult.resultingUrl.
+test("TEST23 [fixture label: live DS-shaped regression]: a navigate/click/navigate/stop_success run with no capture action at all still reports PAGE_VISIT rows for both navigated pages", () => {
+  const page2View = ga4Event({
+    stepIndex: 0,
+    timestamp: "2026-01-01T00:00:00.500Z",
+    params: { en: "page_view", dl: "https://example.com/page-2", tid: "G-START" },
+  });
+  const page3View = ga4Event({
+    stepIndex: 2,
+    timestamp: "2026-01-01T00:02:00.500Z",
+    params: { en: "page_view", dl: "https://example.com/page-3", tid: "G-START" },
+  });
+
+  const steps: StepLog[] = [
+    navigateStep(0, "2026-01-01T00:00:00.000Z", "https://example.com/page-2"),
+    clickStep(1, "2026-01-01T00:01:00.000Z"),
+    navigateStep(2, "2026-01-01T00:02:00.000Z", "https://example.com/page-3"),
+  ];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/page-1",
+    schemaVersion: "1.52.0",
+    pageVisits: [],
+    ctaClicks: [],
+    steps,
+    startPageUrl: "https://example.com/page-1",
+    ga4NetworkEvents: [page2View, page3View],
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 2);
+  assert.deepEqual(pageVisitRows.map((row) => row.sourcePageUrl), ["https://example.com/page-2", "https://example.com/page-3"]);
+  assert.deepEqual(pageVisitRows.map((row) => row.stepIndex), [0, 2]);
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  assert.deepEqual(
+    eventRows.map((row) => row.analyticsPageLocation).sort(),
+    ["https://example.com/page-2", "https://example.com/page-3"],
+  );
+});
+
+// TEST24 [fixture label: live DS-shaped regression]: the same logical page-load splits across
+// capture mechanisms at different stepIndexes -- a dataLayer push observed at stepIndex 2, its
+// own GA4 page_view request observed one stepIndex later (network/listener timing, not a bug).
+// Both must attribute to the SAME page marker via URL match, never split across two different
+// pages' windows.
+test("TEST24 [fixture label: live DS-shaped regression]: a dataLayer push and its own GA4 page_view landing on different stepIndexes attribute to the same page by URL, not by stepIndex", () => {
+  const push = dataLayerPush({
+    stepIndex: 2,
+    url: "https://example.com/page-2",
+    timestamp: "2026-01-01T00:02:00.000Z",
+    raw: [{ event: "page_view", virtualPageUrl: "/page-2" }],
+  });
+  const ga4PageView = ga4Event({
+    stepIndex: 3,
+    timestamp: "2026-01-01T00:02:00.900Z",
+    params: { en: "page_view", dl: "https://example.com/page-2", tid: "G-START" },
+  });
+
+  const steps: StepLog[] = [navigateStep(2, "2026-01-01T00:02:00.000Z", "https://example.com/page-2")];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/page-1",
+    schemaVersion: "1.52.0",
+    pageVisits: [],
+    ctaClicks: [],
+    steps,
+    startPageUrl: "https://example.com/page-1",
+    ga4NetworkEvents: [ga4PageView],
+    dataLayerEvidence: [push],
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 1);
+  assert.equal(pageVisitRows[0]!.sourcePageUrl, "https://example.com/page-2");
+
+  // Both the dataLayer push (stepIndex 2) and the GA4 request (stepIndex 3) land under this
+  // one page's own window -- not split into two different markers' rows.
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  assert.ok(eventRows.every((row) => row.stepIndex === 2), "both rows are reported under the page marker's own stepIndex, not the raw evidence's own stepIndex");
+  assert.deepEqual(
+    eventRows.map((row) => row.evidenceSource).sort(),
+    ["main_frame", "main_frame"],
+  );
 });
