@@ -158,7 +158,14 @@ async function captureCandidateDebug(page: Page, index: number): Promise<DebugCa
       fields: allFields.map((el) => {
         const inputEl = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
         const id = inputEl.id || null;
-        const label = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim()) || el.closest("label")?.textContent?.trim() || null;
+        const rawLabel = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim()) || el.closest("label")?.textContent?.trim() || null;
+        // A radio's label is an answer (on a dealer widget, a dealer's name or address), never returned.
+        const label =
+          rawLabel === null
+            ? null
+            : el.getAttribute("type") === "radio"
+              ? "{option_label}"
+              : rawLabel.replace(/[^\s@]+@[^\s@]+/g, "{email}").replace(/\+?\d[\d\s().-]{2,}\d/g, "{number}").slice(0, 300);
         const closestForm = el.closest("form");
         const fieldRect = el.getBoundingClientRect();
         const fieldStyle = getComputedStyle(el);

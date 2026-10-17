@@ -14,16 +14,138 @@ import type { SupportedLanguage } from "./testData.js";
  * matched with enough confidence -- left unresolved, never guessed, by the caller
  * (consentGroups.ts).
  */
-export type RadioGroupClassification = "marketing_consent" | "journey_intent" | "customer_qualification" | "ambiguous";
+export type RadioGroupClassification = "marketing_consent" | "required_consent" | "journey_intent" | "customer_qualification" | "ambiguous";
+
+/**
+ * Finer consent-purpose taxonomy. Optional commercial purposes (marketing, profiling, third-party
+ * sharing) are always declined; required processing and terms are accepted only when the form
+ * marks them necessary for the requested submission; anything else is left untouched.
+ */
+export type ConsentPurpose =
+  | "required_privacy_processing"
+  | "terms_and_conditions"
+  | "optional_marketing"
+  | "optional_profiling"
+  | "optional_third_party"
+  | "customer_qualification"
+  | "journey_intent"
+  | "ambiguous";
 
 export interface RadioGroupClassificationResult {
   classification: RadioGroupClassification;
+  purpose: ConsentPurpose;
   evidence: string;
 }
 
 export interface RadioGroupEvidence {
   questionText: string;
   memberLabels: string[];
+  /** The group's own name/id attribute: only identifier tokens are read from it, as corroborating evidence when no question text is associated. */
+  groupName?: string;
+}
+
+type ConsentPurposeVocabulary = { text: string[]; nameTokens: string[] };
+
+/**
+ * Language-neutral by design: every language's phrases are matched regardless of the detected page
+ * language, so a mislabelled or mixed-language page still classifies. Name tokens are generic
+ * identifier stems and abbreviations, never a site's own field names.
+ */
+const CONSENT_PURPOSE_VOCABULARY: Record<"terms_and_conditions" | "optional_third_party" | "optional_profiling" | "optional_marketing" | "required_privacy_processing", ConsentPurposeVocabulary> = {
+  terms_and_conditions: {
+    text: [
+      "terms and conditions", "terms of use", "terms of service", "conditions generales", "conditions d'utilisation", "cgu", "cgv",
+      "allgemeinen geschaftsbedingungen", "nutzungsbedingungen", "agb", "algemene voorwaarden", "gebruiksvoorwaarden",
+      "termini e condizioni", "condizioni generali", "terminos y condiciones", "condiciones generales", "regulamin", "termos e condicoes",
+    ],
+    nameTokens: ["terms", "tos", "cgu", "cgv", "agb", "tnc", "conditions"],
+  },
+  optional_third_party: {
+    text: [
+      "third part", "partners", "partner companies", "partenaires", "tiers", "dritte", "partnerunternehmen", "partnern", "derden", "partners van",
+      "terzi", "partner commerciali", "terceros", "socios", "partnerzy", "podmiot", "terceiros", "parceiros",
+    ],
+    nameTokens: ["thirdparty", "third", "partner", "partners", "tiers", "thirdparties", "3rdparty", "dritte", "terzi", "terceros"],
+  },
+  optional_profiling: {
+    text: [
+      "profiling", "personalised", "personalized", "tailored to", "your interests", "profilage", "personnalise", "profilierung", "personalisiert",
+      "profilering", "gepersonaliseerd", "profilazione", "personalizzat", "perfilado", "personalizad", "profilowanie", "spersonalizowan", "perfil",
+    ],
+    nameTokens: ["prfl", "profil", "profile", "profiling", "personalisation", "personalization", "perso", "personalised", "personalized", "profilage"],
+  },
+  optional_marketing: {
+    text: [
+      "marketing", "newsletter", "promotional", "special offers", "receive offers", "receive communications", "commercial communications", "stay in touch", "news and offers",
+      "offres", "communications commerciales", "prospection", "actualites", "werbung", "angebote", "werbliche", "aanbiedingen", "nieuwsbrief",
+      "offerte commerciali", "comunicazioni commerciali", "ofertas", "comunicaciones comerciales", "oferty", "informacje handlowe", "comunicacoes comerciais",
+    ],
+    nameTokens: ["marketing", "mkt", "mrkt", "mktg", "newsletter", "promo", "promotional", "commercial", "offers", "optin", "advertising", "prospection"],
+  },
+  required_privacy_processing: {
+    text: [
+      "process my request", "process your request", "handle my request", "processing of my request", "necessary to process", "privacy policy", "privacy notice", "i have read",
+      "traitement de ma demande", "traiter ma demande", "politique de confidentialite", "j'ai lu", "j'ai pris connaissance",
+      "bearbeitung meiner anfrage", "datenschutzerklarung", "datenschutzhinweise", "ich habe gelesen",
+      "verwerking van mijn aanvraag", "privacyverklaring", "privacybeleid", "ik heb gelezen",
+      "gestione della mia richiesta", "informativa sulla privacy", "ho letto",
+      "tramitar mi solicitud", "gestionar mi solicitud", "politica de privacidad", "he leido",
+      "realizacji zapytania", "polityka prywatnosci", "zapoznalem", "processar o meu pedido", "politica de privacidade", "li e aceito",
+    ],
+    nameTokens: [],
+  },
+};
+
+function identifierTokens(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+function matchPurposeText(text: string, purpose: keyof typeof CONSENT_PURPOSE_VOCABULARY): string | undefined {
+  return CONSENT_PURPOSE_VOCABULARY[purpose].text.find((phrase) => {
+    const needle = normalize(phrase);
+    // Phrases match from a word start ("tiers" never inside "entiers"); short abbreviations only as whole words.
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z])${escaped}${needle.length <= 4 ? "([^a-z]|$)" : ""}`).test(text);
+  });
+}
+
+/**
+ * Consent-purpose classification from question text, option labels and the group's own name
+ * tokens. Optional commercial purposes outrank the generic required-processing vocabulary
+ * (a "privacy" prefix on a marketing flag is still a marketing flag), but a text that bundles a
+ * required acknowledgement with an optional commercial purpose is ambiguous: accepting it would
+ * opt into the commercial purpose, declining it might block the request.
+ */
+export function classifyConsentPurpose(evidence: RadioGroupEvidence): { purpose: ConsentPurpose; evidence: string } | undefined {
+  const text = normalize([evidence.questionText, ...evidence.memberLabels].join(" "));
+  const nameTokens = identifierTokens(evidence.groupName);
+  const optionalOrder = ["optional_third_party", "optional_profiling", "optional_marketing"] as const;
+  const requiredOrder = ["terms_and_conditions", "required_privacy_processing"] as const;
+
+  const textOptional = optionalOrder.map((p) => ({ p, hit: matchPurposeText(text, p) })).filter((x) => x.hit);
+  const textRequired = requiredOrder.map((p) => ({ p, hit: matchPurposeText(text, p) })).filter((x) => x.hit);
+  const nameOptional = optionalOrder.map((p) => ({ p, hit: CONSENT_PURPOSE_VOCABULARY[p].nameTokens.find((t) => nameTokens.includes(t)) })).filter((x) => x.hit);
+  const nameRequired = requiredOrder.map((p) => ({ p, hit: CONSENT_PURPOSE_VOCABULARY[p].nameTokens.find((t) => nameTokens.includes(t)) })).filter((x) => x.hit);
+
+  const optional = textOptional.length > 0 ? textOptional : nameOptional;
+  const required = textRequired.length > 0 ? textRequired : nameRequired;
+  const source = (list: { p: ConsentPurpose; hit?: string }[], fromText: boolean): string => list.map((x) => `${x.p}:${fromText ? "text" : "name_token"}("${x.hit}")`).join("+");
+
+  if (optional.length > 0 && required.length > 0 && textOptional.length > 0 && textRequired.length > 0) {
+    return { purpose: "ambiguous", evidence: `bundled required and optional purposes: ${source(textRequired, true)}+${source(textOptional, true)}` };
+  }
+  if (optional.length > 0) {
+    return { purpose: optional[0]!.p, evidence: source(optional, textOptional.length > 0) };
+  }
+  if (required.length > 0) {
+    return { purpose: required[0]!.p, evidence: source(required, textRequired.length > 0) };
+  }
+  return undefined;
 }
 
 function normalize(value: string): string {
@@ -192,13 +314,25 @@ export function classifyRadioGroup(evidence: RadioGroupEvidence, language: Suppo
   const privateOptionMatch = findLabelMatch(evidence.memberLabels, PRIVATE_CUSTOMER_OPTION_KEYWORDS, language);
   const businessOptionMatch = findLabelMatch(evidence.memberLabels, BUSINESS_CUSTOMER_OPTION_KEYWORDS, language);
   if (qualificationQuestionKeyword) {
-    return { classification: "customer_qualification", evidence: `question text matched customer-qualification vocabulary ("${qualificationQuestionKeyword}")` };
+    return { classification: "customer_qualification", purpose: "customer_qualification", evidence: `question text matched customer-qualification vocabulary ("${qualificationQuestionKeyword}")` };
   }
   if (privateOptionMatch && businessOptionMatch) {
     return {
       classification: "customer_qualification",
+      purpose: "customer_qualification",
       evidence: `options matched both private ("${privateOptionMatch.keyword}") and business ("${businessOptionMatch.keyword}") customer-type vocabulary`,
     };
+  }
+
+  const consentPurpose = classifyConsentPurpose(evidence);
+  if (consentPurpose) {
+    const classification: RadioGroupClassification =
+      consentPurpose.purpose === "ambiguous"
+        ? "ambiguous"
+        : consentPurpose.purpose === "terms_and_conditions" || consentPurpose.purpose === "required_privacy_processing"
+          ? "required_consent"
+          : "marketing_consent";
+    return { classification, purpose: consentPurpose.purpose, evidence: consentPurpose.evidence };
   }
 
   const marketingKeywords: Record<SupportedLanguage, string[]> = { ...MARKETING_CONSENT_KEYWORDS, [language]: mergedMarketingConsentKeywords(language) } as Record<
@@ -207,7 +341,7 @@ export function classifyRadioGroup(evidence: RadioGroupEvidence, language: Suppo
   >;
   const marketingKeyword = findKeyword(combinedText, marketingKeywords, language);
   if (marketingKeyword) {
-    return { classification: "marketing_consent", evidence: `question/option text matched marketing-consent vocabulary ("${marketingKeyword}")` };
+    return { classification: "marketing_consent", purpose: "optional_marketing", evidence: `question/option text matched marketing-consent vocabulary ("${marketingKeyword}")` };
   }
 
   const categoryMatches = evidence.memberLabels.map((label) => matchJourneyCategory(label, language)).filter((c): c is JourneyPurposeCategory => Boolean(c));
@@ -215,11 +349,12 @@ export function classifyRadioGroup(evidence: RadioGroupEvidence, language: Suppo
   if (distinctCategories.size >= 2) {
     return {
       classification: "journey_intent",
+      purpose: "journey_intent",
       evidence: `at least two options matched distinct journey-purpose categories (${[...distinctCategories].join(", ")})`,
     };
   }
 
-  return { classification: "ambiguous", evidence: "no confident classification signal found in question text or option labels" };
+  return { classification: "ambiguous", purpose: "ambiguous", evidence: "no confident classification signal found in question text, option labels or group name tokens" };
 }
 
 const JOURNEY_INTENT_MIN_SCORE = 0.2;

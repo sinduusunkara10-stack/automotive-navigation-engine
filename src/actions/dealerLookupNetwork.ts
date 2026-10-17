@@ -82,6 +82,9 @@ export const DEALER_LOOKUP_NETWORK_MAX_REQUESTS = 12;
 const MAX_TRACKING_REQUESTS_KEPT = 3;
 /** Internal memory bound, independent of how many requests a live page fires. */
 const MAX_REQUESTS_OBSERVED = 80;
+// Past MAX_REQUESTS_OBSERVED only tracking is dropped; a long observation window (a slow lead
+// submission) on a tracking-heavy page must never lose the one business request to the bound.
+const MAX_NON_TRACKING_REQUESTS_OBSERVED = 200;
 const BODY_READ_TIMEOUT_MS = 500;
 const MAX_STRUCTURE_BODY_BYTES = 512_000;
 const MAX_STRUCTURE_NAMES = 8;
@@ -379,6 +382,8 @@ export interface DealerLookupNetworkCapture {
   now(): number;
   /** Requests still awaiting a response right now that look lookup-like. */
   pendingLookupLike(): number;
+  /** Live view of every request observed so far (same objects stop() later bounds), for callers that classify while observing. */
+  snapshot(): readonly SanitizedNetworkRequestEvidence[];
   /** Detaches the listeners and returns the sanitised, bounded evidence collected so far. */
   stop(): Promise<SanitizedNetworkRequestEvidence[]>;
   /** Totals for the evidence returned by stop(), including what the output bound omitted. */
@@ -392,7 +397,7 @@ export interface DealerLookupNetworkCapture {
  * trace anywhere -- the caller only ever receives the sanitised summary below, which is itself only
  * exposed under FORM_DISCOVERY_DIAGNOSTIC=1.
  */
-export function startDealerLookupNetworkCapture(page: Page): DealerLookupNetworkCapture {
+export function startDealerLookupNetworkCapture(page: Page, options: { includeDocumentRequests?: boolean } = {}): DealerLookupNetworkCapture {
   const start = Date.now();
   const entries: SanitizedNetworkRequestEvidence[] = [];
   const pending = new Map<Request, SanitizedNetworkRequestEvidence>();
@@ -409,8 +414,8 @@ export function startDealerLookupNetworkCapture(page: Page): DealerLookupNetwork
   };
 
   const onRequest = (request: Request): void => {
-    if (!CAPTURED_RESOURCE_TYPES.has(request.resourceType())) return;
-    if (entries.length >= MAX_REQUESTS_OBSERVED) {
+    if (!CAPTURED_RESOURCE_TYPES.has(request.resourceType()) && !(options.includeDocumentRequests && request.resourceType() === "document")) return;
+    if (entries.length >= MAX_NON_TRACKING_REQUESTS_OBSERVED) {
       dropped += 1;
       return;
     }
@@ -434,6 +439,10 @@ export function startDealerLookupNetworkCapture(page: Page): DealerLookupNetwork
       followedByObservableChange: null,
     };
     reclassify(evidence);
+    if (entries.length >= MAX_REQUESTS_OBSERVED && evidence.purpose === "unrelated_tracking") {
+      dropped += 1;
+      return;
+    }
     pending.set(request, evidence);
     entries.push(evidence);
   };
@@ -492,6 +501,9 @@ export function startDealerLookupNetworkCapture(page: Page): DealerLookupNetwork
         lookupLike: since.filter((e) => isLookupLikePurpose(e.purpose)).length,
         pending: since.filter((e) => e.outcome === "pending").length,
       };
+    },
+    snapshot() {
+      return entries;
     },
     pendingLookupLike() {
       return [...pending.values()].filter((e) => isLookupLikePurpose(e.purpose)).length;

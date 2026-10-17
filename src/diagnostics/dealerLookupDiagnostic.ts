@@ -246,14 +246,23 @@ async function readElementTrace(
         const inputType = tag === "input" ? el.getAttribute("type") : null;
         const id = el.getAttribute("id");
         const byForLabel = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
-        const label = byForLabel?.textContent?.trim() || el.closest("label")?.textContent?.trim() || el.getAttribute("aria-label")?.trim() || null;
+        const rawLabel = byForLabel?.textContent?.trim() || el.closest("label")?.textContent?.trim() || el.getAttribute("aria-label")?.trim() || null;
+        // An option's label is an answer -- on a dealer widget a dealer's name or address -- so it is never returned.
+        const isOption = (el.getAttribute("type") ?? "") === "radio" || ["radio", "option"].includes(el.getAttribute("role") ?? "");
+        const label =
+          rawLabel === null
+            ? null
+            : isOption
+              ? "{option_label}"
+              : rawLabel.replace(/[^\s@]+@[^\s@]+/g, "{email}").replace(/\+?\d[\d\s().-]{2,}\d/g, "{number}").slice(0, 300);
 
         const ariaAttributes: { attribute: string; value: string }[] = [];
         const ariaRelationshipTargets: { attribute: string; targetId: string; targetExists: boolean }[] = [];
         const relationshipAttrs = ["aria-controls", "aria-owns", "aria-describedby", "aria-labelledby"];
         Array.from(el.attributes).forEach((a) => {
           if (a.name === "role" || a.name.startsWith("aria-")) {
-            ariaAttributes.push({ attribute: a.name, value: a.value });
+            const freeText = ["aria-label", "aria-valuetext", "aria-description", "aria-placeholder"].includes(a.name);
+            ariaAttributes.push({ attribute: a.name, value: freeText && isOption ? "{option_label}" : freeText ? a.value.replace(/\+?\d[\d\s().-]{2,}\d/g, "{number}") : a.value });
           }
         });
         relationshipAttrs.forEach((attrName) => {
