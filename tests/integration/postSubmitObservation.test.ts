@@ -75,7 +75,8 @@ test("post-submit: a same-page confirmation that appears only after more than 60
     assert.equal(observation?.terminalState, "succeeded");
     assert.ok((observation?.confirmationDetectedAtMs ?? 0) >= 60_000, `confirmation at ${observation?.confirmationDetectedAtMs} ms`);
     assert.ok((observation?.totalObservationMs ?? Infinity) < observation!.hardCapMs);
-    assert.ok((observation?.extensionCount ?? 0) >= 5);
+    assert.equal(observation?.minimumObservationMs, 50_000);
+    assert.ok((observation?.extensionCount ?? 0) >= 1, "the 50 s minimum is followed by progress-justified extensions");
     assert.ok(observation?.extensionReasons.every((reasons) => reasons.includes("loading_indicator_active") || reasons.includes("submit_control_disabled")));
   });
 });
