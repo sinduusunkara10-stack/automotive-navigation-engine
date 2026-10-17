@@ -11,6 +11,7 @@ import type {
   Ga4NetworkEventCapture,
   PageVisitCapture,
   PrimaryClickEventStatus,
+  StepLog,
   TriggerSegment,
   UrlRelationship,
 } from "../types/task-response.js";
@@ -813,6 +814,72 @@ function emptyTriggerLookup(): TriggerSegmentLookup {
   return { ga4: new Map(), dataLayer: new Map() };
 }
 
+// ---------------------------------------------------------------------------------------------
+// Page-marker evidence attribution: a page's own GA4/dataLayer evidence does not reliably share
+// that page's own stepIndex -- a live production run showed the same logical page's dataLayer
+// push land at one stepIndex and its own GA4 page_view request land at the very next stepIndex
+// (listener/network timing, not a classification bug). Attributing evidence to a page purely by
+// stepIndex range is therefore unreliable at the boundary; this attributes primarily by URL
+// (the evidence's own page-location field against each page marker's own URL) and falls back to
+// nearest-preceding-stepIndex only when no marker's URL matches at all (a genuinely unrelated or
+// ambiguous raw capture).
+// ---------------------------------------------------------------------------------------------
+
+interface PageMarker {
+  stepIndex: number;
+  url: string;
+  title?: string;
+  timestamp: string;
+}
+
+function urlMatchesMarker(candidate: string | undefined, markerUrl: string): boolean {
+  if (!candidate) {
+    return false;
+  }
+  const relationship = computeUrlRelationship(candidate, markerUrl);
+  return relationship === "EXACT_MATCH" || relationship === "SAME_PHYSICAL_PAGE" || relationship === "TRACKING_PARAMETERS_ONLY_DIFFERENCE";
+}
+
+/** A GA4 request's own page-location evidence, read via the same classifier the rest of this module reuses -- never a second alias list. */
+function candidateUrlsForGa4(event: Ga4NetworkEventCapture): string[] {
+  const fields = readGa4EvidenceFields(event);
+  return [fields.location, fields.eventDestinationUrl, fields.virtualMetadata?.virtualPageUrl].filter((u): u is string => Boolean(u));
+}
+
+/**
+ * Picks which page marker owns one piece of non-click evidence: the marker whose own URL the
+ * evidence's own location/destination matches (nearest by stepIndex when more than one marker
+ * shares that URL, e.g. a revisited page), or, when no marker's URL matches at all, the most
+ * recent marker at or before this evidence's own stepIndex -- the prior stepIndex-range
+ * behaviour, kept as a deterministic fallback rather than the primary signal. `markers` must be
+ * sorted ascending by stepIndex.
+ */
+function pickOwningMarkerIndex(markers: PageMarker[], eventStepIndex: number, candidateUrls: string[]): number {
+  let bestIndex = -1;
+  let bestDistance = Infinity;
+  for (let i = 0; i < markers.length; i++) {
+    const marker = markers[i]!;
+    if (!candidateUrls.some((url) => urlMatchesMarker(url, marker.url))) {
+      continue;
+    }
+    const distance = Math.abs(marker.stepIndex - eventStepIndex);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = i;
+    }
+  }
+  if (bestIndex !== -1) {
+    return bestIndex;
+  }
+  let fallback = 0;
+  for (let i = 0; i < markers.length; i++) {
+    if (markers[i]!.stepIndex <= eventStepIndex) {
+      fallback = i;
+    }
+  }
+  return fallback;
+}
+
 /**
  * Start-page analytics window: GA4/dataLayer evidence captured from context creation until the
  * start page settled, before the navigation loop's first action -- see engine.ts's own
@@ -892,12 +959,14 @@ function buildRowsForStartWindow(params: {
 }
 
 /**
- * A page reached by any non-click action (most commonly "navigate") and then recorded via a
- * "capture" action's own page_visits entry (src/actions/capture.ts) -- see buildAnalyticsReportingRows's
- * own doc comment on how this page's own GA4/dataLayer window is carved out of the run's full
- * capture arrays. Always produces a PAGE_VISIT marker row (mirrors the START_PAGE row for every
- * later page in the journey); analytics rows are only appended when the window actually captured
- * something, exactly like buildRowsForStartWindow never fabricates an empty ANALYTICS_EVENT row.
+ * A page reached by any non-click action (most commonly "navigate"), via either an explicit
+ * "capture" action's own page_visits entry (src/actions/capture.ts) or, when no capture action
+ * was ever requested, the navigate action's own actionResult.resultingUrl -- see
+ * buildAnalyticsReportingRows's own doc comment on how this page's own GA4/dataLayer evidence is
+ * attributed to it. Always produces a PAGE_VISIT marker row (mirrors the START_PAGE row for
+ * every later page in the journey); analytics rows are only appended when the window actually
+ * captured something, exactly like buildRowsForStartWindow never fabricates an empty
+ * ANALYTICS_EVENT row.
  */
 function buildRowsForPageVisit(
   visit: PageVisitCapture,
@@ -947,6 +1016,16 @@ export function buildAnalyticsReportingRows(params: {
   schemaVersion: string;
   pageVisits: PageVisitCapture[];
   ctaClicks: CtaClickCapture[];
+  /**
+   * The run's own step log -- used only to derive a page marker for a page reached via a
+   * "navigate" action that was never followed by an explicit "capture" action (no page_visits
+   * capture module requested at all). A successful navigate's own actionResult.resultingUrl is
+   * exactly the page the engine reached; a page_visits entry for the same URL (when one exists)
+   * is preferred over a derived one, never both. Optional and defaults to none, so a caller
+   * that never requested this capture mechanism sees no behaviour change beyond pageVisits/
+   * ctaClicks-derived rows.
+   */
+  steps?: StepLog[];
   /** Used only when no page_visits capture and no cta_clicks exist to derive a START_PAGE timestamp from. */
   fallbackTimestamp?: string;
   /**
@@ -958,16 +1037,18 @@ export function buildAnalyticsReportingRows(params: {
   /** Page title read right after the initial navigation settled, independent of whether the page_visits capture module/action ever ran. */
   startPageTitle?: string;
   /**
-   * Raw GA4/dataLayer captures for the whole run (captures.ga4_network_events/data_layer_evidence)
-   * -- sliced internally to [0, startWindowGa4EndIndex)/[0, startWindowDataLayerEndIndex), the
-   * window recorded from context creation until the start page settled, before the loop's first
-   * action. An event captured after that point already belongs to some action's own window
-   * (see loop.ts's ga4WindowStartIndex/dataLayerPushWindowStartIndex) and is never re-included
-   * here.
+   * Raw GA4/dataLayer captures for the whole run (captures.ga4_network_events/data_layer_evidence).
+   * Attributed to the start page, a page marker, or a CTA click by URL match against each
+   * marker's own page, falling back to nearest-preceding-stepIndex only when no marker's URL
+   * matches at all -- see pickOwningMarkerIndex's own doc comment. A click's own stepIndex is
+   * always excluded here: that evidence is already fully resolved via the click's own
+   * actionAnalytics window.
    */
   ga4NetworkEvents?: Ga4NetworkEventCapture[];
   dataLayerEvidence?: DataLayerCapture[];
+  /** @deprecated No longer used -- evidence is attributed by URL match (see ga4NetworkEvents' own doc comment), not by a fixed start-window index cutoff. Still accepted so existing callers need no change. */
   startWindowGa4EndIndex?: number;
+  /** @deprecated No longer used -- see startWindowGa4EndIndex. */
   startWindowDataLayerEndIndex?: number;
 }): AnalyticsReportingRow[] {
   const {
@@ -977,12 +1058,11 @@ export function buildAnalyticsReportingRows(params: {
     schemaVersion,
     pageVisits,
     ctaClicks,
+    steps = [],
     startPageUrl,
     startPageTitle,
     ga4NetworkEvents = [],
     dataLayerEvidence = [],
-    startWindowGa4EndIndex = 0,
-    startWindowDataLayerEndIndex = 0,
   } = params;
   const runId = taskId;
 
@@ -1011,60 +1091,93 @@ export function buildAnalyticsReportingRows(params: {
     },
   ];
 
+  // Every page reached in the journey -- by a CTA click, by "navigate" followed by an explicit
+  // "capture" action (pageVisits), or by "navigate" alone with no capture action requested at
+  // all -- gets its own marker row plus associated analytics rows, not just the start page and
+  // CTA-click destinations. An explicit pageVisits entry for a URL is always preferred over a
+  // navigate-derived one for that same URL, never both.
+  const explicitLaterVisits = pageVisits.slice(1);
+  const explicitLaterUrls = new Set(explicitLaterVisits.map((visit) => visit.url));
+  const navigateDerivedVisits: PageVisitCapture[] = steps
+    .filter(
+      (step) =>
+        step.selectedAction.type === "navigate" &&
+        step.actionResult.success &&
+        Boolean(step.actionResult.resultingUrl) &&
+        !explicitLaterUrls.has(step.actionResult.resultingUrl!) &&
+        !urlMatchesMarker(step.actionResult.resultingUrl, resolvedStartPageUrl),
+    )
+    .map((step) => ({ stepIndex: step.stepIndex, url: step.actionResult.resultingUrl!, timestamp: step.timestamp }));
+
+  const markers: PageMarker[] = [
+    { stepIndex: startStepIndex, url: resolvedStartPageUrl, title: resolvedStartPageTitle, timestamp: startTimestamp },
+    ...[...explicitLaterVisits, ...navigateDerivedVisits]
+      .map((visit) => ({ stepIndex: visit.stepIndex, url: visit.url, title: visit.title, timestamp: visit.timestamp }))
+      .sort((a, b) => a.stepIndex - b.stepIndex),
+  ];
+
+  // A click's own window is fully resolved elsewhere (actionAnalytics.ga4RequestsObservedDuringActionWindow/
+  // dataLayerPushesObservedDuringActionWindow) -- its own stepIndex's evidence must never also be
+  // attributed to a page marker, or the same physical event would be reported twice.
+  const clickStepIndexes = new Set(ctaClicks.map((ctaClick) => ctaClick.stepIndex));
+
+  // Attribution is primarily by URL (see pickOwningMarkerIndex's own doc comment): the same
+  // logical page-load event can land under a different stepIndex depending on which capture
+  // mechanism (dataLayer push listener vs GA4 network request) observed it, so a pure
+  // stepIndex-range split misattributes evidence right at a page boundary.
+  const ga4ByMarker: Ga4NetworkEventCapture[][] = markers.map(() => []);
+  for (const event of ga4NetworkEvents) {
+    if (clickStepIndexes.has(event.stepIndex)) {
+      continue;
+    }
+    ga4ByMarker[pickOwningMarkerIndex(markers, event.stepIndex, candidateUrlsForGa4(event))]!.push(event);
+  }
+  const dataLayerByMarker: DataLayerCapture[][] = markers.map(() => []);
+  for (const push of dataLayerEvidence) {
+    if (clickStepIndexes.has(push.stepIndex)) {
+      continue;
+    }
+    dataLayerByMarker[pickOwningMarkerIndex(markers, push.stepIndex, [push.url])]!.push(push);
+  }
+
   rows.push(
     ...buildRowsForStartWindow({
       runId,
       taskId,
       schemaVersion,
       journeyType,
-      ga4Events: ga4NetworkEvents.slice(0, startWindowGa4EndIndex),
-      dataLayerPushes: dataLayerEvidence.slice(0, startWindowDataLayerEndIndex),
+      ga4Events: ga4ByMarker[0]!,
+      dataLayerPushes: dataLayerByMarker[0]!,
       targets: [startUrl, resolvedStartPageUrl].filter((url, index, all) => all.indexOf(url) === index),
       stepIndex: startStepIndex,
     }),
   );
 
-  // Every page reached in the journey -- by a CTA click or by any other action (most commonly
-  // "navigate") -- gets its own marker row plus associated analytics rows, not just the start
-  // page and CTA-click destinations. A CTA click already produces its own full row set from its
-  // own actionAnalytics window (buildRowsForCtaClick), so pageVisits beyond the start page are
-  // handled here as their own, structurally equivalent journey entries, merged into one
-  // chronological sequence by stepIndex so the final journeySequence reflects when each page was
-  // actually reached, not "all clicks, then all navigated pages".
+  // CTA clicks and later page markers are merged into one chronological sequence by stepIndex,
+  // so journeySequence reflects when each page was actually reached, not "all clicks, then all
+  // navigated pages".
   type JourneyEntry =
     | { kind: "cta_click"; stepIndex: number; ctaClick: CtaClickCapture }
-    | { kind: "page_visit"; stepIndex: number; visit: PageVisitCapture };
+    | { kind: "page_marker"; stepIndex: number; markerIndex: number };
 
   const journeyEntries: JourneyEntry[] = [
     ...ctaClicks.map((ctaClick): JourneyEntry => ({ kind: "cta_click", stepIndex: ctaClick.stepIndex, ctaClick })),
-    ...pageVisits.slice(1).map((visit): JourneyEntry => ({ kind: "page_visit", stepIndex: visit.stepIndex, visit })),
+    ...markers.slice(1).map((marker, i): JourneyEntry => ({ kind: "page_marker", stepIndex: marker.stepIndex, markerIndex: i + 1 })),
   ].sort((a, b) => a.stepIndex - b.stepIndex);
 
-  // A click's own window is fully resolved elsewhere (actionAnalytics.ga4RequestsObservedDuringActionWindow/
-  // dataLayerPushesObservedDuringActionWindow) -- its own stepIndex's evidence must never also be
-  // pulled into a later page-visit window, or the same physical event would be reported twice.
-  const clickStepIndexes = new Set(ctaClicks.map((ctaClick) => ctaClick.stepIndex));
-
-  let previousStepIndex = startStepIndex;
   for (const entry of journeyEntries) {
     if (entry.kind === "cta_click") {
       rows.push(...buildRowsForCtaClick(entry.ctaClick, { runId, taskId, schemaVersion, journeyType }));
     } else {
-      const windowGa4 = ga4NetworkEvents.filter(
-        (event) => event.stepIndex > previousStepIndex && event.stepIndex <= entry.stepIndex && !clickStepIndexes.has(event.stepIndex),
-      );
-      const windowDataLayer = dataLayerEvidence.filter(
-        (push) => push.stepIndex > previousStepIndex && push.stepIndex <= entry.stepIndex && !clickStepIndexes.has(push.stepIndex),
-      );
+      const marker = markers[entry.markerIndex]!;
       rows.push(
         ...buildRowsForPageVisit(
-          entry.visit,
-          { ga4Events: windowGa4, dataLayerPushes: windowDataLayer },
+          marker,
+          { ga4Events: ga4ByMarker[entry.markerIndex]!, dataLayerPushes: dataLayerByMarker[entry.markerIndex]! },
           { runId, taskId, schemaVersion, journeyType },
         ),
       );
     }
-    previousStepIndex = entry.stepIndex;
   }
 
   return rows.map((row, index) => ({ ...row, journeySequence: index + 1 }));

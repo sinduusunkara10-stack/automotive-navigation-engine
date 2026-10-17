@@ -10,6 +10,7 @@ import type {
   DataLayerCapture,
   Ga4NetworkEventCapture,
   PageVisitCapture,
+  StepLog,
   TaskResponse,
 } from "../../src/types/task-response.js";
 
@@ -109,6 +110,33 @@ function ctaClick(overrides: Partial<CtaClickCapture> = {}): CtaClickCapture {
     navigationSucceeded: true,
     actionSucceeded: true,
     ...overrides,
+  };
+}
+
+/** A minimal real StepLog -- only the fields buildAnalyticsReportingRows' navigate-marker derivation reads (stepIndex/timestamp/selectedAction/actionResult) are ever meaningful here. */
+function navigateStep(stepIndex: number, timestamp: string, resultingUrl: string, overrides: Partial<StepLog["actionResult"]> = {}): StepLog {
+  return {
+    stepIndex,
+    timestamp,
+    currentUrl: resultingUrl,
+    observation: { url: resultingUrl, title: "", interactiveElements: [] },
+    decision: "navigate",
+    selectedAction: { type: "navigate", target: resultingUrl },
+    actionResult: { success: true, resultingUrl, interactionOutcome: "NAVIGATION", ...overrides },
+    progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
+  };
+}
+
+function clickStep(stepIndex: number, timestamp: string): StepLog {
+  return {
+    stepIndex,
+    timestamp,
+    currentUrl: "https://example.com",
+    observation: { url: "https://example.com", title: "", interactiveElements: [] },
+    decision: "click",
+    selectedAction: { type: "click", target: "el-1" },
+    actionResult: { success: true, interactionOutcome: "IN_PAGE_STATE_CHANGE" },
+    progress: { satisfiedCriteriaIds: [], estimatedCompletion: 0 },
   };
 }
 
@@ -1065,5 +1093,101 @@ test("TEST22: an existing click-journey's own rows are unchanged, and a click in
   assert.deepEqual(
     rows.map((row) => row.journeySequence),
     rows.map((_, index) => index + 1),
+  );
+});
+
+// TEST23-24: live-run corrective pass (the "capture" action was never requested at all, so
+// page_visits was empty for the whole run; attribution must not rely on stepIndex ranges).
+
+// TEST23 [fixture label: live DS-shaped regression]: a real run's steps were exactly
+// navigate -> consent click -> navigate -> stop_success, with NO "capture" action at any point
+// and therefore an empty page_visits array. Both navigate-reached pages must still get their
+// own PAGE_VISIT row, derived from steps[].actionResult.resultingUrl.
+test("TEST23 [fixture label: live DS-shaped regression]: a navigate/click/navigate/stop_success run with no capture action at all still reports PAGE_VISIT rows for both navigated pages", () => {
+  const page2View = ga4Event({
+    stepIndex: 0,
+    timestamp: "2026-01-01T00:00:00.500Z",
+    params: { en: "page_view", dl: "https://example.com/page-2", tid: "G-START" },
+  });
+  const page3View = ga4Event({
+    stepIndex: 2,
+    timestamp: "2026-01-01T00:02:00.500Z",
+    params: { en: "page_view", dl: "https://example.com/page-3", tid: "G-START" },
+  });
+
+  const steps: StepLog[] = [
+    navigateStep(0, "2026-01-01T00:00:00.000Z", "https://example.com/page-2"),
+    clickStep(1, "2026-01-01T00:01:00.000Z"),
+    navigateStep(2, "2026-01-01T00:02:00.000Z", "https://example.com/page-3"),
+  ];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/page-1",
+    schemaVersion: "1.51.0",
+    pageVisits: [],
+    ctaClicks: [],
+    steps,
+    startPageUrl: "https://example.com/page-1",
+    ga4NetworkEvents: [page2View, page3View],
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 2);
+  assert.deepEqual(pageVisitRows.map((row) => row.sourcePageUrl), ["https://example.com/page-2", "https://example.com/page-3"]);
+  assert.deepEqual(pageVisitRows.map((row) => row.stepIndex), [0, 2]);
+
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  assert.deepEqual(
+    eventRows.map((row) => row.analyticsPageLocation).sort(),
+    ["https://example.com/page-2", "https://example.com/page-3"],
+  );
+});
+
+// TEST24 [fixture label: live DS-shaped regression]: the same logical page-load splits across
+// capture mechanisms at different stepIndexes -- a dataLayer push observed at stepIndex 2, its
+// own GA4 page_view request observed one stepIndex later (network/listener timing, not a bug).
+// Both must attribute to the SAME page marker via URL match, never split across two different
+// pages' windows.
+test("TEST24 [fixture label: live DS-shaped regression]: a dataLayer push and its own GA4 page_view landing on different stepIndexes attribute to the same page by URL, not by stepIndex", () => {
+  const push = dataLayerPush({
+    stepIndex: 2,
+    url: "https://example.com/page-2",
+    timestamp: "2026-01-01T00:02:00.000Z",
+    raw: [{ event: "page_view", virtualPageUrl: "/page-2" }],
+  });
+  const ga4PageView = ga4Event({
+    stepIndex: 3,
+    timestamp: "2026-01-01T00:02:00.900Z",
+    params: { en: "page_view", dl: "https://example.com/page-2", tid: "G-START" },
+  });
+
+  const steps: StepLog[] = [navigateStep(2, "2026-01-01T00:02:00.000Z", "https://example.com/page-2")];
+
+  const rows = buildAnalyticsReportingRows({
+    taskId: "task-1",
+    startUrl: "https://example.com/page-1",
+    schemaVersion: "1.51.0",
+    pageVisits: [],
+    ctaClicks: [],
+    steps,
+    startPageUrl: "https://example.com/page-1",
+    ga4NetworkEvents: [ga4PageView],
+    dataLayerEvidence: [push],
+  });
+
+  const pageVisitRows = rows.filter((row) => row.recordType === "PAGE_VISIT");
+  assert.equal(pageVisitRows.length, 1);
+  assert.equal(pageVisitRows[0]!.sourcePageUrl, "https://example.com/page-2");
+
+  // Both the dataLayer push (stepIndex 2) and the GA4 request (stepIndex 3) land under this
+  // one page's own window -- not split into two different markers' rows.
+  const eventRows = analyticsEventRows(rows);
+  assert.equal(eventRows.length, 2);
+  assert.ok(eventRows.every((row) => row.stepIndex === 2), "both rows are reported under the page marker's own stepIndex, not the raw evidence's own stepIndex");
+  assert.deepEqual(
+    eventRows.map((row) => row.evidenceSource).sort(),
+    ["main_frame", "main_frame"],
   );
 });
