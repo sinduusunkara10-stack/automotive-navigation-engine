@@ -4168,3 +4168,48 @@ Structure:
   committed before the previous Submit but no longer is (a site that re-renders the form); it is
   the same fill, never a third Submit. All of it is reported under
   `formPostSubmitDiagnostics.submitCancellationDiagnostics`.
+
+### Lead-form filling: site-validator evidence for a cancelled Submit (additive to response 1.53.0; request 1.51.0 unchanged)
+
+After the hidden title select was committed, a live run's two Submits were still cancelled: the
+submit event fired from the real click with its submitter, the page's own listener prevented the
+default, nothing was serialised and no business request followed, and an error-like element
+appeared inside the form outside every field's own container. Earlier runs, recorded before the
+submit probe existed, were cancelled the same way, so the probe is not the cause. The trace could
+not name the rejected field: native validity was valid everywhere and nothing read the site's
+own validator state. This change adds evidence only; no fill or Submit behaviour changes.
+
+Structure:
+
+- `src/actions/fieldValidationState.ts` (new): read before each Submit and after each
+  cancellation. Per logical field (a native control and its widest ancestor that holds no other
+  field), it records error/pending/valid/touched class tokens, a rendered error icon (the file-name
+  stem of a background, pseudo-element or `img` whose name says error/wrong/invalid), an error
+  message's length and required/format/unspecified rule category (the text never leaves the
+  page), `aria-invalid`, data-* state flags, and a readable jQuery Validation instance's
+  invalid/error-list/pending maps (property reads only, never `valid()` or `element()`). It also
+  lists error surfaces outside every field with the field before them, validator libraries and
+  jQuery handler counts on the form, Submit control and ancestors.
+  `compareDomAndValidatorState` sets the DOM-committed state against the validator state per
+  field, and `siteRejectedFields` names the fields the site marks invalid.
+- `src/actions/submitCancellationProbe.ts`: records the `isTrusted` flag of the click and the
+  submit event, each `preventDefault()` / `stopPropagation()` call on them (event phase, current
+  target and page-script stack frames as origin + path, line and column), a cancellation with no
+  recorded call (an inline handler returning false), page functions already wrapped by another
+  script, and validation-like requests (path containing valid/verif/check/qas) completed before
+  Submit. `SUBMIT_PROBE_MODE=passive` installs listeners only and replaces no page function, for an
+  A/B run. The classifier names `custom_validation_rejected` with the rejected fields when the
+  site marks one invalid, or with the count of unattributed error surfaces.
+- `src/actions/submitListenerInventory.ts` (new): after the last client-side-cancelled attempt,
+  `DOMDebugger.getEventListeners` on the form, Submit control, two ancestors, body, document and
+  window, expanding jQuery's single dispatcher into each handler's own function location. Only
+  the type, phase, flags, function name and script origin + path, line and column are kept. It is
+  Chromium-only and reports `available: false` elsewhere.
+- `src/diagnostics/manualSubmitComparison.ts` (new): `npm run manual:submit-comparison-snippet`
+  prints a DevTools-console snippet that records the same passive probe and field-state evidence
+  for a Submit made by hand, to compare by `safeName` with an automated run.
+
+No barrier, extra wait, blur or re-commit was added: the trace showed no request in flight at
+Submit and the cause is not yet proven. The next live run's
+`submitCancellationDiagnostics.attempts[].siteRejectedFields`, `fieldValidationAfterCancellation`,
+`evidence.preventDefaultCalls` and `submitListenerInventory` decide the generic fix.

@@ -1388,3 +1388,10 @@ sanitised per-control snapshots before Submit and after the cancellation;
 `formDiscoveryDiagnostics.proxiedSelectDiagnostics` reports required hidden selects that were
 committed through their visible custom control.
 
+The site-validator evidence is additive to response `1.53.0` as well and needs no Build-node
+change. Each attempt adds `fieldValidationBeforeSubmit`, `fieldValidationAfterCancellation`,
+`fieldStateComparison` and `siteRejectedFields`; its evidence adds `preventDefaultCalls`,
+`clickEventTrusted`, `submitEventTrusted` and `validationRequestsBeforeSubmit`; and
+`submitCancellationDiagnostics` adds `probeMode` and `submitListenerInventory`. Setting
+`SUBMIT_PROBE_MODE=passive` in the engine's environment runs the probe without call recorders.
+

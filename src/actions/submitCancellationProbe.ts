@@ -2,6 +2,8 @@ import type { Locator, Page } from "playwright";
 import { classifyBusinessRequest } from "./submissionObserver.js";
 import { classifyRequestPurpose } from "./dealerLookupNetwork.js";
 import type { AcknowledgementCheckboxDiagnostic, ControlStateSnapshot, SnapshotDifference } from "./formStateSnapshot.js";
+import type { FieldStateComparison, FormValidationStateCapture, SiteRejectedField } from "./fieldValidationState.js";
+import type { SubmitListenerInventory } from "./submitListenerInventory.js";
 
 /**
  * Passive client-side evidence of what happened between a Submit click and the business request:
@@ -20,15 +22,61 @@ export const PROBE_FORM_ATTR = "data-nav-engine-probe-form";
 export const PROBE_SUBMIT_ATTR = "data-nav-engine-probe-submit";
 const PROBE_KEY = "__navEngineSubmitProbe";
 
-export const SUBMIT_PROBE_SOURCE = `(() => {
+/**
+ * "full" adds the call recorders; "passive" installs only the listeners and the resource-timing
+ * observer and replaces no page function, so a run can show whether the recorders change a site's
+ * behaviour (SUBMIT_PROBE_MODE=passive, read once per run).
+ */
+export type SubmitProbeMode = "full" | "passive";
+
+export function resolveSubmitProbeMode(env: NodeJS.ProcessEnv = process.env): SubmitProbeMode {
+  return env.SUBMIT_PROBE_MODE === "passive" ? "passive" : "full";
+}
+
+export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
+  return `(() => {
   const KEY = ${JSON.stringify(PROBE_KEY)};
   if (window[KEY]) return true;
+  const MODE = ${JSON.stringify(mode)};
   const FORM_ATTR = ${JSON.stringify(PROBE_FORM_ATTR)};
   const SUBMIT_ATTR = ${JSON.stringify(PROBE_SUBMIT_ATTR)};
   const FIELD_ATTR = "data-nav-engine-field-index";
   const MAX_ITEMS = 25;
   const now = () => Math.round(performance.now());
-  const state = { rec: null, inDispatch: false, inFlightXhr: 0, wrapped: new WeakSet() };
+  const state = { rec: null, inDispatch: false, inFlightXhr: 0, wrapped: new WeakSet(), validationEntries: [] };
+  const isNative = (f) => {
+    try {
+      return typeof f === "function" && /\\{\\s*\\[native code\\]\\s*\\}\\s*$/.test(Function.prototype.toString.call(f));
+    } catch (e) {
+      return false;
+    }
+  };
+  const pageWrapped = [];
+  [
+    ["fetch", window.fetch],
+    ["xhr_open", window.XMLHttpRequest && XMLHttpRequest.prototype.open],
+    ["xhr_send", window.XMLHttpRequest && XMLHttpRequest.prototype.send],
+    ["send_beacon", navigator.sendBeacon],
+    ["form_submit", HTMLFormElement.prototype.submit],
+    ["prevent_default", Event.prototype.preventDefault],
+  ].forEach(([name, f]) => {
+    if (typeof f === "function" && !isNative(f)) pageWrapped.push(name);
+  });
+  const VALIDATION_PATH_RE = /(valid|verif|check|qas)/i;
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.initiatorType !== "xmlhttprequest" && e.initiatorType !== "fetch") continue;
+        let path = "";
+        try {
+          path = new URL(e.name).pathname;
+        } catch (x) {}
+        if (!VALIDATION_PATH_RE.test(path)) continue;
+        state.validationEntries.push({ name: e.name, startTime: e.startTime, responseEnd: e.responseEnd });
+        if (state.validationEntries.length > 20) state.validationEntries.shift();
+      }
+    }).observe({ type: "resource", buffered: true });
+  } catch (e) {}
   const isProbeForm = (f) => Boolean(f && f.nodeType === 1 && f.tagName === "FORM" && f.hasAttribute(FORM_ATTR));
   const shown = (n) => {
     const r = n.getBoundingClientRect();
@@ -56,6 +104,7 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     rec.dispatches.push({ transport, method: String(method || "GET").toUpperCase(), endpoint: endpointOf(url), atMs: now() - rec.clickAt });
   };
   const wrap = (owner, prop, onCall) => {
+    if (MODE !== "full") return;
     const original = owner && owner[prop];
     if (typeof original !== "function" || state.wrapped.has(original)) return;
     const proxy = new Proxy(original, {
@@ -72,6 +121,7 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     } catch (e) {}
   };
   const wrapThrowing = (owner, prop, onCall, onThrow) => {
+    if (MODE !== "full") return;
     const original = owner && owner[prop];
     if (typeof original !== "function" || state.wrapped.has(original)) return;
     const proxy = new Proxy(original, {
@@ -143,15 +193,65 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     );
   };
 
-  window.addEventListener("click", (e) => {
+  const targetCategory = (t) => {
+    if (t === window) return "window";
+    if (t === document) return "document";
+    if (!t || t.nodeType !== 1) return "other";
+    if (isProbeForm(t)) return "form";
+    if (t.hasAttribute(SUBMIT_ATTR)) return "submit_control";
+    if (t === document.body) return "body";
+    const form = document.querySelector("form[" + FORM_ATTR + "]");
+    if (form && t.contains(form)) return "form_ancestor";
+    if (form && form.contains(t)) return "inside_form";
+    return "other";
+  };
+  const PHASES = ["none", "capture", "target", "bubble"];
+  const framesOf = (stack) => {
+    const out = [];
+    for (const line of String(stack || "").split("\\n").slice(1)) {
+      const m = /^\\s*at (?:(.*?) \\()?((?:https?):\\/\\/[^\\s()]+?):(\\d+):(\\d+)\\)?\\s*$/.exec(line);
+      if (!m) continue;
+      out.push({ functionName: (m[1] || "anonymous").replace(/[^\\w$.<> ]/g, "").slice(0, 40), script: m[2], line: Number(m[3]), column: Number(m[4]) });
+      if (out.length >= 5) break;
+    }
+    return out;
+  };
+  const relevantEvent = (ev) => {
+    if (!ev || !ev.target) return false;
+    if (ev.type === "submit") return isProbeForm(ev.target);
+    return ev.type === "click" && Boolean(ev.target.closest && ev.target.closest("[" + SUBMIT_ATTR + "]"));
+  };
+  wrap(Event.prototype, "preventDefault", (ev) => {
+    const rec = state.rec;
+    if (!afterClick(rec) || !relevantEvent(ev) || rec.preventDefaultCalls.length >= 10) return;
+    const limit = Error.stackTraceLimit;
+    let stack = "";
+    try {
+      Error.stackTraceLimit = 20;
+      stack = new Error().stack;
+    } finally {
+      Error.stackTraceLimit = limit;
+    }
+    rec.preventDefaultCalls.push({ eventType: ev.type, phase: PHASES[ev.eventPhase] || "none", currentTarget: targetCategory(ev.currentTarget), atMs: now() - rec.clickAt, frames: framesOf(stack) });
+  });
+  ["stopPropagation", "stopImmediatePropagation"].forEach((method) =>
+    wrap(Event.prototype, method, (ev) => {
+      const rec = state.rec;
+      if (!afterClick(rec) || !relevantEvent(ev) || rec.propagationStops.length >= 5) return;
+      rec.propagationStops.push({ method, eventType: ev.type, phase: PHASES[ev.eventPhase] || "none", currentTarget: targetCategory(ev.currentTarget) });
+    }),
+  );
+
+  window.addEventListener("click", function navEngineProbeClick1(e) {
     const rec = state.rec;
     if (!rec || !e.target || !e.target.closest) return;
     if (e.target.closest("[" + SUBMIT_ATTR + "]")) {
       rec.clickReceived = true;
       rec.clickAt = now();
+      rec.clickTrusted = e.isTrusted;
     }
   }, true);
-  window.addEventListener("submit", (e) => {
+  window.addEventListener("submit", function navEngineProbeSubmit2(e) {
     const rec = state.rec;
     if (!rec) return;
     if (!isProbeForm(e.target)) {
@@ -165,16 +265,22 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     rec.submitterPresent = Boolean(e.submitter);
     rec.submitterMatchesControl = Boolean(e.submitter && e.submitter.hasAttribute && e.submitter.hasAttribute(SUBMIT_ATTR));
     rec.inFlightXhrAtSubmit = state.inFlightXhr;
+    rec.submitTrusted = e.isTrusted;
+    const t = performance.now();
+    rec.validationRequests = state.validationEntries
+      .filter((v) => v.startTime <= t)
+      .slice(-10)
+      .map((v) => ({ endpoint: endpointOf(v.name), startedMsBeforeSubmit: Math.round(t - v.startTime), completedMsBeforeSubmit: v.responseEnd > 0 ? Math.round(t - v.responseEnd) : null }));
     state.inDispatch = true;
     setTimeout(() => {
       state.inDispatch = false;
       rec.defaultPrevented = e.defaultPrevented;
     }, 0);
   }, true);
-  window.addEventListener("submit", (e) => {
+  window.addEventListener("submit", function navEngineProbeSubmit3(e) {
     if (state.rec && isProbeForm(e.target)) state.rec.reachedWindowBubble = true;
   }, false);
-  window.addEventListener("invalid", (e) => {
+  window.addEventListener("invalid", function navEngineProbeInvalid4(e) {
     const rec = state.rec;
     const t = e.target;
     if (!rec || !t || !isProbeForm(t.form)) return;
@@ -182,16 +288,16 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     const id = t.getAttribute && t.getAttribute(FIELD_ATTR);
     if (id !== null && id !== undefined && rec.invalidFieldIds.length < MAX_ITEMS && !rec.invalidFieldIds.includes(id)) rec.invalidFieldIds.push(id);
   }, true);
-  window.addEventListener("reset", (e) => {
+  window.addEventListener("reset", function navEngineProbeReset5(e) {
     const rec = state.rec;
     if (!rec || !isProbeForm(e.target)) return;
     rec.resetEventFired = true;
     if (rec.dispatches.length === 0) rec.resetBeforeDispatch = true;
   }, true);
-  window.addEventListener("formdata", (e) => {
+  window.addEventListener("formdata", function navEngineProbeFormdata6(e) {
     if (afterClick(state.rec) && isProbeForm(e.target)) state.rec.formDataEventCount += 1;
   }, true);
-  window.addEventListener("error", (e) => {
+  window.addEventListener("error", function navEngineProbeError7(e) {
     const rec = state.rec;
     if (!afterClick(rec) || !e || e.target !== window || rec.errors.length >= MAX_ITEMS) return;
     let source = "unknown";
@@ -201,10 +307,10 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
     const name = e.error && e.error.constructor && typeof e.error.constructor.name === "string" ? e.error.constructor.name.slice(0, 40) : "Error";
     rec.errors.push({ name, source, duringSubmitDispatch: state.inDispatch, atMs: now() - rec.clickAt });
   }, true);
-  window.addEventListener("unhandledrejection", () => {
+  window.addEventListener("unhandledrejection", function navEngineProbeUnhandledrejection8(e) {
     if (afterClick(state.rec)) state.rec.unhandledRejections += 1;
   }, true);
-  document.addEventListener("securitypolicyviolation", (e) => {
+  document.addEventListener("securitypolicyviolation", function navEngineProbeSecuritypolicyviolation9(e) {
     const rec = state.rec;
     if (!afterClick(rec) || rec.securityPolicyViolations.length >= MAX_ITEMS) return;
     rec.securityPolicyViolations.push(String(e.effectiveDirective || "unknown").slice(0, 40));
@@ -241,6 +347,13 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
         securityPolicyViolations: [],
         inFlightXhrAtSubmit: null,
         errorLikeBefore: errorLikeCount(form),
+        probeMode: MODE,
+        pageWrappedTransports: pageWrapped.slice(),
+        clickTrusted: null,
+        submitTrusted: null,
+        preventDefaultCalls: [],
+        propagationStops: [],
+        validationRequests: [],
       };
       return true;
     },
@@ -259,6 +372,9 @@ export const SUBMIT_PROBE_SOURCE = `(() => {
   };
   return true;
 })()`;
+}
+
+export const SUBMIT_PROBE_SOURCE = buildSubmitProbeSource("full");
 
 export interface ProbeDispatch {
   transport: "fetch" | "xhr" | "beacon" | "native_form_submit";
@@ -298,18 +414,44 @@ export interface ProbeAttemptRecord {
   formConnected: boolean;
   formReplaced: boolean;
   inFlightXhrNow: number;
+  probeMode?: SubmitProbeMode;
+  pageWrappedTransports?: string[];
+  clickTrusted?: boolean | null;
+  submitTrusted?: boolean | null;
+  preventDefaultCalls?: ProbePreventDefaultCall[];
+  propagationStops?: ProbePropagationStop[];
+  validationRequests?: { endpoint: string; startedMsBeforeSubmit: number; completedMsBeforeSubmit: number | null }[];
 }
 
-export async function installSubmitProbe(page: Page): Promise<boolean> {
+export type ProbeEventTarget = "window" | "document" | "body" | "form_ancestor" | "form" | "inside_form" | "submit_control" | "other";
+export type ProbeEventPhase = "none" | "capture" | "target" | "bubble";
+
+export interface ProbePreventDefaultCall {
+  eventType: string;
+  phase: ProbeEventPhase;
+  currentTarget: ProbeEventTarget;
+  atMs: number;
+  /** Page-script stack frames only (the probe's own frames have no http(s) URL); origin + path, never a query. */
+  frames: { functionName: string; script: string; line: number; column: number }[];
+}
+
+export interface ProbePropagationStop {
+  method: "stopPropagation" | "stopImmediatePropagation";
+  eventType: string;
+  phase: ProbeEventPhase;
+  currentTarget: ProbeEventTarget;
+}
+
+export async function installSubmitProbe(page: Page, mode: SubmitProbeMode = resolveSubmitProbeMode()): Promise<boolean> {
   return (await page
     .mainFrame()
-    .evaluate(SUBMIT_PROBE_SOURCE)
+    .evaluate(buildSubmitProbeSource(mode))
     .catch(() => false)) as boolean;
 }
 
 /** Re-marks the live form and Submit control (a site may have replaced either) and opens a fresh record for this attempt. */
-export async function beginProbeAttempt(page: Page, form: Locator, submit: Locator, attempt: number): Promise<boolean> {
-  await installSubmitProbe(page);
+export async function beginProbeAttempt(page: Page, form: Locator, submit: Locator, attempt: number, mode: SubmitProbeMode = resolveSubmitProbeMode()): Promise<boolean> {
+  await installSubmitProbe(page, mode);
   await page
     .mainFrame()
     .evaluate(
@@ -393,6 +535,74 @@ export interface ClientSideCancellationEvidence {
   validationSurfaceAppeared: boolean;
   requiredAcknowledgementUncheckedIds: string[];
   requiredUncommittedFieldIds: string[];
+  probeMode?: SubmitProbeMode;
+  /** False in passive mode: no page function was replaced, so dispatch/serialise/preventDefault calls are not recorded. */
+  callRecordersActive?: boolean;
+  /** Page functions that were already not native when the probe installed (another script wrapped them first). */
+  pageWrappedTransports?: string[];
+  clickEventTrusted?: boolean | null;
+  submitEventTrusted?: boolean | null;
+  preventDefaultCalls?: SanitizedPreventDefaultCall[];
+  /** The submit was cancelled but no preventDefault() call on it was recorded: an inline handler returning false or returnValue = false (full mode only; null when not recorded). */
+  defaultPreventedWithoutRecordedCall?: boolean | null;
+  propagationStops?: ProbePropagationStop[];
+  validationRequestsBeforeSubmit?: { endpointPattern: string; startedMsBeforeSubmit: number; completedMsBeforeSubmit: number | null }[];
+  siteRejectedFieldIds?: string[];
+  unattributedErrorSurfaceCount?: number;
+}
+
+export type ScriptCategory = "page_inline" | "same_site" | "third_party" | "unknown";
+export type ScriptLibrary = "jquery" | "tag_manager" | "framework" | "unknown";
+
+export interface SanitizedStackFrame {
+  functionName: string;
+  scriptPattern: string;
+  scriptCategory: ScriptCategory;
+  library: ScriptLibrary;
+  line: number;
+  column: number;
+}
+
+export interface SanitizedPreventDefaultCall {
+  eventType: string;
+  phase: ProbeEventPhase;
+  currentTarget: ProbeEventTarget;
+  atMs: number;
+  frames: SanitizedStackFrame[];
+}
+
+function siteOf(hostname: string): string {
+  return hostname.split(".").slice(-2).join(".");
+}
+
+/** Origin + path of a page script (digit/e-mail-shaped segments masked), whether it is the page itself, same-site or third-party, and a library guess from its file name. */
+export function categoriseScript(scriptUrl: string, pageUrl: string): { scriptPattern: string; scriptCategory: ScriptCategory; library: ScriptLibrary } {
+  if (!scriptUrl) return { scriptPattern: "inline_or_eval", scriptCategory: "unknown", library: "unknown" };
+  const scriptPattern = endpointPattern(scriptUrl);
+  let scriptCategory: ScriptCategory = "unknown";
+  try {
+    const script = new URL(scriptUrl);
+    const page = new URL(pageUrl);
+    scriptCategory =
+      script.origin === page.origin && script.pathname === page.pathname ? "page_inline" : siteOf(script.hostname) === siteOf(page.hostname) ? "same_site" : "third_party";
+  } catch {
+    scriptCategory = "unknown";
+  }
+  let file = scriptPattern.toLowerCase();
+  try {
+    const parsed = new URL(scriptUrl);
+    file = (parsed.hostname + parsed.pathname).toLowerCase();
+  } catch {
+    file = scriptPattern.toLowerCase();
+  }
+  const library: ScriptLibrary = /jquery/.test(file)
+    ? "jquery"
+    : /(googletagmanager|\/gtm\.js|\/gtag\/|tagcommander|tealium|adobedtm|launch-)/.test(file)
+      ? "tag_manager"
+      : /(react|angular|vue|zone\.js)/.test(file)
+        ? "framework"
+        : "unknown";
+  return { scriptPattern, scriptCategory, library };
 }
 
 export interface ClientSideCancellationClassification {
@@ -448,6 +658,11 @@ export interface ClassifyCancellationInput {
   challengeDetected: boolean;
   requiredAcknowledgementUncheckedIds: string[];
   requiredUncommittedFieldIds: string[];
+  /** What the site's own validator showed after the cancellation (see fieldValidationState.ts); omitted when it was not read. */
+  siteValidation?: {
+    rejectedFields: { fieldId: string; purpose: string; ruleCategory: string; markedBeforeSubmit: boolean }[];
+    unattributedErrorSurfaceCount: number;
+  };
 }
 
 /**
@@ -496,6 +711,35 @@ export function classifyClientSideCancellation(input: ClassifyCancellationInput)
     requiredAcknowledgementUncheckedIds: input.requiredAcknowledgementUncheckedIds,
     requiredUncommittedFieldIds: input.requiredUncommittedFieldIds,
   };
+  if (p) {
+    const mode = p.probeMode ?? "full";
+    const calls = (p.preventDefaultCalls ?? []).map((c) => ({
+      eventType: c.eventType,
+      phase: c.phase,
+      currentTarget: c.currentTarget,
+      atMs: c.atMs,
+      frames: c.frames.map((f) => ({ functionName: f.functionName, ...categoriseScript(f.script, input.pageUrl), line: f.line, column: f.column })),
+    }));
+    Object.assign(evidence, {
+      probeMode: mode,
+      callRecordersActive: mode === "full",
+      pageWrappedTransports: p.pageWrappedTransports ?? [],
+      clickEventTrusted: p.clickTrusted ?? null,
+      submitEventTrusted: p.submitTrusted ?? null,
+      preventDefaultCalls: calls,
+      defaultPreventedWithoutRecordedCall: mode === "full" && p.defaultPrevented !== null ? p.defaultPrevented && !calls.some((c) => c.eventType === "submit") : null,
+      propagationStops: p.propagationStops ?? [],
+      validationRequestsBeforeSubmit: (p.validationRequests ?? []).map((v) => ({
+        endpointPattern: endpointPattern(v.endpoint),
+        startedMsBeforeSubmit: v.startedMsBeforeSubmit,
+        completedMsBeforeSubmit: v.completedMsBeforeSubmit,
+      })),
+    });
+  }
+  if (input.siteValidation) {
+    evidence.siteRejectedFieldIds = input.siteValidation.rejectedFields.map((f) => f.fieldId);
+    evidence.unattributedErrorSurfaceCount = input.siteValidation.unattributedErrorSurfaceCount;
+  }
   const result = (cancellationStage: CancellationStage | null, cancellationReason: string): ClientSideCancellationClassification => ({
     attempt: input.attempt,
     cancellationStage,
@@ -540,6 +784,17 @@ export function classifyClientSideCancellation(input: ClassifyCancellationInput)
   if ((evidence.inFlightXhrAtSubmit ?? 0) > 0) {
     return result("state_not_committed", `${evidence.inFlightXhrAtSubmit} page request(s) were still in flight when Submit fired, so a dependent value may not have been committed`);
   }
+  const rejected = input.siteValidation?.rejectedFields ?? [];
+  if (evidence.defaultPrevented === true && rejected.length > 0) {
+    const named = rejected.map((f) => `${f.fieldId} (${f.purpose}, ${f.ruleCategory === "none" ? "no message" : `${f.ruleCategory} rule`}${f.markedBeforeSubmit ? ", already marked before Submit" : ""})`).join(", ");
+    return result("custom_validation_rejected", `the submit was prevented and the site's validator marks field(s) ${named} invalid`);
+  }
+  if (evidence.defaultPrevented === true && (input.siteValidation?.unattributedErrorSurfaceCount ?? 0) > 0) {
+    return result(
+      "custom_validation_rejected",
+      `the submit was prevented and ${input.siteValidation!.unattributedErrorSurfaceCount} error surface(s) are shown in the form outside every field's own container, so the rejected field is not attributable`,
+    );
+  }
   if (evidence.validationSurfaceAppeared) {
     return result("custom_validation_rejected", "the submit was prevented and a new validation surface appeared in the form");
   }
@@ -567,6 +822,10 @@ export interface SubmitCancellationAttempt {
   stateRefreshBeforeAttempt: SecondAttemptStateRefresh | null;
   preSubmitSnapshot: ControlStateSnapshot[] | null;
   postCancellationSnapshot: ControlStateSnapshot[] | null;
+  fieldValidationBeforeSubmit?: FormValidationStateCapture | null;
+  fieldValidationAfterCancellation?: FormValidationStateCapture | null;
+  fieldStateComparison?: FieldStateComparison[];
+  siteRejectedFields?: SiteRejectedField[];
 }
 
 export interface SubmitCancellationDiagnostics {
@@ -574,4 +833,7 @@ export interface SubmitCancellationDiagnostics {
   attempts: SubmitCancellationAttempt[];
   snapshotDifferences: SnapshotDifference[];
   acknowledgementCheckboxes: AcknowledgementCheckboxDiagnostic[];
+  probeMode?: SubmitProbeMode;
+  /** Read once, after the last client-side-cancelled attempt; null when no attempt was cancelled client-side. */
+  submitListenerInventory?: SubmitListenerInventory | null;
 }
