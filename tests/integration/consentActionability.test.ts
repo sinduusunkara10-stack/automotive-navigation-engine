@@ -199,7 +199,7 @@ test("actionability 9 and 12: five detected groups with none actionable give fiv
 });
 
 test("actionability 10: the pre-submit scan sees no actionable optional group, the fallback rediscovers them live and the verified opt-in follows", async () => {
-  await run({ style: "offscreen", site: "requires_optin", obscure: "1", uncoverAfterMs: "3500" }, true, ({ result, businessHits, submitCount, checked }) => {
+  await run({ style: "offscreen", site: "requires_optin", obscure: "1", uncoverOnSubmit: "1" }, true, ({ result, businessHits, submitCount, checked }) => {
     const summary = result.formPostSubmitDiagnostics?.submitAttemptSummary;
     assert.ok(summary);
     assert.equal(summary.firstAttemptConsentMode, "optional_consent_groups_not_actionable");

@@ -154,8 +154,10 @@
         cover.className = "cover";
         cover.style.inset = "0";
         consents.appendChild(cover);
-        // A loading overlay that only goes away later: the controls exist but are not reachable yet.
-        if (params.get("uncoverAfterMs")) setTimeout(() => cover.remove(), Number(params.get("uncoverAfterMs")));
+        // A loading overlay that only goes away once the visitor first presses Submit: the controls
+        // exist before that but are not reachable. Tied to the click, not a timer, so runner speed
+        // never changes which scan sees them.
+        if (params.get("uncoverOnSubmit") === "1") window.__uncover = () => setTimeout(() => cover.remove(), 300);
       }
 
       if (revealAfterMs !== null || revealOnSelect) consents.classList.add("no-display");
@@ -188,6 +190,7 @@
       document.getElementById("lead-form").addEventListener("submit", async (event) => {
         event.preventDefault();
         window.__submitCount += 1;
+        if (window.__uncover) { window.__uncover(); window.__uncover = null; }
         if (site === "requires_optin") {
           if (!allOptedIn()) return;
           await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
