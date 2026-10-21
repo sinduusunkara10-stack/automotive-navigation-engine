@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai</title>
+    <style>
+      .field-row { margin: 6px 0; }
+      .custom-select-display { width: 280px; }
+      .custom-select-list { list-style: none; margin: 0; padding: 0; border: 1px solid #888; background: #fff; }
+      .custom-select-list li { padding: 4px 8px; cursor: pointer; }
+      .native-hidden { display: none; }
+      .has-error input { background-image: url("validator-lib/icon-wrong-field.png"); border-color: #b00; }
+      .field-message { color: #b00; }
+      .hp { position: absolute; left: -9999px; }
+    </style>
+  </head>
+  <body>
+    <h1>Demande d'essai</h1>
+    <div id="region"></div>
+    <form id="lead-form" action="/api/lead" method="post" novalidate>
+      <div id="civility-slot"></div>
+      <div class="field-row is-untouched">
+        <label for="first-name">Prénom*</label>
+        <input type="text" id="first-name" name="firstName" data-rule-required="true" />
+      </div>
+      <div class="field-row is-untouched">
+        <label for="last-name">Nom*</label>
+        <input type="text" id="last-name" name="lastName" data-rule-required="true" />
+      </div>
+      <div class="field-row is-untouched">
+        <label for="email">E-mail*</label>
+        <input type="email" id="email" name="email" data-rule-required="true" />
+      </div>
+      <div id="honeypot-slot"></div>
+      <input type="hidden" name="csrf_token" value="fixture-token" />
+      <button type="submit" id="submit-lead">Envoyer</button>
+    </form>
+    <script>
+      // Each scenario is a generic client-side validator behaviour chosen by the test through the
+      // query string, never tied to a brand or market.
+      const params = new URLSearchParams(location.search);
+      window.__validatorScenario = params.get("v") || "ok";
+      window.__submitCount = 0;
+      if (params.get("prewrap") === "1") {
+        const nativeFetch = window.fetch;
+        window.fetch = function siteFetchWrapper(input, init) {
+          return nativeFetch.call(this, input, init);
+        };
+      }
+      window.__pageFetch = window.fetch;
+      window.__pagePreventDefault = Event.prototype.preventDefault;
+      const form = document.getElementById("lead-form");
+      if (params.get("civility") === "proxy") {
+        const slot = document.getElementById("civility-slot");
+        slot.innerHTML =
+          '<div class="field-row is-untouched">' +
+          '<label for="civ">Civilité*</label>' +
+          '<input type="text" readonly class="custom-select-display" value="" />' +
+          '<ul class="custom-select-list" style="display:none"><li data-value="1">M.</li><li data-value="2">Mme</li></ul>' +
+          '<select id="civ" name="civility" class="native-hidden" data-rule-required="true"><option value="">Choisir</option><option value="1">M.</option><option value="2">Mme</option></select>' +
+          "</div>";
+        const display = slot.querySelector(".custom-select-display");
+        const list = slot.querySelector(".custom-select-list");
+        const select = slot.querySelector("select");
+        select.addEventListener("change", () => {
+          display.value = select.value ? select.options[select.selectedIndex].textContent : "";
+        });
+        display.addEventListener("click", () => {
+          list.style.display = list.style.display === "none" ? "block" : "none";
+        });
+        list.querySelectorAll("li").forEach((li) =>
+          li.addEventListener("click", () => {
+            select.value = li.getAttribute("data-value");
+            list.style.display = "none";
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }),
+        );
+      }
+      if (params.get("honeypot") === "1") {
+        document.getElementById("honeypot-slot").innerHTML =
+          '<div class="hp"><label for="website">Site web</label><input type="text" id="website" name="website" autocomplete="off" tabindex="-1" /></div>';
+      }
+    </script>
+    <script src="validator-lib/jquery-fake.js"></script>
+    <script src="validator-lib/site-validator.js"></script>
+  </body>
+</html>

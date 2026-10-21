@@ -65,6 +65,13 @@ const EXERCISE_SOURCE = `(async () => {
   log.push("after-requestSubmit");
   out.requestSubmitBadSubmitter = errName(() => form.requestSubmit(document.body));
 
+  out.preventDefaultIllegalThis = errName(() => Event.prototype.preventDefault.call({}));
+  const cancellable = new Event("x", { cancelable: true });
+  out.preventDefaultReturn = String(cancellable.preventDefault());
+  out.preventDefaultApplied = cancellable.defaultPrevented;
+  out.preventDefaultToString = Function.prototype.toString.call(Event.prototype.preventDefault).includes("[native code]");
+  const stopped = new Event("y", { bubbles: true });
+  out.stopPropagationReturn = String(stopped.stopPropagation());
   out.serialize = window.jQuery.fn.serialize.call({ length: 3 });
   out.serializeArrayThrows = errName(() => window.jQuery.fn.serializeArray.call({ length: 1 }));
   out.log = log;

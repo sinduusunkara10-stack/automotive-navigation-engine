@@ -14,6 +14,7 @@ import {
   classifyClientSideCancellation,
   installSubmitProbe,
   readProbeAttempt,
+  resolveSubmitProbeMode,
   type ClientSideCancellationClassification,
   type SecondAttemptStateRefresh,
   type SubmitCancellationDiagnostics,
@@ -89,6 +90,8 @@ import {
   type FormVisibilityProminenceSignals,
 } from "../forms/formRelevance.js";
 import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
+import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
+import { inventorySubmitListeners } from "./submitListenerInventory.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
@@ -97,6 +100,8 @@ interface SubmitAttemptStateRecord {
   attempt: number;
   beforeSubmit: SnapshotWithCompanions | null;
   afterCancellation: SnapshotWithCompanions | null;
+  validationBefore: FormValidationStateCapture | null;
+  validationAfter: FormValidationStateCapture | null;
   classification: ClientSideCancellationClassification | null;
   refresh: SecondAttemptStateRefresh | null;
 }
@@ -1279,7 +1284,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const form = forms.nth(selection.chosenIndex);
   const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
   const preSubmitHiddenSnapshot = await readHiddenFieldState(form);
-  const submitProbeInstalled = await installSubmitProbe(page);
+  const submitProbeMode = resolveSubmitProbeMode();
+  const submitProbeInstalled = await installSubmitProbe(page, submitProbeMode);
   const fillStartSnapshot = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
 
   const fieldsFilled = new Set<string>();
@@ -1682,6 +1688,15 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   const attemptRecords: SubmitAttemptStateRecord[] = [];
 
+  function fieldPurposes(): Map<string, string> {
+    const purposes = new Map<string, string>();
+    for (const p of initialPlan) {
+      const purpose = p.matchedField ?? (p.descriptor.selectProxyKind && !p.descriptor.visible ? "unclassified_required_select" : undefined);
+      if (purpose) purposes.set(p.descriptor.id, purpose);
+    }
+    return purposes;
+  }
+
   /**
    * A later attempt never trusts what the earlier one left behind: the form is re-tagged from the
    * live DOM (a site may have re-rendered or replaced it), and any required control that was
@@ -1717,7 +1732,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     const refresh = attemptNumber > 1 ? await refreshStateBeforeAttempt() : null;
     if (attemptNumber === 1) await tagAndReadFields(form).catch(() => []);
     const beforeSubmit = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
-    const record: SubmitAttemptStateRecord = { attempt: attemptNumber, beforeSubmit, afterCancellation: null, classification: null, refresh };
+    const validationBefore = await captureFieldValidationState(form, FIELD_INDEX_ATTR, "before_submit");
+    const record: SubmitAttemptStateRecord = { attempt: attemptNumber, beforeSubmit, afterCancellation: null, validationBefore, validationAfter: null, classification: null, refresh };
     attemptRecords.push(record);
     // A control disabled until the last field's change/blur fires is a real pattern: give the
     // page that one commit event, briefly and bounded, instead of letting click() wait out its
@@ -1774,7 +1790,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       })
       .catch(() => null);
     // Marked before the observer starts, so the probe's own attribute writes never count as page activity.
-    await beginProbeAttempt(page, form, submit, attemptNumber);
+    await beginProbeAttempt(page, form, submit, attemptNumber, submitProbeMode);
     const { ariaInvalidBefore } = await installSubmissionObserver(form, submit);
     // Started before the click -- correlates purely by "happened during this submit attempt's
     // window", never by URL/brand. Never a request/response body, never a typed or submitted value.
@@ -1818,7 +1834,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     const confirmationAppeared = !urlChanged && postSubmit.invalidFieldIds.length === 0 && observedConfirmation;
     const succeeded = postSubmit.invalidFieldIds.length === 0 && observation.terminalState === "succeeded";
     const probe = urlChanged ? null : await readProbeAttempt(page);
-    if (!urlChanged && !succeeded) record.afterCancellation = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+    if (!urlChanged && !succeeded) {
+      record.afterCancellation = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+      record.validationAfter = await captureFieldValidationState(form, FIELD_INDEX_ATTR, "after_cancellation");
+    }
     const businessSeen = businessRequests.length > 0 || observation.businessRequestDetected;
     record.classification = classifyClientSideCancellation({
       attempt: attemptNumber,
@@ -1830,6 +1849,13 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       challengeDetected: observation.terminalState === "blocked_or_challenged" && !businessSeen,
       requiredAcknowledgementUncheckedIds: beforeSubmit ? requiredAcknowledgementUnchecked(beforeSubmit.controls) : [],
       requiredUncommittedFieldIds: beforeSubmit ? requiredUncommitted(beforeSubmit.controls) : [],
+      siteValidation:
+        record.validationAfter || validationBefore
+          ? {
+              rejectedFields: siteRejectedFields(validationBefore, record.validationAfter, fieldPurposes()),
+              unattributedErrorSurfaceCount: record.validationAfter?.unattributedErrorSurfaces.length ?? 0,
+            }
+          : undefined,
     });
     return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation };
   }
@@ -1953,12 +1979,12 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       }
     }
   }
+  const lastAttemptRecord = attemptRecords[attemptRecords.length - 1];
+  // Read after the last attempt only, so the DevTools queries never overlap a Submit.
+  const submitListenerInventory = lastAttemptRecord?.classification?.cancellationStage ? await inventorySubmitListeners(page) : null;
+
   function buildSubmitCancellationDiagnostics(): SubmitCancellationDiagnostics {
-    const purposes = new Map<string, string>();
-    for (const p of initialPlan) {
-      const purpose = p.matchedField ?? (p.descriptor.selectProxyKind && !p.descriptor.visible ? "unclassified_required_select" : undefined);
-      if (purpose) purposes.set(p.descriptor.id, purpose);
-    }
+    const purposes = fieldPurposes();
     const label = (snapshot: SnapshotWithCompanions | null): ControlStateSnapshot[] | null =>
       snapshot
         ? snapshot.controls.map((c) => ({ ...c, purpose: purposes.get(c.fieldId) ?? (c.proxyRole === "select_proxy" ? "select_proxy_display" : c.type === "hidden" ? "hidden_field" : "unclassified") }))
@@ -1972,6 +1998,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       stateRefreshBeforeAttempt: r.refresh,
       preSubmitSnapshot: label(r.beforeSubmit),
       postCancellationSnapshot: label(r.afterCancellation),
+      fieldValidationBeforeSubmit: r.validationBefore,
+      fieldValidationAfterCancellation: r.validationAfter,
+      fieldStateComparison: compareDomAndValidatorState(label(r.beforeSubmit), r.validationAfter ?? r.validationBefore, (r.classification?.evidence?.inFlightXhrAtSubmit ?? 0) > 0),
+      siteRejectedFields: siteRejectedFields(r.validationBefore, r.validationAfter, purposes),
     }));
     const first = attempts[0];
     const second = attempts[1];
@@ -1983,6 +2013,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     ];
     return {
       probeInstalled: submitProbeInstalled,
+      probeMode: submitProbeMode,
+      submitListenerInventory,
       attempts,
       snapshotDifferences,
       acknowledgementCheckboxes: buildAcknowledgementCheckboxDiagnostics({
