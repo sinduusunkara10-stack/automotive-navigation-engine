@@ -93,6 +93,7 @@ import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
 import { inventorySubmitListeners } from "./submitListenerInventory.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
+import { isPhoneFieldKey, normalisePhoneForInput } from "../forms/phoneFormat.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 
@@ -718,7 +719,11 @@ async function applyDecision(
   }
   switch (plannedField.decision.kind) {
     case "fill_text":
-      await field.fill(plannedField.decision.value);
+      await field.fill(
+        isPhoneFieldKey(plannedField.decision.field)
+          ? normalisePhoneForInput(plannedField.decision.value)
+          : plannedField.decision.value,
+      );
       return { key: plannedField.decision.field };
     case "select_option": {
       await field.selectOption({ value: plannedField.decision.value });
