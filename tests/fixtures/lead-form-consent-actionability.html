@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai</title>
+    <style>
+      .scroller-on, .scroller-on body { height: 100%; overflow: hidden; margin: 0; }
+      .scroller-on #scroller { height: 100vh; overflow: auto; }
+      .opt { position: relative; display: inline-block; padding: 6px 12px; margin-right: 8px; border: 1px solid #888; cursor: pointer; }
+      .opt.is-selected { background: #036; color: #fff; }
+      .offscreen { position: absolute; left: -9999px; width: 26px; height: 26px; margin: 0; }
+      .no-display { display: none; }
+      #consents { position: relative; }
+      .cover { position: absolute; z-index: 10; background: #fff; }
+      #spacer { height: 1600px; }
+    </style>
+  </head>
+  <body>
+    <div id="scroller">
+      <h1>Demande d'essai</h1>
+      <div id="region">
+        <form id="lead-form" action="/api/lead" method="post">
+          <label for="first-name">Prénom</label>
+          <input type="text" id="first-name" name="firstName" required />
+          <label for="last-name">Nom</label>
+          <input type="text" id="last-name" name="lastName" required />
+          <label for="email">E-mail</label>
+          <input type="email" id="email" name="email" required />
+          <div id="site-select-slot"></div>
+          <div id="spacer-slot"></div>
+          <div id="consents"></div>
+          <fieldset>
+            <legend>J'ai lu la politique de confidentialité et j'accepte le traitement de ma demande *</legend>
+            <label><input type="radio" name="processing" value="1" required /> Oui</label>
+            <label><input type="radio" name="processing" value="0" required /> Non</label>
+          </fieldset>
+          <p id="error" role="alert"></p>
+          <button type="submit" id="submit-lead">Envoyer</button>
+        </form>
+      </div>
+    </div>
+    <script>
+      // Every variant is a generic custom-radio, responsive-layout or late-render pattern chosen by
+      // the test through the query string -- not tied to a brand or market.
+      const params = new URLSearchParams(location.search);
+      const optionStyle = params.get("style") || "offscreen";
+      const dup = params.get("dup") || "none";
+      const site = params.get("site") || "delayed_confirm";
+      const groupCount = Number(params.get("groups") || "2");
+      const revealAfterMs = params.get("revealAfterMs") ? Number(params.get("revealAfterMs")) : null;
+      const revealOnSelect = params.get("reveal") === "on_select";
+      const consents = document.getElementById("consents");
+      window.__submitCount = 0;
+
+      if (params.get("scroller") === "1") document.documentElement.classList.add("scroller-on");
+      if (params.get("below") === "1") {
+        const spacer = document.createElement("div");
+        spacer.id = "spacer";
+        document.getElementById("spacer-slot").appendChild(spacer);
+      }
+
+      const ALL_GROUPS = [
+        { name: "PRIVACY_FLAG_MRKT", question: "Souhaitez-vous recevoir nos offres commerciales par e-mail ?" },
+        { name: "PRIVACY_FLAG_THIRDPARTY", question: "Acceptez-vous que vos données soient partagées avec nos partenaires ?" },
+        { name: "PRIVACY_FLAG_PRFL", question: "Acceptez-vous le profilage de vos données pour personnaliser nos offres ?" },
+        { name: "PRIVACY_FLAG_SMS", question: "Souhaitez-vous recevoir nos offres commerciales par SMS ?" },
+        { name: "PRIVACY_FLAG_PARTNERS_EMAIL", question: "Souhaitez-vous recevoir les offres de nos partenaires par e-mail ?" },
+      ];
+      const groups = ALL_GROUPS.slice(0, groupCount);
+      const OPTIONS = [
+        { value: "1", text: "Oui" },
+        { value: "0", text: "Non" },
+      ];
+
+      const option = (g, opt, idSuffix, style) => {
+        const id = g.name + "-" + opt.value + idSuffix;
+        const box = document.createElement("div");
+        box.className = "opt";
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = g.name;
+        input.value = opt.value;
+        input.id = id;
+        if (style === "wrapper_only") {
+          input.className = "no-display";
+          const text = document.createElement("span");
+          text.textContent = opt.text;
+          box.appendChild(input);
+          box.appendChild(text);
+          box.addEventListener("click", () => {
+            input.checked = true;
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            box.parentElement.querySelectorAll(".opt").forEach((o) => o.classList.toggle("is-selected", o === box));
+          });
+          return box;
+        }
+        const label = document.createElement("label");
+        label.htmlFor = id;
+        label.textContent = opt.text;
+        if (style === "offscreen") input.className = "offscreen";
+        if (style === "hidden_input" || style === "both_hidden") input.className = "no-display";
+        if (style === "both_hidden") box.style.visibility = "hidden";
+        box.appendChild(input);
+        box.appendChild(label);
+        return box;
+      };
+
+      const copy = (g, idSuffix, style) => {
+        const field = document.createElement("fieldset");
+        const legend = document.createElement("legend");
+        legend.textContent = g.question;
+        field.appendChild(legend);
+        OPTIONS.forEach((opt) => field.appendChild(option(g, opt, idSuffix, style)));
+        return field;
+      };
+
+      groups.forEach((g) => {
+        if (dup === "responsive") {
+          // An inactive copy of the same question for another layout, earlier in the DOM.
+          const mobile = document.createElement("div");
+          mobile.className = "no-display";
+          mobile.appendChild(copy(g, "-m", optionStyle));
+          consents.appendChild(mobile);
+        }
+        if (dup === "shared_ids") {
+          // The inactive copy reuses the visible copy's ids, so its labels win the for= lookup.
+          const mobile = document.createElement("div");
+          mobile.className = "no-display";
+          mobile.appendChild(copy(g, "", optionStyle));
+          consents.appendChild(mobile);
+        }
+        if (dup === "covered") {
+          const holder = document.createElement("div");
+          holder.style.position = "relative";
+          holder.appendChild(copy(g, "-a", optionStyle));
+          const cover = document.createElement("div");
+          cover.className = "cover";
+          cover.style.inset = "0";
+          holder.appendChild(cover);
+          consents.appendChild(holder);
+        }
+        consents.appendChild(copy(g, "", optionStyle));
+      });
+
+      if (params.get("inactiveVariant") === "1") {
+        // Another form variant's question, never rendered and never required by this variant.
+        const variant = document.createElement("div");
+        variant.className = "no-display";
+        variant.appendChild(copy({ name: "PRIVACY_FLAG_PROFILE_VARIANT", question: "Acceptez-vous le profilage de vos données pour personnaliser nos offres ?" }, "", optionStyle));
+        consents.appendChild(variant);
+      }
+      if (params.get("obscure") === "1") {
+        const cover = document.createElement("div");
+        cover.className = "cover";
+        cover.style.inset = "0";
+        consents.appendChild(cover);
+        // A loading overlay that only goes away once the visitor first presses Submit: the controls
+        // exist before that but are not reachable. Tied to the click, not a timer, so runner speed
+        // never changes which scan sees them.
+        if (params.get("uncoverOnSubmit") === "1") window.__uncover = () => setTimeout(() => cover.remove(), 300);
+      }
+
+      if (revealAfterMs !== null || revealOnSelect) consents.classList.add("no-display");
+      if (revealAfterMs !== null) setTimeout(() => consents.classList.remove("no-display"), revealAfterMs);
+      if (revealOnSelect) {
+        const label = document.createElement("label");
+        label.htmlFor = "preferred-site";
+        label.textContent = "Point de vente";
+        const select = document.createElement("select");
+        select.id = "preferred-site";
+        select.name = "preferredSite";
+        select.required = true;
+        select.innerHTML = '<option value="">Choisir</option><option value="s1">Site 1</option><option value="s2">Site 2</option>';
+        select.addEventListener("change", () => setTimeout(() => consents.classList.remove("no-display"), 300));
+        const slot = document.getElementById("site-select-slot");
+        slot.appendChild(label);
+        slot.appendChild(select);
+      }
+
+      const confirm = () => {
+        const box = document.createElement("div");
+        box.setAttribute("role", "status");
+        box.textContent = "Merci, votre demande a bien été enregistrée.";
+        document.getElementById("region").appendChild(box);
+      };
+      const allOptedIn = () => groups.every((g) => {
+        const checked = document.querySelector('input[name="' + g.name + '"]:checked');
+        return checked && checked.value === "1";
+      });
+      document.getElementById("lead-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        window.__submitCount += 1;
+        if (window.__uncover) { window.__uncover(); window.__uncover = null; }
+        if (site === "requires_optin") {
+          if (!allOptedIn()) return;
+          await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          setTimeout(confirm, 200);
+          return;
+        }
+        if (site === "delayed_confirm") setTimeout(confirm, 200);
+      });
+    </script>
+  </body>
+</html>

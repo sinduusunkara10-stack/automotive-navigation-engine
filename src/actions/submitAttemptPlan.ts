@@ -1,4 +1,4 @@
-import type { OptionalConsentOptInGroup } from "../forms/consentGroups.js";
+import type { ConsentGroupRejection, OptionalConsentOptInGroup } from "../forms/consentGroups.js";
 import type { SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
 import type { PostSubmitObservation } from "./submissionObserver.js";
 
@@ -64,6 +64,8 @@ export interface FallbackEligibilityChecks {
   formPresentAndUsable: boolean;
   firstAttemptClassificationEligible: boolean;
   optionalConsentGroupPresent: boolean;
+  /** At least one optional group from the live rediscovery is actionable and none is rendered but unreachable. */
+  optionalConsentGroupsActionable: boolean;
   fallbackFlagEnabled: boolean;
   noPreviousRetry: boolean;
 }
@@ -81,6 +83,7 @@ export function evaluateFallbackEligibility(input: {
   formVisibleNow: boolean;
   submitEnabledNow: boolean;
   optionalConsentGroupPresent: boolean;
+  optionalConsentGroupsActionable: boolean;
   fallbackFlagEnabled: boolean;
   submitAttemptsSoFar: number;
   correctiveRetriesAfterSubmit: number;
@@ -107,14 +110,26 @@ export function evaluateFallbackEligibility(input: {
     formPresentAndUsable: o !== null && o.formStillPresentAtEnd && !o.submitControlDisabledAtEnd && input.formVisibleNow && input.submitEnabledNow,
     firstAttemptClassificationEligible: input.firstAttemptOutcome === "cancelled_before_business_request" || input.firstAttemptOutcome === "consent_state_not_committed",
     optionalConsentGroupPresent: input.optionalConsentGroupPresent,
+    optionalConsentGroupsActionable: input.optionalConsentGroupsActionable,
     fallbackFlagEnabled: input.fallbackFlagEnabled,
     noPreviousRetry: input.submitAttemptsSoFar === 1 && input.correctiveRetriesAfterSubmit === 0 && input.submitAttemptsSoFar < MAX_SUBMIT_ATTEMPTS,
   };
   return { checks, eligible: Object.values(checks).every(Boolean) };
 }
 
+export type FirstAttemptConsentMode = "decline" | "optional_consent_groups_not_actionable" | "no_optional_consent_groups";
+
+export type FallbackNotUsedReason =
+  | "first_attempt_succeeded"
+  | "fallback_flag_disabled"
+  | "no_optional_consent_groups"
+  | "optional_consent_groups_detected_but_not_actionable"
+  | "eligibility_guard_failed"
+  | "optional_consent_opt_in_not_verified"
+  | "submit_never_attempted";
+
 export interface SubmitAttemptSummary {
-  firstAttemptConsentMode: "decline" | "no_optional_consent_groups";
+  firstAttemptConsentMode: FirstAttemptConsentMode;
   /** False when at least one optional decline never read back as selected (consent_decline_not_committed). */
   firstAttemptConsentCommitted: boolean;
   firstAttemptObservationMs: number | null;
@@ -127,8 +142,18 @@ export interface SubmitAttemptSummary {
   fallbackUsed: boolean;
   fallbackOutcomeTag: "test_only_optional_consent_fallback" | null;
   fallbackDecision: string;
+  /** Null when the fallback was used. */
+  fallbackNotUsedReason: FallbackNotUsedReason | null;
   fallbackConsentGroups: OptionalConsentOptInGroup[];
+  /** Live re-reads of the optional consent groups after the first attempt (0 when none was needed). */
+  optionalGroupRediscoveryCount: number;
+  /** From the live rediscovery when one ran, else from the pre-submit scan. */
+  actionableOptionalGroupCount: number;
+  nonActionableOptionalGroupCount: number;
+  nonActionableOptionalGroups: ConsentGroupRejection[];
   secondAttemptConsentMode: "opt_in_test_only" | null;
+  /** True when every optional accept read back strictly before the second Submit; null without a second attempt. */
+  secondAttemptConsentCommitted: boolean | null;
   secondAttemptObservationMs: number | null;
   secondAttemptBusinessRequestDetected: boolean | null;
   secondAttemptOutcome: SubmitAttemptOutcome | null;
@@ -139,9 +164,14 @@ export interface SubmitAttemptSummary {
   firstAttemptObservation: PostSubmitObservation | null;
 }
 
-export function submitNeverAttemptedSummary(fallbackFlagEnabled: boolean, optionalGroupsPresent: boolean, consentCommitted: boolean): SubmitAttemptSummary {
+export function submitNeverAttemptedSummary(
+  fallbackFlagEnabled: boolean,
+  firstAttemptConsentMode: FirstAttemptConsentMode,
+  consentCommitted: boolean,
+  optionalGroups: { actionable: number; nonActionable: ConsentGroupRejection[] },
+): SubmitAttemptSummary {
   return {
-    firstAttemptConsentMode: optionalGroupsPresent ? "decline" : "no_optional_consent_groups",
+    firstAttemptConsentMode,
     firstAttemptConsentCommitted: consentCommitted,
     firstAttemptObservationMs: null,
     firstAttemptBusinessRequestDetected: false,
@@ -152,8 +182,14 @@ export function submitNeverAttemptedSummary(fallbackFlagEnabled: boolean, option
     fallbackUsed: false,
     fallbackOutcomeTag: null,
     fallbackDecision: "not considered: the pre-submit readiness gate failed, so Submit was never clicked",
+    fallbackNotUsedReason: "submit_never_attempted",
     fallbackConsentGroups: [],
+    optionalGroupRediscoveryCount: 0,
+    actionableOptionalGroupCount: optionalGroups.actionable,
+    nonActionableOptionalGroupCount: optionalGroups.nonActionable.length,
+    nonActionableOptionalGroups: optionalGroups.nonActionable,
     secondAttemptConsentMode: null,
+    secondAttemptConsentCommitted: null,
     secondAttemptObservationMs: null,
     secondAttemptBusinessRequestDetected: null,
     secondAttemptOutcome: null,
@@ -161,4 +197,10 @@ export function submitNeverAttemptedSummary(fallbackFlagEnabled: boolean, option
     totalSubmitAttempts: 0,
     firstAttemptObservation: null,
   };
+}
+
+/** How the first attempt treated the optional commercial groups the pre-submit scan found. */
+export function firstAttemptConsentModeOf(actionableOptionalGroups: number, nonActionableOptionalGroups: number): FirstAttemptConsentMode {
+  if (actionableOptionalGroups > 0) return "decline";
+  return nonActionableOptionalGroups > 0 ? "optional_consent_groups_not_actionable" : "no_optional_consent_groups";
 }

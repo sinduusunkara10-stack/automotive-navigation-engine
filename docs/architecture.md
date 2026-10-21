@@ -4083,3 +4083,38 @@ Structure:
   With the flag on, the first attempt is held to the 75 s cap, so a late confirmation is never
   answered with a duplicate. The second Submit happens only after every accept reads back, is
   observed for at least 50 s, and is never followed by a third.
+
+### Lead-form filling: consent-group actionability and live fallback rediscovery (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A live run with the test-only opt-in flag detected five radio groups but treated none as visible,
+so nothing was declined, the rescan loop stopped at once and the fallback reported no optional
+group. The native inputs sat about 9,000 px off the left edge (a visually-hidden custom radio),
+and discovery measured the label and wrapper against the document's own scroll size, so a page
+that scrolls inside a container rejected every surface outside the viewport. Invisible groups
+also produced no diagnostic, and the fallback reused that empty first scan.
+
+Structure:
+
+- `src/forms/consentGroups.ts`:
+  - One logical option is its native input, its browser-associated label (`input.labels`, so a
+    label whose `for` resolves to a responsive copy with the same id does not count) and its own
+    exclusive wrapper. It is actionable when one of those surfaces is rendered, enabled, on
+    screen, not clipped and wins a hit-test (`elementFromPoint` at the centre of its on-screen
+    part). An off-screen native input is never pointer-clicked because it has a box.
+  - A group with no actionable member is scrolled into view (its label, wrapper or fieldset,
+    never the off-screen input) and measured again before it can be rejected. Inputs under a
+    `display:none` ancestor are inactive copies; non-actionable members repeating an actionable
+    option are responsive duplicates; a fully hidden group asking the same question as an
+    actionable one is rejected at `responsive_dedupe`.
+  - Every detected group ends in `consentGroupDiagnostics` or `consentGroupRejections`, with the
+    rejection stage, the reason and per-surface found, visible, on-screen and clipped flags.
+  - The resolution loop rescans (bounded, 400 ms apart) while a detected group is still not
+    actionable, so controls rendered after the dealer step or a layout change are picked up.
+  - `rediscoverOptionalConsentGroups` re-reads the optional groups from the live DOM for the
+    fallback decision.
+- `src/actions/submitAttemptPlan.ts` and `src/actions/fillForm.ts`: the fallback check
+  `optionalConsentGroupsActionable` requires every optional group from the live rediscovery to
+  be actionable. When groups exist but are not, the summary reports
+  `fallbackNotUsedReason: "optional_consent_groups_detected_but_not_actionable"` with the
+  rejection records. The summary also reports the rediscovery count, actionable and
+  non-actionable optional group counts and whether the second attempt's consents committed.
