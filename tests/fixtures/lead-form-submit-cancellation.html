@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai</title>
+    <style>
+      .custom-select { position: relative; width: 300px; }
+      .custom-select-display { width: 280px; }
+      .custom-select-list { list-style: none; margin: 0; padding: 0; border: 1px solid #888; background: #fff; }
+      .custom-select-list li { padding: 4px 8px; cursor: pointer; }
+      .native-hidden { display: none; }
+      .offscreen { position: absolute; left: -9999px; width: 20px; height: 20px; margin: 0; }
+      .opt { position: relative; display: inline-block; padding: 6px 12px; margin-right: 8px; border: 1px solid #888; cursor: pointer; }
+      .error { color: #b00; }
+    </style>
+  </head>
+  <body>
+    <h1>Demande d'essai</h1>
+    <div id="region"></div>
+    <iframe name="lead-target" id="lead-target" style="width: 1px; height: 1px; border: 0"></iframe>
+    <template id="form-template">
+      <form id="lead-form" action="/api/lead" method="post">
+        <div id="civility-slot"></div>
+        <label for="first-name">Prénom</label>
+        <input type="text" id="first-name" name="firstName" required />
+        <label for="last-name">Nom</label>
+        <input type="text" id="last-name" name="lastName" required />
+        <label for="email">E-mail</label>
+        <input type="email" id="email" name="email" required />
+        <div id="ack-slot"></div>
+        <div id="consents"></div>
+        <input type="hidden" name="dealerValid" value="" />
+        <p id="error" role="alert"></p>
+        <div id="decoy-slot"></div>
+        <button type="submit" id="submit-lead">Envoyer</button>
+      </form>
+    </template>
+    <script>
+      // Each scenario is a generic client-side form behaviour chosen by the test through the query
+      // string -- a custom select widget, an acknowledgement checkbox, a submit handler -- never tied
+      // to a brand or market.
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || "ok_xhr";
+      const civility = params.get("civility") || "none";
+      const ack = params.get("ack") || "none";
+      const consents = params.get("consents") === "1";
+      window.__submitCount = 0;
+      window.__events = [];
+      const region = document.getElementById("region");
+
+      const confirm = () => {
+        const box = document.createElement("div");
+        box.setAttribute("role", "status");
+        box.textContent = "Merci, votre demande a bien été enregistrée.";
+        region.appendChild(box);
+      };
+
+      const buildCivility = (form) => {
+        if (civility === "none") return;
+        const slot = form.querySelector("#civility-slot");
+        slot.innerHTML =
+          '<label for="civ">Civilité*</label>' +
+          '<div class="custom-select">' +
+          '<input type="text" readonly class="custom-select-display" value="" />' +
+          '<ul class="custom-select-list" style="display:none"><li data-value="1">M.</li><li data-value="2">Mme</li></ul>' +
+          '<select id="civ" name="civility" class="native-hidden"><option value="">Choisir</option><option value="1">M.</option><option value="2">Mme</option></select>' +
+          "</div>";
+        const display = slot.querySelector(".custom-select-display");
+        const list = slot.querySelector(".custom-select-list");
+        const select = slot.querySelector("select");
+        const sync = () => {
+          const opt = select.options[select.selectedIndex];
+          display.value = select.value ? opt.textContent : "";
+        };
+        select.addEventListener("change", sync);
+        if (civility !== "proxy_list_never_opens") {
+          display.addEventListener("click", () => {
+            list.style.display = list.style.display === "none" ? "block" : "none";
+          });
+        }
+        list.querySelectorAll("li").forEach((li) =>
+          li.addEventListener("click", () => {
+            select.value = li.getAttribute("data-value");
+            list.style.display = "none";
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }),
+        );
+      };
+
+      const buildAck = (form) => {
+        if (ack === "none") return;
+        const slot = form.querySelector("#ack-slot");
+        const required = ack === "required_html" || ack === "offscreen_required" || ack === "companion";
+        const box = document.createElement("div");
+        box.className = ack === "ui_disagree" ? "checkbox is-checked" : "checkbox";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.id = "ack";
+        input.name = "acknowledge";
+        input.value = "1";
+        if (required) input.required = true;
+        if (ack === "required_js") input.setAttribute("data-required", "true");
+        if (ack === "offscreen_required") input.className = "offscreen";
+        const label = document.createElement("label");
+        label.htmlFor = "ack";
+        label.textContent = "J'ai lu et j'accepte les conditions d'utilisation";
+        box.appendChild(input);
+        box.appendChild(label);
+        if (ack === "companion") {
+          const hidden = document.createElement("input");
+          hidden.type = "hidden";
+          hidden.name = "acknowledgeCommitted";
+          hidden.value = "";
+          box.appendChild(hidden);
+          // The widget only commits its companion on a click of its own label.
+          label.addEventListener("click", () => {
+            hidden.value = "1";
+          });
+        }
+        slot.appendChild(box);
+      };
+
+      const buildConsents = (form) => {
+        if (!consents) return;
+        const host = form.querySelector("#consents");
+        [
+          { name: "PRIVACY_FLAG_MRKT", question: "Souhaitez-vous recevoir nos offres commerciales par e-mail ?" },
+          { name: "PRIVACY_FLAG_THIRDPARTY", question: "Acceptez-vous que vos données soient partagées avec nos partenaires ?" },
+        ].forEach((g) => {
+          const field = document.createElement("fieldset");
+          const legend = document.createElement("legend");
+          legend.textContent = g.question;
+          field.appendChild(legend);
+          [
+            { value: "1", text: "Oui" },
+            { value: "0", text: "Non" },
+          ].forEach((opt) => {
+            const box = document.createElement("div");
+            box.className = "opt";
+            const input = document.createElement("input");
+            input.type = "radio";
+            input.name = g.name;
+            input.value = opt.value;
+            input.id = g.name + "-" + opt.value;
+            input.className = "offscreen";
+            const label = document.createElement("label");
+            label.htmlFor = input.id;
+            label.textContent = opt.text;
+            box.appendChild(input);
+            box.appendChild(label);
+            field.appendChild(box);
+          });
+          host.appendChild(field);
+        });
+      };
+
+      const allOptedIn = (form) =>
+        ["PRIVACY_FLAG_MRKT", "PRIVACY_FLAG_THIRDPARTY"].every((n) => {
+          const c = form.querySelector('input[name="' + n + '"]:checked');
+          return c && c.value === "1";
+        });
+
+      const post = (form) =>
+        new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", form.getAttribute("action"));
+          xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+          xhr.onload = () => resolve(xhr.status);
+          xhr.send(new URLSearchParams(new FormData(form)).toString());
+        });
+
+      let emailPending = false;
+      const render = () => {
+        const fresh = document.getElementById("form-template").content.firstElementChild.cloneNode(true);
+        const existing = document.getElementById("lead-form");
+        if (existing) existing.replaceWith(fresh);
+        else region.appendChild(fresh);
+        const form = fresh;
+        buildCivility(form);
+        buildAck(form);
+        buildConsents(form);
+        if (scenario === "wrong_control") {
+          // A second, hidden submit control earlier in the form (another layout's copy).
+          form.querySelector("#decoy-slot").innerHTML = '<button type="submit" id="decoy" style="display:none">Envoyer</button>';
+          form.querySelector("#decoy-slot").parentElement.insertBefore(form.querySelector("#decoy-slot"), form.firstElementChild);
+        }
+        if (scenario === "ok_iframe") form.setAttribute("target", "lead-target");
+        if (scenario === "no_submit_event") {
+          // A script that takes over the Submit click and then never submits the form.
+          form.querySelector("#submit-lead").addEventListener("click", (e) => e.preventDefault());
+        }
+        if (scenario === "pending_email" || scenario === "pending_dealer") {
+          form.querySelector("#email").addEventListener("input", () => {
+            emailPending = true;
+            const xhr = new XMLHttpRequest();
+            xhr.open("GET", scenario === "pending_email" ? "/api/email-check" : "/api/dealer-lookup");
+            xhr.onloadend = () => {
+              emailPending = false;
+            };
+            xhr.send();
+          });
+        }
+        let changed = new Set();
+        form.addEventListener("change", (e) => changed.add(e.target.name));
+        if (scenario === "throws") {
+          form.addEventListener("submit", (event) => {
+            event.preventDefault();
+            throw new Error("handler failed");
+          });
+        }
+        form.addEventListener("submit", async (event) => {
+          window.__submitCount += 1;
+          const required = ["civility"].filter((n) => form.querySelector('[name="' + n + '"]'));
+          const missing = required.some((n) => !form.querySelector('[name="' + n + '"]').value);
+          if (scenario === "ok_navigation" || scenario === "ok_iframe") {
+            if (missing) event.preventDefault();
+            return;
+          }
+          if (scenario === "native_invalid") return;
+          event.preventDefault();
+          if (missing) return;
+          if (ack === "required_js" && !form.querySelector("#ack").checked) return;
+          if (ack === "companion" && form.querySelector('[name="acknowledgeCommitted"]').value !== "1") return;
+          if (scenario === "custom_false_silent") return;
+          if (scenario === "custom_message") {
+            form.querySelector("#error").textContent = "Veuillez vérifier votre saisie.";
+            return;
+          }
+          if (scenario === "throws") return;
+          if (scenario === "async_reject") {
+            Promise.reject(new Error("async validation failed"));
+            return;
+          }
+          if (scenario === "serialise_throws") {
+            window.jQuery.fn.serialize.call(form);
+            return;
+          }
+          if (scenario === "formdata_no_dispatch") {
+            new FormData(form);
+            return;
+          }
+          if (scenario === "dealer_flag" && form.querySelector('[name="dealerValid"]').value !== "1") return;
+          if ((scenario === "pending_email" || scenario === "pending_dealer") && emailPending) return;
+          if (scenario === "needs_change" && !["firstName", "lastName", "email"].every((n) => changed.has(n))) return;
+          if (scenario === "requires_submitter" && !event.submitter) return;
+          if (scenario === "requires_optin" && !allOptedIn(form)) return;
+          if (scenario === "reset_once" && window.__submitCount === 1) {
+            // The page re-renders the whole form after the first Submit: every node is new and empty.
+            setTimeout(render, 100);
+            return;
+          }
+          if (scenario === "ok_fetch") {
+            await fetch(form.getAttribute("action"), { method: "POST", body: new FormData(form) });
+            setTimeout(confirm, 200);
+            return;
+          }
+          const status = await post(form);
+          if (scenario === "ok_xhr_no_confirm") return;
+          if (status === 200) setTimeout(confirm, 200);
+        });
+      };
+
+      if (scenario === "serialise_throws") {
+        window.jQuery = function () {};
+        window.jQuery.fn = {
+          serialize() {
+            throw new Error("serialise failed");
+          },
+        };
+      }
+      if (scenario === "native_invalid") {
+        document.getElementById("form-template").content.querySelector("#email").setAttribute("pattern", "[0-9]+@[0-9]+");
+      }
+      render();
+    </script>
+  </body>
+</html>

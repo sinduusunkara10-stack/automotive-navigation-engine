@@ -2,6 +2,8 @@ import type { ActionType, SelectedAction } from "./actions.js";
 import type { ConsentControlIntent } from "./consentControl.js";
 import type { ConsentInteractionPolicy } from "./task-request.js";
 import type { JourneyMemoryDiagnostics } from "./journeyMemory.js";
+import type { SubmitCancellationDiagnostics } from "../actions/submitCancellationProbe.js";
+import type { ProxiedSelectOutcome } from "../forms/selectProxy.js";
 import type {
   AlternativeExplorationDiagnostics,
   ConsentDiagnostics,
@@ -640,6 +642,8 @@ export interface ActionResult {
       decision: string;
       filled: boolean;
     }[];
+    /** 1.53.0 additive amendment: one record per required hidden native select committed through its visible custom control (see forms/selectProxy.ts). */
+    proxiedSelectDiagnostics?: ProxiedSelectOutcome[];
   };
   /**
    * Opt-in, investigation-only evidence for a `fill_form` action -- present only when the
@@ -1106,6 +1110,14 @@ export interface ActionResult {
     postSubmitObservation: PostSubmitObservationWire | null;
     /** Both Submit attempts (at most two), the test-only opt-in fallback's guards and its outcome. */
     submitAttemptSummary: SubmitAttemptSummaryWire;
+    /**
+     * 1.53.0 additive amendment. Per Submit attempt: the client-side stage the submission stopped
+     * at (from passive in-page listeners and call recorders, see actions/submitCancellationProbe.ts),
+     * a sanitised per-control snapshot before Submit and after the cancellation, the differences
+     * between those snapshots across both attempts, and one record per checkbox of the form.
+     * Absent when Submit was never attempted.
+     */
+    submitCancellationDiagnostics?: SubmitCancellationDiagnostics;
   };
   /**
    * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets

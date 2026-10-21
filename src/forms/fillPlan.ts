@@ -34,10 +34,36 @@ export interface FormFieldDescriptor extends FormFieldTextHints {
    * vocabulary; only the one actually paired with a lookup control is upgraded to dealer_search.
    */
   dealerLookupTriggerIndex?: string;
+  /** Set when this is a hidden native <select> whose visible stand-in is a custom control in the same small container (see fillForm.ts's tagAndReadFields). */
+  selectProxyKind?: "readonly_input" | "combobox" | "button";
+  /** The visible stand-in of a hidden native select: it only displays the select's choice and is never filled itself. */
+  isSelectProxy?: boolean;
+}
+
+/**
+ * A required native <select> hidden behind a visible custom control is still the field the site
+ * validates and serialises, so it is filled (through the proxy, see forms/selectProxy.ts) and
+ * counted by the readiness gate like a visible field. Optional ones and dealer-lookup selects keep
+ * the old hidden handling: the dealer flow owns its own widgets.
+ */
+export function isProxiedRequiredSelect(descriptor: FormFieldDescriptor, matchedField?: LeadFormFieldKey): boolean {
+  return (
+    descriptor.tagName === "select" &&
+    !descriptor.visible &&
+    Boolean(descriptor.selectProxyKind) &&
+    descriptor.required &&
+    (matchedField ?? matchLeadFormField(descriptor)) !== "dealerSearch"
+  );
+}
+
+/** Visible, or a required select reachable through its visible proxy. */
+export function isFillTarget(descriptor: FormFieldDescriptor): boolean {
+  if (descriptor.isSelectProxy) return false;
+  return descriptor.visible || isProxiedRequiredSelect(descriptor);
 }
 
 export type FillDecision =
-  | { kind: "skip"; reason: "prefilled" | "hidden" | "optional" | "no_free_text_target" }
+  | { kind: "skip"; reason: "prefilled" | "hidden" | "optional" | "no_free_text_target" | "select_proxy" }
   | { kind: "fill_text"; field: LeadFormFieldKey | "genericRequiredText"; value: string }
   | { kind: "select_option"; value: string }
   | { kind: "choose_first_valid_option" }
@@ -96,7 +122,10 @@ const CONSENT_FIELDS: LeadFormFieldKey[] = ["consentStayInTouch", "consentPerson
 export function planField(descriptor: FormFieldDescriptor, context: FillPlanContext): PlannedField {
   const matchedField = matchLeadFormField(descriptor);
 
-  if (!descriptor.visible || descriptor.type === "hidden") {
+  if (descriptor.isSelectProxy) {
+    return { descriptor, matchedField, decision: { kind: "skip", reason: "select_proxy" } };
+  }
+  if ((!descriptor.visible && !isProxiedRequiredSelect(descriptor, matchedField)) || descriptor.type === "hidden") {
     return { descriptor, matchedField, decision: { kind: "skip", reason: "hidden" } };
   }
 
