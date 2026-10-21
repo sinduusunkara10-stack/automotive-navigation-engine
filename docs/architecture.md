@@ -4033,3 +4033,53 @@ Structure:
   - post-submit validation text has e-mail addresses and digit runs masked.
 
 Consent diagnostics no longer return the question text.
+
+### Lead-form filling: custom-radio verification, 50 s submission window and the test-only consent retry (schemaVersion 1.50.0 -> 1.51.0, outputSchemaVersion 1.52.0 -> 1.53.0)
+
+A live run after the optional-consent change attempted the optional declines, but none read back
+as checked. Submit was clicked, no business request followed, and observation ended after about
+20 s, while the site confirms manually after about a minute. The consent click only targeted the
+native input whenever it had a non-zero box, even an off-screen one, so the label was never
+tried, and only the input's own `checked` flag was read back.
+
+Structure:
+
+- `src/forms/consentGroups.ts`:
+  - Discovery treats an option as visible when its input, label or component wrapper (the
+    nearest ancestor holding that option and no other radio) is rendered on the document and not
+    clipped. Off-screen copies and hidden responsive duplicates are excluded.
+  - Activation tries, in order: a pointer click on the native input (only when it is on the
+    document and not clipped), the label, the wrapper, focus plus keyboard Space, then the
+    element's own `click()`, which fires click, input and change only when the click is not
+    cancelled. Each route waits up to 1.2 s for framework state to reconcile and re-reads after
+    250 ms to catch a revert.
+  - Verification reads native `checked`, the form's selected value for the shared name, the
+    `checked` attribute, `aria-checked`, a selected class on the option's own label or wrapper,
+    and framework data attributes. Any other option reading as selected is a contradiction. A
+    hidden input in the group's container is recorded as changed or not, never as a value.
+  - A decline that never reads back is tagged `consent_decline_not_committed`.
+  - `applyOptionalConsentOptInForTest` switches only optional marketing, profiling and
+    third-party groups to accept, with strict verification: native state plus every component
+    state the widget exposes.
+- `src/actions/submissionObserver.ts`: the minimum window is 50 s, polled every 500 ms, with the
+  75 s hard cap and 10 s progress extensions unchanged. Only a decisive terminal signal ends it
+  sooner. A new alert or status surface carrying a duplicate-submission or rate-limit notice is a
+  terminal `blocked_or_challenged`, never a confirmation. Under `NODE_ENV=test` only, an unset
+  config keeps a 10 s minimum so the fixture suite stays practical. Tests that check production
+  timings pass `DEFAULT_SUBMISSION_OBSERVATION_CONFIG`.
+- `src/actions/submitAttemptPlan.ts` (new): attempt classification, the fallback guards and the
+  `submitAttemptSummary` shape. A form gets at most two Submit clicks, including validation and
+  dealer retries.
+- `src/actions/fillForm.ts`: after the first attempt, the opt-in fallback runs only when
+  `safety.allowOptionalConsentOptInFallbackForTest` is true and every guard holds:
+  - the minimum observation elapsed;
+  - there was no confirmation;
+  - no business request was started, is pending or was accepted;
+  - no progress remains at the end;
+  - there is no validation, rejection, challenge, duplicate or rate-limit status;
+  - the form is still present with Submit enabled;
+  - the first attempt is `cancelled_before_business_request` or `consent_state_not_committed`;
+  - no earlier retry ran.
+  With the flag on, the first attempt is held to the 75 s cap, so a late confirmation is never
+  answered with a duplicate. The second Submit happens only after every accept reads back, is
+  observed for at least 50 s, and is never followed by a third.

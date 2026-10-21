@@ -4,16 +4,18 @@ import { isSameRegistrableDomain } from "../discovery/registrableDomain.js";
 import type { DealerLookupNetworkCapture, SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
 
 /**
- * Post-submit observation is a bounded, adaptive state machine, never a fixed sleep: a short base
- * window that ends early on the first decisive signal, extended only while concrete progress
- * evidence exists (a correlated business request still in flight, a disabled submit control, an
- * active loading indicator, DOM changes continuing around the form), up to a hard cap long enough
- * for a lead service that confirms on the same page after about a minute.
+ * Post-submit observation is a bounded, adaptive state machine, never a fixed sleep: a minimum
+ * window of 50 s that is kept even through silent periods (no loading indicator, no business
+ * request yet, a quiet DOM, the form still visible) and ends early only on a decisive terminal
+ * signal, then extended only while concrete progress evidence exists (a correlated business
+ * request still in flight, a disabled submit control, an active loading indicator, DOM changes
+ * continuing around the form), up to a hard cap -- some lead services confirm on the same page
+ * only about a minute after Submit.
  */
-export const POST_SUBMIT_BASE_WINDOW_MS = 10_000;
+export const POST_SUBMIT_BASE_WINDOW_MS = 50_000;
 export const POST_SUBMIT_EXTENSION_MS = 10_000;
 export const POST_SUBMIT_HARD_CAP_MS = 75_000;
-export const POST_SUBMIT_POLL_INTERVAL_MS = 250;
+export const POST_SUBMIT_POLL_INTERVAL_MS = 500;
 /** DOM changes around the form more recent than this still count as "the page is working". */
 export const POST_SUBMIT_RECENT_MUTATION_MS = 2_000;
 
@@ -30,6 +32,19 @@ export const DEFAULT_SUBMISSION_OBSERVATION_CONFIG: SubmissionObservationConfig 
   hardCapMs: POST_SUBMIT_HARD_CAP_MS,
   pollIntervalMs: POST_SUBMIT_POLL_INTERVAL_MS,
 };
+
+/**
+ * The unit-test suite (NODE_ENV=test) runs dozens of fixture submits that never confirm; a 50 s
+ * minimum each would make it impractically slow, so it keeps a 10 s minimum there. Tests that
+ * assert the production timings pass DEFAULT_SUBMISSION_OBSERVATION_CONFIG explicitly. Never
+ * consulted outside NODE_ENV=test.
+ */
+const TEST_ENV_SUBMISSION_OBSERVATION_CONFIG: SubmissionObservationConfig = { ...DEFAULT_SUBMISSION_OBSERVATION_CONFIG, baseWindowMs: 10_000, pollIntervalMs: 250 };
+
+export function resolveSubmissionObservationConfig(override?: SubmissionObservationConfig): SubmissionObservationConfig {
+  if (override) return override;
+  return process.env.NODE_ENV === "test" ? TEST_ENV_SUBMISSION_OBSERVATION_CONFIG : DEFAULT_SUBMISSION_OBSERVATION_CONFIG;
+}
 
 export type SubmissionTerminalState = "succeeded" | "validation_failed" | "server_rejected" | "server_error" | "blocked_or_challenged" | "unknown_outcome";
 
@@ -59,6 +74,9 @@ export interface BusinessRequestEvidence {
 }
 
 export interface PostSubmitObservation {
+  /** The window kept even through silent periods; only a decisive terminal signal ends observation sooner. */
+  minimumObservationMs: number;
+  pollIntervalMs: number;
   baseWindowMs: number;
   extensionMs: number;
   hardCapMs: number;
@@ -74,6 +92,9 @@ export interface PostSubmitObservation {
   confirmationDetectedAtMs: number | null;
   successSignals: SubmissionSuccessSignal[];
   formStillPresentAtEnd: boolean;
+  /** Progress evidence still present when observation ended (a delayed success may still be emerging). */
+  finalProgressReasons: SubmissionExtensionReason[];
+  submitControlDisabledAtEnd: boolean;
   terminalState: SubmissionTerminalState;
   terminalReason: string;
 }
@@ -142,12 +163,21 @@ const ERROR_STATUS_MARKERS = [
   "fehler", "ungultig", "erforderlich", "fout", "ongeldig", "verplicht", "errore", "non valido", "obbligatorio",
   "no valido", "obligatorio", "blad", "nieprawidlow", "wymagane", "erro", "invalido",
 ];
+// A duplicate-submission or rate-limit notice often reads like a confirmation ("already sent"), so it
+// is checked first and treated as a terminal block -- never as success, never as a reason to retry.
+const DUPLICATE_OR_RATE_LIMIT_MARKERS = [
+  "already submitted", "already been submitted", "already been sent", "already sent", "duplicate", "too many requests", "rate limit",
+  "deja ete envoye", "deja envoye", "deja ete soumis", "deja soumis", "trop de demandes", "doublon",
+  "bereits gesendet", "bereits eingegangen", "bereits ubermittelt", "zu viele anfragen",
+  "al verzonden", "te veel verzoeken", "gia inviat", "troppe richieste", "ya enviad", "demasiadas solicitudes", "ja enviad", "zbyt wiele",
+];
 const SUCCESS_EVENT_TOKENS = ["success", "succeeded", "successful", "complete", "completed", "confirmation", "confirmed", "thankyou", "thanks", "thank"];
 
 const OBSERVER_SOURCE = `(() => {
   const KEY = "__navEngineSubmitObserver";
   const SUCCESS = ${JSON.stringify(SUCCESS_STATUS_MARKERS)};
   const ERROR = ${JSON.stringify(ERROR_STATUS_MARKERS)};
+  const DUPLICATE = ${JSON.stringify(DUPLICATE_OR_RATE_LIMIT_MARKERS)};
   const EVENT_TOKENS = ${JSON.stringify(SUCCESS_EVENT_TOKENS)};
   const norm = (t) => (t || "").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "");
   const visible = (el) => {
@@ -181,6 +211,7 @@ const OBSERVER_SOURCE = `(() => {
     return fields.some((f) => typeof f === "string" && tokens(f).some((t) => EVENT_TOKENS.includes(t)));
   };
   const classifySurfaceText = (text) => ({
+    duplicate: DUPLICATE.some((m) => text.includes(m)),
     success: SUCCESS.some((m) => text.includes(m)),
     error: ERROR.some((m) => text.includes(m)),
   });
@@ -188,6 +219,7 @@ const OBSERVER_SOURCE = `(() => {
     snapshot() {
       let statusSuccess = false;
       let statusError = false;
+      let statusDuplicateOrRateLimit = false;
       let newSurfaces = 0;
       Array.from(document.querySelectorAll(SURFACE)).forEach((el) => {
         if (!visible(el)) return;
@@ -196,6 +228,10 @@ const OBSERVER_SOURCE = `(() => {
         if (baselineSurfaces.has(el) && baselineSurfaceText.get(el) === text) return;
         newSurfaces += 1;
         const c = classifySurfaceText(text);
+        if (c.duplicate) {
+          statusDuplicateOrRateLimit = true;
+          return;
+        }
         if (c.success && !c.error) statusSuccess = true;
         if (c.error && !c.success) statusError = true;
       });
@@ -212,6 +248,7 @@ const OBSERVER_SOURCE = `(() => {
         newSurfaces,
         statusSuccess,
         statusError,
+        statusDuplicateOrRateLimit,
         dataLayerNewEvents: fresh.length,
         dataLayerSuccessEvent: fresh.some(isSuccessEvent),
         busy: busyEls.some(visible),
@@ -236,6 +273,7 @@ interface ObserverSnapshot {
   newSurfaces: number;
   statusSuccess: boolean;
   statusError: boolean;
+  statusDuplicateOrRateLimit: boolean;
   dataLayerNewEvents: number;
   dataLayerSuccessEvent: boolean;
   busy: boolean;
@@ -252,6 +290,7 @@ const EMPTY_SNAPSHOT: ObserverSnapshot = {
   newSurfaces: 0,
   statusSuccess: false,
   statusError: false,
+  statusDuplicateOrRateLimit: false,
   dataLayerNewEvents: 0,
   dataLayerSuccessEvent: false,
   busy: false,
@@ -319,7 +358,7 @@ export interface ObserveSubmissionResult {
  */
 export async function observeSubmissionOutcome(params: ObserveSubmissionParams): Promise<ObserveSubmissionResult> {
   const { page, capture, beforeUrl, formActionUrl, confirmationBefore, ariaInvalidBefore } = params;
-  const config = params.config ?? DEFAULT_SUBMISSION_OBSERVATION_CONFIG;
+  const config = resolveSubmissionObservationConfig(params.config);
   const start = Date.now();
   // The capture starts just before the click, so every request it holds belongs to this attempt --
   // including the ones the click itself fired synchronously, before this function was entered.
@@ -367,6 +406,15 @@ export async function observeSubmissionOutcome(params: ObserveSubmissionParams):
       .some((e) => e.startedAtMs >= captureStart && e.outcome === "pending" && classifyBusinessRequest(e, { pageUrl: beforeUrl, formActionUrl }).business);
 
   let documentReloaded = false;
+  const progressReasons = (): SubmissionExtensionReason[] => {
+    const reasons: SubmissionExtensionReason[] = [];
+    if (businessPending()) reasons.push("business_request_in_flight");
+    if (snapshot.submitDisabled) reasons.push("submit_control_disabled");
+    if (snapshot.busy) reasons.push("loading_indicator_active");
+    if (snapshot.msSinceRegionMutation !== null && snapshot.msSinceRegionMutation < POST_SUBMIT_RECENT_MUTATION_MS) reasons.push("dom_mutations_continuing");
+    if (!snapshot.formVisible && snapshot.formConnected) reasons.push("form_replacement_in_progress");
+    return reasons;
+  };
 
   while (true) {
     const elapsed = Date.now() - start;
@@ -388,6 +436,11 @@ export async function observeSubmissionOutcome(params: ObserveSubmissionParams):
       current = await readSnapshot(page);
     }
     snapshot = current ?? { ...EMPTY_SNAPSHOT, formConnected: !documentReloaded };
+    if (snapshot.statusDuplicateOrRateLimit) {
+      terminalState = "blocked_or_challenged";
+      terminalReason = "a new alert/status surface reported a duplicate-submission or rate-limit notice";
+      break;
+    }
     const confirmationNow = await params.countConfirmationMarkers(page).catch(() => confirmationBefore);
     confirmationAppeared = confirmationNow > confirmationBefore;
     const signals = successSignalsFrom(snapshot, confirmationAppeared, business);
@@ -420,12 +473,7 @@ export async function observeSubmissionOutcome(params: ObserveSubmissionParams):
     }
 
     if (Date.now() >= deadline) {
-      const reasons: SubmissionExtensionReason[] = [];
-      if (businessPending()) reasons.push("business_request_in_flight");
-      if (snapshot.submitDisabled) reasons.push("submit_control_disabled");
-      if (snapshot.busy) reasons.push("loading_indicator_active");
-      if (snapshot.msSinceRegionMutation !== null && snapshot.msSinceRegionMutation < POST_SUBMIT_RECENT_MUTATION_MS) reasons.push("dom_mutations_continuing");
-      if (!snapshot.formVisible && snapshot.formConnected) reasons.push("form_replacement_in_progress");
+      const reasons = progressReasons();
       if (reasons.length > 0 && Date.now() < hardDeadline) {
         extensionReasons.push(reasons);
         deadline = Math.min(hardDeadline, Date.now() + config.extensionMs);
@@ -447,12 +495,15 @@ export async function observeSubmissionOutcome(params: ObserveSubmissionParams):
   }
 
   readBusiness();
+  const finalProgressReasons = terminalState === "succeeded" ? [] : progressReasons();
   await stopObserver(page);
   const b = business as BusinessRequestEvidence | null;
   return {
     urlChanged,
     confirmationAppeared,
     observation: {
+      minimumObservationMs: config.baseWindowMs,
+      pollIntervalMs: config.pollIntervalMs,
       baseWindowMs: config.baseWindowMs,
       extensionMs: config.extensionMs,
       hardCapMs: config.hardCapMs,
@@ -468,6 +519,8 @@ export async function observeSubmissionOutcome(params: ObserveSubmissionParams):
       confirmationDetectedAtMs,
       successSignals,
       formStillPresentAtEnd: snapshot.formConnected && snapshot.formVisible,
+      finalProgressReasons,
+      submitControlDisabledAtEnd: snapshot.submitDisabled,
       terminalState: terminalState ?? "unknown_outcome",
       terminalReason,
     },

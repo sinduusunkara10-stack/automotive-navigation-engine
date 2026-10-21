@@ -42,7 +42,7 @@
           diesel.textContent = "Diesel";
           engine.appendChild(petrol);
           engine.appendChild(diesel);
-        }, 200);
+        }, Number(new URLSearchParams(location.search).get("delay") || "200"));
       });
     </script>
   </body>

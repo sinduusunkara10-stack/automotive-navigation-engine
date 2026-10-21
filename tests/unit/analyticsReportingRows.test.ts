@@ -163,7 +163,7 @@ test("TEST1 [fixture label: Vauxhall-style bundled configurator push]: a genuine
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -203,7 +203,7 @@ test("TEST2 [fixture label: Nissan-style duplicate virtual-page capture]: raw:[e
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -230,7 +230,7 @@ test("TEST3: two click candidates with genuinely different destinations leave th
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -265,7 +265,7 @@ test("TEST4: exactly one confirmed click candidate is merged into the CTA_CLICK 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -297,7 +297,7 @@ test("TEST5: a confirmed GA4 page_view with rich metadata preserves its fields o
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -334,7 +334,7 @@ test("TEST6: a confirmed click and an unrelated CORRELATION_UNRESOLVED event in 
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -368,7 +368,7 @@ test("TEST7: equivalent objects with different (including nested) key order prod
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -391,7 +391,7 @@ test("TEST8: same timestamp but different payloads produce different eventIds, b
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -416,7 +416,7 @@ test("TEST9: raw:[event] and raw:event produce identical eventIds for the same l
     return buildAnalyticsReportingRows({
       taskId: "task-1",
       startUrl: "https://example.com/source",
-      schemaVersion: "1.52.0",
+      schemaVersion: "1.53.0",
       pageVisits: [],
       ctaClicks: [ctaClick({ actionAnalytics: action })],
     });
@@ -450,7 +450,7 @@ test("TEST10: a genuine 3-event dataLayer array expands into three distinct rows
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -474,7 +474,7 @@ test("TEST11: no observed analytics evidence produces WEBSITE_NO_OBSERVED_TAG, n
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action, actionSucceeded: true })],
   });
@@ -497,7 +497,7 @@ test("TEST12: exactly one START_PAGE row is built from the actual journey start,
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits,
     ctaClicks: [],
   });
@@ -530,7 +530,7 @@ test("TEST13 [fixture label: Stellantis-style GA4 CTA fixture]: a rich GA4 click
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ ctaText: "DÉCOUVREZ-LA", actionAnalytics: action })],
   });
@@ -601,7 +601,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
     taskId: "task-1",
     journeyType: "configurator_completion",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits,
     ctaClicks,
   });
@@ -625,7 +625,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
   assert.equal(secondActionRows[2]!.eventRole, "CLICK_CANDIDATE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -680,7 +680,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [
       ctaClick({
@@ -728,7 +728,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   assert.equal(new Set(allEventIds).size, allEventIds.length);
 
   const response: TaskResponse = {
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -780,7 +780,7 @@ test("TEST16: a start-page page_view produces a stepIndex 0 ANALYTICS_EVENT row,
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [],
     startPageUrl: "https://example.com/start",
@@ -828,7 +828,7 @@ test("TEST17: action 1's rows contain no duplicate of a stepIndex 0 start-window
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [
       ctaClick({ actionAnalytics: action, destinationUrl: "https://example.com/destination", resultingUrl: "https://example.com/destination" }),
@@ -859,7 +859,7 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/start",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [],
     startPageUrl: "https://example.com/start",
@@ -874,7 +874,7 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   assert.equal(rows[0]!.recordType, "START_PAGE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -929,7 +929,7 @@ test("TEST19: a navigate-only 3-page journey produces a PAGE_VISIT row (plus its
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/page-1",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits,
     ctaClicks: [],
     startPageUrl: "https://example.com/page-1",
@@ -959,7 +959,7 @@ test("TEST19: a navigate-only 3-page journey produces a PAGE_VISIT row (plus its
   assert.equal(rows[0]!.recordType, "START_PAGE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -988,7 +988,7 @@ test("TEST20: a blank top-level eventName falls back to the lone postDataParams[
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -1015,7 +1015,7 @@ test("TEST21: a single GA4 request body carrying multiple events produces one ro
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/source",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [ctaClick({ actionAnalytics: action })],
   });
@@ -1056,7 +1056,7 @@ test("TEST22: an existing click-journey's own rows are unchanged, and a click in
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/step1",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits,
     ctaClicks: [
       ctaClick({
@@ -1127,7 +1127,7 @@ test("TEST23 [fixture label: live DS-shaped regression]: a navigate/click/naviga
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/page-1",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [],
     steps,
@@ -1171,7 +1171,7 @@ test("TEST24 [fixture label: live DS-shaped regression]: a dataLayer push and it
   const rows = buildAnalyticsReportingRows({
     taskId: "task-1",
     startUrl: "https://example.com/page-1",
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: [],
     ctaClicks: [],
     steps,
@@ -1216,7 +1216,7 @@ test("buildAnalyticsReportingRows: real DS navigate-only production run produces
   const rows = buildAnalyticsReportingRows({
     taskId: fixture.taskId,
     startUrl: fixture.startUrl,
-    schemaVersion: "1.52.0",
+    schemaVersion: "1.53.0",
     pageVisits: fixture.pageVisits ?? [],
     ctaClicks: fixture.ctaClicks ?? [],
     steps: fixture.steps,

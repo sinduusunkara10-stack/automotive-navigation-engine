@@ -39,7 +39,7 @@ class ClickOnceThenStopSuccessProvider implements ReasoningProvider {
 
 function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.50.0",
+    schemaVersion: "1.51.0",
     taskId: "analytics-capture-reliability",
     objective: "Exercise the analytics-capture reliability fix.",
     allowedDomains: ["127.0.0.1"],
@@ -52,7 +52,7 @@ function baseTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl"
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: false,
     },
-    outputSchemaVersion: "1.52.0",
+    outputSchemaVersion: "1.53.0",
     ...overrides,
   };
 }

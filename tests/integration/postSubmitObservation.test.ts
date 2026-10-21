@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { chromium, type Browser, type Page, type Route } from "playwright";
 
 import { executeFillForm } from "../../src/actions/fillForm.js";
-import type { SubmissionObservationConfig } from "../../src/actions/submissionObserver.js";
+import { DEFAULT_SUBMISSION_OBSERVATION_CONFIG, type SubmissionObservationConfig } from "../../src/actions/submissionObserver.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -42,7 +42,7 @@ async function withScenario<T>(options: ScenarioOptions, run: (page: Page, resul
       captures: {},
       stepIndex: 1,
       captureModules: [],
-      submissionObservationConfig: options.config === "defaults" ? undefined : (options.config ?? FAST),
+      submissionObservationConfig: options.config === "defaults" ? DEFAULT_SUBMISSION_OBSERVATION_CONFIG : (options.config ?? FAST),
     });
     return await run(page, result);
   } finally {
@@ -58,7 +58,9 @@ test("post-submit: a quick on-page confirmation succeeds and stops early, far be
     assert.equal(result.success, true);
     assert.equal(observation?.terminalState, "succeeded");
     assert.ok(observation?.successSignals.includes("confirmation_message"));
-    assert.equal(observation?.baseWindowMs, 10_000, "production defaults were used");
+    assert.equal(observation?.baseWindowMs, 50_000, "production defaults were used");
+    assert.equal(observation?.minimumObservationMs, 50_000);
+    assert.equal(observation?.pollIntervalMs, 500);
     assert.ok((observation?.totalObservationMs ?? Infinity) < 3_000, `stopped early, took ${observation?.totalObservationMs} ms`);
     assert.equal(observation?.extensionCount, 0);
   });
@@ -73,7 +75,8 @@ test("post-submit: a same-page confirmation that appears only after more than 60
     assert.equal(observation?.terminalState, "succeeded");
     assert.ok((observation?.confirmationDetectedAtMs ?? 0) >= 60_000, `confirmation at ${observation?.confirmationDetectedAtMs} ms`);
     assert.ok((observation?.totalObservationMs ?? Infinity) < observation!.hardCapMs);
-    assert.ok((observation?.extensionCount ?? 0) >= 5);
+    assert.equal(observation?.minimumObservationMs, 50_000);
+    assert.ok((observation?.extensionCount ?? 0) >= 1, "the 50 s minimum is followed by progress-justified extensions");
     assert.ok(observation?.extensionReasons.every((reasons) => reasons.includes("loading_indicator_active") || reasons.includes("submit_control_disabled")));
   });
 });

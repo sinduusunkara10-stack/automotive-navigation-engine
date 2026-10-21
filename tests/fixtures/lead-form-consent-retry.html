@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai</title>
+    <style>
+      .visually-hidden-input { position: absolute; left: -9999px; }
+      .opt { display: inline-block; padding: 6px 12px; border: 1px solid #888; margin-right: 8px; cursor: pointer; }
+      .opt.is-selected { background: #036; color: #fff; }
+      .opt input { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Demande d'essai</h1>
+    <div id="region">
+      <form id="lead-form" action="/api/lead" method="post">
+        <label for="first-name">Prénom</label>
+        <input type="text" id="first-name" name="firstName" required />
+        <label for="last-name">Nom</label>
+        <input type="text" id="last-name" name="lastName" required />
+        <label for="email">E-mail</label>
+        <input type="email" id="email" name="email" required />
+        <input type="hidden" name="dealerCode" value="DLR-445566" />
+        <input type="hidden" name="trackingClientId" value="GA1.2.99901234.1700000000" />
+
+        <div id="optional-groups"></div>
+
+        <fieldset>
+          <legend>J'ai lu la politique de confidentialité et j'accepte le traitement de ma demande *</legend>
+          <label><input type="radio" name="processing" value="1" id="processing-yes" required /> Oui</label>
+          <label><input type="radio" name="processing" value="0" id="processing-no" required /> Non</label>
+        </fieldset>
+
+        <p id="error" role="alert"></p>
+        <button type="submit" id="submit-lead">Envoyer</button>
+      </form>
+    </div>
+    <script>
+      // Every behaviour is chosen by the test through the query string and is a generic
+      // custom-radio or lead-service pattern, not tied to a brand or market.
+      const params = new URLSearchParams(location.search);
+      const radio = params.get("radio") || "native";
+      const site = params.get("site") || "requires_optin";
+      const confirmDelay = Number(params.get("confirmDelay") || "300");
+      const reconcileDelay = Number(params.get("reconcileDelay") || "400");
+      const withTracking = params.get("track") === "1";
+      const groups = [
+        { name: "PRIVACY_FLAG_MRKT", question: "Souhaitez-vous recevoir nos offres commerciales par e-mail ?" },
+        { name: "PRIVACY_FLAG_THIRDPARTY", question: "Acceptez-vous que vos données soient partagées avec nos partenaires ?" },
+      ];
+      const container = document.getElementById("optional-groups");
+      window.__submitCount = 0;
+      window.__answers = {};
+
+      const blocked = (value) =>
+        radio === "stuck" || (radio === "stuck_decline" && value === "0") || (radio === "stuck_accept" && value === "1");
+
+      groups.forEach((g) => {
+        const field = document.createElement("fieldset");
+        const legend = document.createElement("legend");
+        legend.textContent = g.question;
+        field.appendChild(legend);
+        [
+          { value: "1", text: "Oui" },
+          { value: "0", text: "Non" },
+        ].forEach((opt) => {
+          const id = g.name + "-" + opt.value;
+          if (radio === "wrapper_only") {
+            const box = document.createElement("div");
+            box.className = "opt";
+            box.innerHTML = '<input type="radio" name="' + g.name + '" value="' + opt.value + '" id="' + id + '" /><span>' + opt.text + "</span>";
+            box.addEventListener("click", () => {
+              const input = box.querySelector("input");
+              input.checked = true;
+              input.dispatchEvent(new Event("change", { bubbles: true }));
+              field.querySelectorAll(".opt").forEach((o) => o.classList.toggle("is-selected", o === box));
+            });
+            field.appendChild(box);
+            return;
+          }
+          const input = document.createElement("input");
+          input.type = "radio";
+          input.name = g.name;
+          input.value = opt.value;
+          input.id = id;
+          const label = document.createElement("label");
+          label.htmlFor = id;
+          label.textContent = opt.text;
+          if (radio === "offscreen_label") input.className = "visually-hidden-input";
+          if (radio === "reconcile") {
+            // A framework-controlled radio: the native click is cancelled and the component writes
+            // its own state back a little later.
+            input.addEventListener("click", (event) => {
+              event.preventDefault();
+              setTimeout(() => {
+                input.checked = true;
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+              }, reconcileDelay);
+            });
+          }
+          input.addEventListener("click", (event) => {
+            if (blocked(opt.value)) event.preventDefault();
+          });
+          field.appendChild(input);
+          field.appendChild(label);
+        });
+        field.addEventListener("change", (event) => {
+          if (event.target.name === g.name) window.__answers[g.name] = event.target.value;
+        });
+        container.appendChild(field);
+      });
+
+      const confirm = () => {
+        const box = document.createElement("div");
+        box.setAttribute("role", "status");
+        box.textContent = "Merci, votre demande a bien été enregistrée.";
+        document.getElementById("region").appendChild(box);
+      };
+      const track = () =>
+        Promise.all([
+          fetch("https://tracker.example-analytics.test/collect?e=submit", { method: "POST", mode: "no-cors", body: "x" }).catch(() => {}),
+          fetch("https://ads.example-adnetwork.test/pixel/event", { method: "POST", mode: "no-cors", body: "x" }).catch(() => {}),
+        ]);
+      const business = () => fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ lead: true }) });
+      const allOptedIn = () => groups.every((g) => {
+        const checked = document.querySelector('input[name="' + g.name + '"]:checked');
+        return checked && checked.value === "1";
+      });
+
+      document.getElementById("lead-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        window.__submitCount += 1;
+        if (withTracking) await track();
+        switch (site) {
+          case "requires_optin":
+            // The site's own script silently refuses the lead unless every optional consent is
+            // accepted: no business request, no message.
+            if (!allOptedIn()) return;
+            await business();
+            setTimeout(confirm, confirmDelay);
+            break;
+          case "delayed_confirm":
+            setTimeout(confirm, confirmDelay);
+            break;
+          case "request_then_delayed_confirm":
+            await business();
+            setTimeout(confirm, confirmDelay);
+            break;
+          case "request_no_ui":
+            await business();
+            break;
+          case "duplicate_notice":
+            document.getElementById("error").textContent = "Une demande a déjà été envoyée récemment.";
+            break;
+          case "challenge": {
+            const challenge = document.createElement("div");
+            challenge.className = "g-recaptcha";
+            challenge.textContent = "Security check";
+            document.getElementById("region").appendChild(challenge);
+            break;
+          }
+          case "never":
+          default:
+            break;
+        }
+      });
+    </script>
+  </body>
+</html>
