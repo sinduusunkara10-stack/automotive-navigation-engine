@@ -1374,3 +1374,9 @@ stage. Read the outcome from `formPostSubmitDiagnostics.submitAttemptSummary`, f
 `fallbackUsed`, `fallbackEligibilityChecks`, `firstAttemptOutcome`, `secondAttemptOutcome` and
 `totalSubmitAttempts`.
 
+The consent-actionability change is additive to response `1.53.0`; the request and its versions
+are unchanged, so the Build node needs no change. The summary adds `fallbackNotUsedReason`, `optionalGroupRediscoveryCount`,
+`actionableOptionalGroupCount`, `nonActionableOptionalGroupCount` and
+`nonActionableOptionalGroups`. `formConsentDiagnostics.consentGroupRejections` explains every
+consent group the engine detected but could not act on.
+

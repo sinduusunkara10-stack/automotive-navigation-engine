@@ -11,7 +11,14 @@ import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../f
 import { marketDataFor, resolveMarket, type SupportedLanguage } from "../forms/testData.js";
 import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
-import { applyOptionalConsentOptInForTest, resolveConsentGroups, type OptionalConsentOptInResult } from "../forms/consentGroups.js";
+import {
+  applyOptionalConsentOptInForTest,
+  rediscoverOptionalConsentGroups,
+  resolveConsentGroups,
+  type ConsentGroupRejection,
+  type OptionalConsentOptInResult,
+  type OptionalConsentRediscovery,
+} from "../forms/consentGroups.js";
 import { callInPageFunction } from "../forms/inPageFunction.js";
 import {
   DEALER_RESULT_SELECTOR,
@@ -45,8 +52,10 @@ import {
   MAX_SUBMIT_ATTEMPTS,
   classifySubmitAttempt,
   evaluateFallbackEligibility,
+  firstAttemptConsentModeOf,
   submitNeverAttemptedSummary,
   type FallbackEligibilityChecks,
+  type FallbackNotUsedReason,
   type SubmitAttemptSummary,
 } from "./submitAttemptPlan.js";
 import {
@@ -1241,6 +1250,10 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // Oui/Non-style radios whose own option labels carry no matchable keyword at all, so this never
   // goes through the per-field matchLeadFormField pipeline above.
   const consentResult = await resolveConsentGroups(page, form, language, fieldByIndex, journeyContext);
+  const preSubmitActionableOptional = consentResult.consentGroupDiagnostics.filter((g) => OPTIONAL_COMMERCIAL_PURPOSES.has(g.purpose)).length;
+  const preSubmitNonActionableOptional: ConsentGroupRejection[] = consentResult.consentGroupRejections.filter(
+    (r) => OPTIONAL_COMMERCIAL_PURPOSES.has(r.purpose) && r.rejectionStage !== "responsive_dedupe",
+  );
 
   // Consent selections (or the dealer lookup) can generically reveal new required text/select
   // fields -- one bounded catch-up pass, filling only fields not already resolved, so a field a
@@ -1455,8 +1468,9 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         postSubmitObservation: null,
         submitAttemptSummary: submitNeverAttemptedSummary(
           fallbackFlagEnabled,
-          consentResult.consentGroupDiagnostics.some((g) => OPTIONAL_COMMERCIAL_PURPOSES.has(g.purpose)),
+          firstAttemptConsentModeOf(preSubmitActionableOptional, preSubmitNonActionableOptional.length),
           consentResult.optionalDeclineNotCommittedGroups.length === 0,
+          { actionable: preSubmitActionableOptional, nonActionable: preSubmitNonActionableOptional },
         ),
       },
     };
@@ -1660,13 +1674,24 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
 
   // Test-only optional-consent opt-in: one more Submit, only when the first attempt demonstrably
   // never reached the business-submission stage (see submitAttemptPlan.ts). Never a third.
-  const optionalGroupsPresent = consentResult.consentGroupDiagnostics.some((g) => OPTIONAL_COMMERCIAL_PURPOSES.has(g.purpose));
   const firstAttemptOutcome = classifySubmitAttempt(firstAttempt, consentResult.optionalDeclineNotCommittedGroups.length > 0);
   let fallbackEligibilityChecks: FallbackEligibilityChecks | null = null;
   let fallbackEligible = false;
   let fallbackUsed = false;
   let fallbackDecision = "not considered: the first submit succeeded";
+  let fallbackNotUsedReason: FallbackNotUsedReason | null = "first_attempt_succeeded";
   let optIn: OptionalConsentOptInResult | null = null;
+  // The fallback decision always re-reads the live DOM: the pre-submit scan may have run before the
+  // optional controls were rendered or reachable, and an empty first scan proves nothing.
+  let rediscovery: OptionalConsentRediscovery | null = null;
+  let actionableOptionalGroupCount = preSubmitActionableOptional;
+  let nonActionableOptionalGroups: ConsentGroupRejection[] = preSubmitNonActionableOptional;
+  if (!firstAttempt.succeeded && fallbackFlagEnabled) {
+    rediscovery = await rediscoverOptionalConsentGroups(page, form, language);
+    actionableOptionalGroupCount = rediscovery.actionableOptionalGroupIds.length;
+    nonActionableOptionalGroups = rediscovery.nonActionableOptionalGroups;
+  }
+  const optionalGroupsPresent = actionableOptionalGroupCount + nonActionableOptionalGroups.length > 0;
   if (!firstAttempt.succeeded) {
     const evaluated = evaluateFallbackEligibility({
       firstAttempt,
@@ -1675,6 +1700,9 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       formVisibleNow: await form.isVisible().catch(() => false),
       submitEnabledNow: await submit.isEnabled().catch(() => false),
       optionalConsentGroupPresent: optionalGroupsPresent,
+      // A group that renders nothing at all (another form variant) cannot be answered by anyone and
+      // does not hold the fallback back; a rendered group the engine cannot reach does.
+      optionalConsentGroupsActionable: actionableOptionalGroupCount > 0 && nonActionableOptionalGroups.every((r) => r.rejectionStage === "member_visibility"),
       fallbackFlagEnabled,
       submitAttemptsSoFar: submitClicks,
       correctiveRetriesAfterSubmit,
@@ -1683,13 +1711,22 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     fallbackEligible = evaluated.eligible;
     const failed = Object.entries(evaluated.checks).filter(([, ok]) => !ok).map(([name]) => name);
     if (!fallbackEligible) {
-      fallbackDecision = `not used: ${failed.join(", ")} did not hold`;
+      fallbackNotUsedReason = !fallbackFlagEnabled
+        ? "fallback_flag_disabled"
+        : !optionalGroupsPresent
+          ? "no_optional_consent_groups"
+          : !evaluated.checks.optionalConsentGroupsActionable
+            ? "optional_consent_groups_detected_but_not_actionable"
+            : "eligibility_guard_failed";
+      fallbackDecision = `not used (${fallbackNotUsedReason}): ${failed.join(", ")} did not hold`;
     } else {
       optIn = await applyOptionalConsentOptInForTest(form, language, fieldByIndex);
       if (!optIn.allVerified) {
+        fallbackNotUsedReason = "optional_consent_opt_in_not_verified";
         fallbackDecision = "not used: at least one optional consent did not read back as accepted, so Submit was not clicked again";
       } else {
         fallbackUsed = true;
+        fallbackNotUsedReason = null;
         fallbackDecision = "used once: test_only_optional_consent_fallback -- every optional consent read back as accepted before the second Submit";
         retryDecision = `retried once with the test-only optional-consent opt-in after the first attempt was classified ${firstAttemptOutcome}`;
         attempt = await attemptSubmit(observationConfig);
@@ -1698,7 +1735,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     }
   }
   const submitAttemptSummary: SubmitAttemptSummary = {
-    firstAttemptConsentMode: optionalGroupsPresent ? "decline" : "no_optional_consent_groups",
+    firstAttemptConsentMode: firstAttemptConsentModeOf(preSubmitActionableOptional, preSubmitNonActionableOptional.length),
     firstAttemptConsentCommitted: consentResult.optionalDeclineNotCommittedGroups.length === 0,
     firstAttemptObservationMs: firstAttempt.observation?.totalObservationMs ?? null,
     firstAttemptBusinessRequestDetected: firstAttempt.observation?.businessRequestDetected ?? false,
@@ -1709,8 +1746,14 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     fallbackUsed,
     fallbackOutcomeTag: fallbackUsed ? "test_only_optional_consent_fallback" : null,
     fallbackDecision,
+    fallbackNotUsedReason,
     fallbackConsentGroups: optIn?.groups ?? [],
+    optionalGroupRediscoveryCount: (rediscovery?.rediscoveryCount ?? 0) + (optIn?.rediscoveryCount ?? 0),
+    actionableOptionalGroupCount,
+    nonActionableOptionalGroupCount: nonActionableOptionalGroups.length,
+    nonActionableOptionalGroups,
     secondAttemptConsentMode: fallbackUsed ? "opt_in_test_only" : null,
+    secondAttemptConsentCommitted: fallbackUsed ? (optIn?.allVerified ?? false) : null,
     secondAttemptObservationMs: attempt !== firstAttempt ? (attempt.observation?.totalObservationMs ?? null) : null,
     secondAttemptBusinessRequestDetected: attempt !== firstAttempt ? (attempt.observation?.businessRequestDetected ?? false) : null,
     secondAttemptOutcome: attempt !== firstAttempt ? classifySubmitAttempt(attempt, false) : null,

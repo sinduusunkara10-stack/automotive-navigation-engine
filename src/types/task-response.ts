@@ -59,6 +59,7 @@ export type ConsentVerificationResultWire = "verified" | "not_committed" | "cont
 /** Wire shape of forms/consentGroups.ts's ConsentActivationDiagnostic -- never a label, value or question text. */
 export interface ConsentActivationDiagnosticWire {
   intendedAnswer: "decline" | "accept" | "policy_option";
+  actionableSurface: "native_input" | "label" | "wrapper" | null;
   attempts: {
     clickedElementType: "native_input" | "label" | "wrapper" | "keyboard" | "programmatic";
     activationMethod: "pointer_click" | "focus_and_space" | "dispatched_click_input_change";
@@ -71,6 +72,36 @@ export interface ConsentActivationDiagnosticWire {
   verificationMethods: ("native_checked" | "radio_name_selected_value" | "checked_attribute" | "aria_checked" | "selected_class" | "framework_state")[];
   hiddenConsentFieldChanged: boolean | null;
   verificationResult: ConsentVerificationResultWire;
+}
+
+export interface ConsentSurfaceSummaryWire {
+  found: boolean;
+  visible: boolean;
+  onScreen: boolean;
+  clipped: boolean;
+}
+
+/** Wire shape of forms/consentGroups.ts's ConsentGroupRejection -- never a label, value or question text. */
+export interface ConsentGroupRejectionWire {
+  groupId: string;
+  purpose: "required_privacy_processing" | "terms_and_conditions" | "optional_marketing" | "optional_profiling" | "optional_third_party" | "customer_qualification" | "journey_intent" | "ambiguous";
+  purposeEvidence: string;
+  memberCount: number;
+  nativeInput: ConsentSurfaceSummaryWire;
+  label: ConsentSurfaceSummaryWire;
+  wrapper: ConsentSurfaceSummaryWire;
+  scrolledIntoView: boolean;
+  hiddenResponsiveDuplicateDetected: boolean;
+  actionableMemberCount: number;
+  rejectionStage: "member_visibility" | "label_wrapper_lookup" | "actionable_filter" | "responsive_dedupe";
+  rejectionReason:
+    | "not_rendered"
+    | "native_input_unusable_and_no_label_or_wrapper"
+    | "all_options_disabled"
+    | "visually_clipped"
+    | "outside_viewport_after_scroll"
+    | "obscured_by_other_element"
+    | "hidden_responsive_duplicate_of_actionable_group";
 }
 
 export type SubmitAttemptOutcomeWire =
@@ -88,7 +119,7 @@ export type SubmitAttemptOutcomeWire =
 
 /** Wire shape of actions/submitAttemptPlan.ts's SubmitAttemptSummary. */
 export interface SubmitAttemptSummaryWire {
-  firstAttemptConsentMode: "decline" | "no_optional_consent_groups";
+  firstAttemptConsentMode: "decline" | "optional_consent_groups_not_actionable" | "no_optional_consent_groups";
   firstAttemptConsentCommitted: boolean;
   firstAttemptObservationMs: number | null;
   firstAttemptBusinessRequestDetected: boolean;
@@ -106,6 +137,7 @@ export interface SubmitAttemptSummaryWire {
     formPresentAndUsable: boolean;
     firstAttemptClassificationEligible: boolean;
     optionalConsentGroupPresent: boolean;
+    optionalConsentGroupsActionable: boolean;
     fallbackFlagEnabled: boolean;
     noPreviousRetry: boolean;
   } | null;
@@ -113,6 +145,15 @@ export interface SubmitAttemptSummaryWire {
   fallbackUsed: boolean;
   fallbackOutcomeTag: "test_only_optional_consent_fallback" | null;
   fallbackDecision: string;
+  fallbackNotUsedReason:
+    | "first_attempt_succeeded"
+    | "fallback_flag_disabled"
+    | "no_optional_consent_groups"
+    | "optional_consent_groups_detected_but_not_actionable"
+    | "eligibility_guard_failed"
+    | "optional_consent_opt_in_not_verified"
+    | "submit_never_attempted"
+    | null;
   fallbackConsentGroups: {
     groupId: string;
     purpose: "optional_marketing" | "optional_profiling" | "optional_third_party" | "required_privacy_processing" | "terms_and_conditions" | "customer_qualification" | "journey_intent" | "ambiguous";
@@ -122,7 +163,12 @@ export interface SubmitAttemptSummaryWire {
     verified: boolean;
     activation: ConsentActivationDiagnosticWire | null;
   }[];
+  optionalGroupRediscoveryCount: number;
+  actionableOptionalGroupCount: number;
+  nonActionableOptionalGroupCount: number;
+  nonActionableOptionalGroups: ConsentGroupRejectionWire[];
   secondAttemptConsentMode: "opt_in_test_only" | null;
+  secondAttemptConsentCommitted: boolean | null;
   secondAttemptObservationMs: number | null;
   secondAttemptBusinessRequestDetected: boolean | null;
   secondAttemptOutcome: SubmitAttemptOutcomeWire | null;
@@ -881,7 +927,14 @@ export interface ActionResult {
    */
   formConsentDiagnostics?: {
     consentGroupsDetected: number;
+    /** Groups actionable on the first scan (the name predates actionability). */
     consentGroupsInitiallyVisible: number;
+    consentGroupsActionable: number;
+    consentGroupsDiscoveredNonActionable: number;
+    consentGroupsInteracted: number;
+    consentGroupsCommitted: number;
+    /** One entry per detected group that never became actionable -- no detected group is left without a record. */
+    consentGroupRejections: ConsentGroupRejectionWire[];
     consentGroupDiagnostics: {
       groupId: string;
       /** Consent purpose. Optional commercial purposes are always declined; required processing/terms accepted only when marked required; ambiguous never touched. */
@@ -904,6 +957,7 @@ export interface ActionResult {
       visibleOptionCount: number;
       /** Hidden members repeating a visible option (e.g. responsive copies) -- never interacted with. */
       hiddenDuplicateCount: number;
+      scrolledIntoView: boolean;
       checkedBefore: "positive" | "negative" | "unknown" | "none";
       checkedAfter: "positive" | "negative" | "unknown" | "none";
       interaction:
@@ -934,6 +988,7 @@ export interface ActionResult {
     conditionalConsentGroupsRevealed: number;
     consentRescanCount: number;
     unresolvedRequiredConsentGroups: string[];
+    unresolvedOptionalConsentGroups: string[];
     /** Optional commercial groups whose decline was attempted but never read back as selected. */
     optionalDeclineNotCommittedGroups: string[];
   };

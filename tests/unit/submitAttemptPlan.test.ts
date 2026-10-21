@@ -52,6 +52,7 @@ function eligibility(first: SubmitAttemptEvidence, extra: Partial<Parameters<typ
     formVisibleNow: true,
     submitEnabledNow: true,
     optionalConsentGroupPresent: true,
+    optionalConsentGroupsActionable: true,
     fallbackFlagEnabled: true,
     submitAttemptsSoFar: 1,
     correctiveRetriesAfterSubmit: 0,
