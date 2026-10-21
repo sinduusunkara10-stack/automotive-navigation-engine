@@ -1380,3 +1380,11 @@ are unchanged, so the Build node needs no change. The summary adds `fallbackNotU
 `nonActionableOptionalGroups`. `formConsentDiagnostics.consentGroupRejections` explains every
 consent group the engine detected but could not act on.
 
+The submit-cancellation diagnostics are also additive to response `1.53.0` and need no Build-node
+change. `formPostSubmitDiagnostics.submitCancellationDiagnostics.attempts[]` gives each Submit
+attempt's `cancellationStage` (null when a business request reached the network), its evidence and
+sanitised per-control snapshots before Submit and after the cancellation;
+`snapshotDifferences` and `acknowledgementCheckboxes` compare the attempts.
+`formDiscoveryDiagnostics.proxiedSelectDiagnostics` reports required hidden selects that were
+committed through their visible custom control.
+

@@ -4118,3 +4118,53 @@ Structure:
   `fallbackNotUsedReason: "optional_consent_groups_detected_but_not_actionable"` with the
   rejection records. The summary also reports the rediscovery count, actionable and
   non-actionable optional group counts and whether the second attempt's consents committed.
+
+### Lead-form filling: required selects behind custom controls and submit-cancellation diagnostics (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A live run committed both consent modes, yet both Submits were cancelled client-side before the
+business request: the site's own `submit` listener prevented the default (its tag manager
+reported the form submit as cancelled 6-9 ms after the click) and no business request followed.
+The trace showed the form's required, marker-labelled title select hidden at zero size with an
+empty value, its visible stand-in a read-only text input in the same container, and the field
+skipped as "hidden". Every other marker-required field was filled. Hidden native selects were
+never filled and never counted by the readiness gate.
+
+Structure:
+
+- `src/forms/selectProxy.ts` (new) and `src/actions/fillForm.ts`: a hidden native `<select>`
+  (not under a hidden ancestor) whose small container holds exactly one visible read-only input,
+  `role="combobox"`, `aria-haspopup` control and no unrelated field has that control as its proxy.
+  A required one (not a dealer select) is planned like a visible select and committed through the
+  proxy: open it, click the option that newly appeared with the chosen label, and require the
+  native select to read back the value. When the custom list cannot be operated, the native
+  select gets the value with `input` and `change` events, the events the widget's own sync
+  listens to. It counts as a required field for the readiness gate, so a select that cannot be
+  committed stops Submit. The proxy itself is skipped (`select_proxy`) and never typed into.
+  `formDiscoveryDiagnostics.proxiedSelectDiagnostics` reports the surface used and what read back.
+- `fillForm.ts`: a required checkbox whose native box cannot be checked (off-screen custom
+  checkbox) is ticked through its visible label and read back. `findSubmitControl` prefers the
+  first rendered Submit control over a hidden copy.
+- `src/actions/submitCancellationProbe.ts` (new): passive in-page instrumentation installed once
+  the form is selected. Listeners on `window` for click, submit (capture and bubble), invalid,
+  reset, formdata, error, unhandledrejection and securitypolicyviolation, and call recorders on
+  `fetch`, `XMLHttpRequest` open/send, `navigator.sendBeacon`, `HTMLFormElement`
+  submit/requestSubmit and jQuery's serialize/serializeArray. A recorder is a `Proxy` whose trap
+  notes the call and returns `Reflect.apply`'s result unchanged (same `this`, arguments, return
+  value and exception, synchronously); nothing calls `preventDefault`, chains a page promise or
+  calls `checkValidity()`. `classifyClientSideCancellation` names the earliest stage the evidence
+  proves (`submit_event_never_fired`, `native_validity_blocked`, `custom_validation_rejected`,
+  `required_acknowledgement_missing`, `state_not_committed`, `submit_handler_prevented_default`,
+  `submit_handler_exception`, `serialisation_failed`, `business_dispatch_not_invoked`,
+  `business_transport_not_observed`, `form_reset_before_dispatch`, `anti_bot_or_security_block`,
+  `unknown_client_side_cancellation`), or null when a business request reached the network.
+- `src/actions/formStateSnapshot.ts` (new): a sanitised per-control snapshot (purpose, masked
+  technical name, type, visibility, enabled, read-only, required by HTML, ARIA or page metadata,
+  populated, checked, committed, included in serialisation, validity category, validation message
+  present), taken before each Submit and after each cancellation, plus the differences between
+  them across both attempts and one record per checkbox (who set it, native/ARIA/visual
+  agreement, hidden companion change, serialisation, validation result). Never a value, label
+  text, option text or serialised data.
+- A second attempt re-tags the live form first and refills any required control that was
+  committed before the previous Submit but no longer is (a site that re-renders the form); it is
+  the same fill, never a third Submit. All of it is reported under
+  `formPostSubmitDiagnostics.submitCancellationDiagnostics`.

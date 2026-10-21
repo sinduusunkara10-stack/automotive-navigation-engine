@@ -7,7 +7,26 @@ import { captureDataLayer } from "../capture-modules/dataLayer.js";
 import { attachGa4NetworkCapture } from "../capture-modules/ga4NetworkEvents.js";
 import { detectCaptcha } from "../forms/captcha.js";
 import { detectPageLanguage } from "../forms/fieldMapper.js";
-import { buildFillPlan, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
+import { buildFillPlan, isFillTarget, isProxiedRequiredSelect, type FormFieldDescriptor, type PlannedField } from "../forms/fillPlan.js";
+import { commitProxiedSelect, PROXY_ATTR_SUFFIX, type ProxiedSelectOutcome } from "../forms/selectProxy.js";
+import {
+  beginProbeAttempt,
+  classifyClientSideCancellation,
+  installSubmitProbe,
+  readProbeAttempt,
+  type ClientSideCancellationClassification,
+  type SecondAttemptStateRefresh,
+  type SubmitCancellationDiagnostics,
+} from "./submitCancellationProbe.js";
+import {
+  buildAcknowledgementCheckboxDiagnostics,
+  diffSnapshots,
+  requiredAcknowledgementUnchecked,
+  requiredUncommitted,
+  snapshotFormState,
+  type ControlStateSnapshot,
+  type SnapshotWithCompanions,
+} from "./formStateSnapshot.js";
 import { marketDataFor, resolveMarket, type SupportedLanguage } from "../forms/testData.js";
 import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
@@ -73,6 +92,14 @@ import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
+
+interface SubmitAttemptStateRecord {
+  attempt: number;
+  beforeSubmit: SnapshotWithCompanions | null;
+  afterCancellation: SnapshotWithCompanions | null;
+  classification: ClientSideCancellationClassification | null;
+  refresh: SecondAttemptStateRefresh | null;
+}
 const MAX_RETRIES = 2;
 const OPTIONAL_COMMERCIAL_PURPOSES = new Set(["optional_marketing", "optional_profiling", "optional_third_party"]);
 
@@ -338,6 +365,8 @@ interface RawFieldDescriptor {
   isPreselected?: boolean;
   options?: { value: string; label: string; disabled?: boolean }[];
   dealerLookupTriggerIndex?: string;
+  selectProxyKind?: "readonly_input" | "combobox" | "button";
+  isSelectProxy: boolean;
 }
 
 /**
@@ -349,7 +378,8 @@ interface RawFieldDescriptor {
 async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
   return form.evaluate((formEl: HTMLFormElement, attr: string) => {
     const fields = Array.from(formEl.querySelectorAll("input, select, textarea")) as (HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement)[];
-    return fields.map((el, index) => {
+    fields.forEach((el) => el.removeAttribute(`${attr}-proxy-for`));
+    const described = fields.map((el, index) => {
       el.setAttribute(attr, String(index));
       const tagName = el.tagName.toLowerCase();
       const type = tagName === "input" ? (el as HTMLInputElement).type : undefined;
@@ -370,6 +400,45 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
       const rect = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
       const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+
+      // A required native <select> that a custom widget hides (zero-size or display:none on the
+      // select itself) while showing its own visible control in the same small container: the
+      // visible control is the select's proxy. Never inferred inside a hidden ancestor (an
+      // inactive copy) or from a container that also holds an unrelated field.
+      let selectProxyKind: "readonly_input" | "combobox" | "button" | undefined;
+      if (tagName === "select" && !visible) {
+        let inactiveAncestor = false;
+        for (let a = el.parentElement; a && a !== formEl.parentElement; a = a.parentElement) {
+          const s = window.getComputedStyle(a);
+          if (s.display === "none" || s.visibility === "hidden") {
+            inactiveAncestor = true;
+            break;
+          }
+        }
+        let container: Element | null = inactiveAncestor ? null : el.parentElement;
+        let hops = 0;
+        while (container && container !== formEl && hops < 3 && !selectProxyKind) {
+          if (container.querySelectorAll("select").length > 1) break;
+          const proxyCandidates = Array.from(
+            container.querySelectorAll('input[readonly]:not([type="hidden"]), [role="combobox"], [aria-haspopup="listbox"], button[aria-haspopup]'),
+          ).filter((c) => c !== el);
+          const unrelated = Array.from(container.querySelectorAll('input:not([type="hidden"]), textarea')).filter((n) => !proxyCandidates.includes(n));
+          if (unrelated.length > 0) break;
+          const shownCandidates = proxyCandidates.filter((c) => {
+            const r = c.getBoundingClientRect();
+            const cs = window.getComputedStyle(c);
+            return r.width > 0 && r.height > 0 && cs.visibility !== "hidden" && cs.display !== "none";
+          });
+          if (shownCandidates.length === 1) {
+            const proxyEl = shownCandidates[0]!;
+            selectProxyKind =
+              proxyEl.tagName === "INPUT" ? "readonly_input" : proxyEl.tagName === "BUTTON" && proxyEl.getAttribute("role") !== "combobox" ? "button" : "combobox";
+            proxyEl.setAttribute(`${attr}-proxy-for`, String(index));
+          }
+          container = container.parentElement;
+          hops += 1;
+        }
+      }
 
       const id = el.getAttribute("id");
       const byForLabel = id ? formEl.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
@@ -445,8 +514,12 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
         isPlaceholderMimicry,
         isPreselected,
         options,
+        selectProxyKind,
+        isSelectProxy: false,
       };
     });
+    // A proxy can precede its select in document order, so it is only known once every select ran.
+    return described.map((d, i) => ({ ...d, isSelectProxy: fields[i]!.hasAttribute(`${attr}-proxy-for`) }));
   }, FIELD_INDEX_ATTR);
 }
 
@@ -555,6 +628,8 @@ function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
     isPreselected: raw.isPreselected,
     options: raw.options,
     dealerLookupTriggerIndex: raw.dealerLookupTriggerIndex,
+    selectProxyKind: raw.selectProxyKind,
+    isSelectProxy: raw.isSelectProxy,
   };
 }
 
@@ -631,8 +706,11 @@ async function applyDecision(
   hasCountryCodeSelector: boolean,
   language: SupportedLanguage,
   dealerLookupMode: "full" | "await_pending_lookup" = "full",
-): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome }> {
+): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome; proxiedSelect?: ProxiedSelectOutcome; checkboxActivation?: "native_check" | "label_click" }> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
+  if (isProxiedRequiredSelect(plannedField.descriptor, plannedField.matchedField)) {
+    return applyProxiedSelectDecision(page, form, field, plannedField, language);
+  }
   switch (plannedField.decision.kind) {
     case "fill_text":
       await field.fill(plannedField.decision.value);
@@ -670,9 +748,10 @@ async function applyDecision(
       }
       return { key: plannedField.matchedField };
     }
-    case "tick_checkbox":
-      await field.check();
-      return { key: plannedField.matchedField };
+    case "tick_checkbox": {
+      const checkboxActivation = await tickCheckbox(page, field);
+      return checkboxActivation ? { key: plannedField.matchedField, checkboxActivation } : {};
+    }
     case "dealer_search": {
       // resolveDealerLookup enters the value itself, with real keyboard input -- a prior fill()
       // here would already have fired input/change without any keystroke, and on a retry would
@@ -688,9 +767,80 @@ async function applyDecision(
   }
 }
 
+const CHECKBOX_LABEL_ATTR = "data-nav-engine-checkbox-label";
+
+/**
+ * A required checkbox whose native box is off-screen or covered (a "visually hidden" custom
+ * checkbox) cannot be pointer-checked; a visitor ticks it through its label, so that is the
+ * fallback. Only a read-back of the native checked state counts as ticked.
+ */
+async function tickCheckbox(page: Page, field: Locator): Promise<"native_check" | "label_click" | null> {
+  if (await field.isChecked().catch(() => false)) return "native_check";
+  const native = await field
+    .check({ timeout: 3_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (native && (await field.isChecked().catch(() => false))) return "native_check";
+  const labelTagged = await field
+    .evaluate((el: Element, attr: string) => {
+      document.querySelectorAll(`[${attr}]`).forEach((n) => n.removeAttribute(attr));
+      const label = Array.from((el as HTMLInputElement).labels ?? []).find((l) => {
+        const r = l.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (!label) return false;
+      label.setAttribute(attr, "1");
+      return true;
+    }, CHECKBOX_LABEL_ATTR)
+    .catch(() => false);
+  if (!labelTagged) return null;
+  await page
+    .locator(`[${CHECKBOX_LABEL_ATTR}]`)
+    .first()
+    .click({ timeout: 3_000 })
+    .catch(() => {});
+  return (await field.isChecked().catch(() => false)) ? "label_click" : null;
+}
+
+/** Same option policy as a visible select (first selectable option, or the negative option for a consent-shaped one), committed through the select's visible proxy. */
+async function applyProxiedSelectDecision(
+  page: Page,
+  form: Locator,
+  field: Locator,
+  plannedField: PlannedField,
+  language: SupportedLanguage,
+): Promise<{ key?: string; proxiedSelect?: ProxiedSelectOutcome }> {
+  const descriptor = plannedField.descriptor;
+  const options = descriptor.options ?? [];
+  const decision = plannedField.decision;
+  const target =
+    decision.kind === "select_option"
+      ? options.find((o) => o.value === decision.value)
+      : decision.kind === "select_negative_option"
+        ? options[options.length - 1]
+        : decision.kind === "choose_first_valid_option"
+          ? firstSelectableOption(options, language)
+          : undefined;
+  if (!target) return {};
+  const proxy = form.locator(`[${FIELD_INDEX_ATTR}${PROXY_ATTR_SUFFIX}="${descriptor.id}"]`).first();
+  const outcome = await commitProxiedSelect(page, field, proxy, { value: target.value, label: target.label }, {
+    fieldId: descriptor.id,
+    purpose: plannedField.matchedField ?? "unclassified_required_select",
+    proxyKind: descriptor.selectProxyKind ?? "combobox",
+  });
+  return outcome.nativeValueCommitted ? { key: plannedField.matchedField ?? descriptor.id, proxiedSelect: outcome } : { proxiedSelect: outcome };
+}
+
 async function findSubmitControl(form: Locator): Promise<Locator | null> {
-  const typed = form.locator('button[type="submit"], input[type="submit"]').first();
-  if ((await typed.count()) > 0) return typed;
+  const typedAll = form.locator('button[type="submit"], input[type="submit"]');
+  const typedCount = await typedAll.count();
+  // A form can carry another layout's hidden copy of its Submit control before the rendered one;
+  // clicking that copy can never submit, so the first rendered control wins.
+  for (let i = 0; i < typedCount; i += 1) {
+    if (await typedAll.nth(i).isVisible().catch(() => false)) return typedAll.nth(i);
+  }
+  const typed = typedAll.first();
+  if (typedCount > 0) return typed;
   for (const marker of SUBMIT_TEXT_MARKERS) {
     const byText = form.getByRole("button", { name: new RegExp(marker, "i") }).first();
     if ((await byText.count()) > 0) return byText;
@@ -1041,7 +1191,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       dealerSearchWidgetDetected: dealerSearchWidgetDetectedCandidate,
       textSignals,
       realFieldsDiscovered: descriptors.length,
-      realRequiredFieldsDetected: descriptors.filter((d) => d.required && d.visible).length,
+      realRequiredFieldsDetected: descriptors.filter((d) => d.required && isFillTarget(d)).length,
       score: computeFormScore({
         journeyContext,
         textSignals,
@@ -1129,6 +1279,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const form = forms.nth(selection.chosenIndex);
   const hasCountryCodeSelector = chosenEvidence.hasCountryCodeSelector;
   const preSubmitHiddenSnapshot = await readHiddenFieldState(form);
+  const submitProbeInstalled = await installSubmitProbe(page);
+  const fillStartSnapshot = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
@@ -1139,6 +1291,9 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // partial catch-up/poll pass (onlyIndices set), which only re-reads a subset of fields and would
   // give an incomplete picture of every candidate pair considered.
   let dealerLookupDebugCapture: { triggerCandidates: Awaited<ReturnType<typeof tagAndReadFieldsWithDealerLookup>>["triggerCandidates"]; pairDebug: TriggerFieldPairDebug[] } | undefined;
+
+  const proxiedSelectOutcomes = new Map<string, ProxiedSelectOutcome>();
+  const checkboxActivations = new Map<string, "native_check" | "label_click">();
 
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const shouldCollectDebug = !onlyIndices && !dealerLookupDebugCapture && isFormDiscoveryDiagnosticEnabled();
@@ -1183,6 +1338,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       }
       const outcome = await applyDecision(page, form, plannedField, hasCountryCodeSelector, language);
       if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
+      if (outcome.proxiedSelect) proxiedSelectOutcomes.set(outcome.proxiedSelect.fieldId, outcome.proxiedSelect);
+      if (outcome.checkboxActivation) checkboxActivations.set(plannedField.descriptor.id, outcome.checkboxActivation);
       if (outcome.key) {
         fieldsFilled.add(outcome.key);
         filledIds.add(plannedField.descriptor.id);
@@ -1204,7 +1361,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   for (let attempt = 0; attempt < MAX_DEPENDENT_SELECT_POLLS; attempt += 1) {
     const pendingSelectIds = new Set(
       initialPlan
-        .filter((p) => p.descriptor.tagName === "select" && p.descriptor.required && p.descriptor.visible && !initialFilledIds.has(p.descriptor.id))
+        .filter((p) => p.descriptor.tagName === "select" && p.descriptor.required && isFillTarget(p.descriptor) && !initialFilledIds.has(p.descriptor.id))
         .map((p) => p.descriptor.id),
     );
     if (pendingSelectIds.size === 0) break;
@@ -1261,7 +1418,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   const { fields: rawAfterConsent } = await tagAndReadFieldsWithDealerLookup(form);
   const descriptorsAfterConsent = rawAfterConsent.map(toDescriptor);
   const newlyRequiredIds = new Set(
-    descriptorsAfterConsent.filter((d) => d.required && d.visible && !initialFilledIds.has(d.id)).map((d) => d.id),
+    descriptorsAfterConsent.filter((d) => d.required && isFillTarget(d) && !initialFilledIds.has(d.id)).map((d) => d.id),
   );
   let finalFilledIds = initialFilledIds;
   if (newlyRequiredIds.size > 0) {
@@ -1269,7 +1426,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     finalFilledIds = new Set([...initialFilledIds, ...catchUpFilledIds]);
   }
 
-  const requiredFields = initialPlan.filter((p) => p.descriptor.required && p.descriptor.visible);
+  const requiredFields = initialPlan.filter((p) => p.descriptor.required && isFillTarget(p.descriptor));
   const requiredFieldsFilled = requiredFields.filter((p) => finalFilledIds.has(p.descriptor.id)).length;
   const actionableFields = initialPlan.filter((p) => p.decision.kind !== "skip");
   const formDiscoveryDiagnostics = {
@@ -1298,6 +1455,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       decision: p.decision.kind,
       filled: finalFilledIds.has(p.descriptor.id),
     })),
+    proxiedSelectDiagnostics: [...proxiedSelectOutcomes.values()],
     ...formSelectionDiagnostics,
   };
 
@@ -1385,7 +1543,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // submit is allowed only when every required text/select field resolved, the dealer dependency
   // (if any) is resolved and verified, and every currently-visible required consent group is
   // resolved. A failure here means submit is never clicked at all.
-  const unresolvedRequiredFinal = descriptorsAfterConsent.filter((d) => d.required && d.visible && !finalFilledIds.has(d.id));
+  const unresolvedRequiredFinal = descriptorsAfterConsent.filter((d) => d.required && isFillTarget(d) && !finalFilledIds.has(d.id));
+  const afterFillSnapshot = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
   const dealerDependencyUnresolved =
     dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified;
   const preSubmitReadinessFailures: string[] = [];
@@ -1521,6 +1680,28 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   // minimum must never be mistaken for a cancellation and answered with a duplicate lead.
   const firstAttemptConfig: SubmissionObservationConfig = fallbackFlagEnabled ? { ...observationConfig, baseWindowMs: observationConfig.hardCapMs } : observationConfig;
 
+  const attemptRecords: SubmitAttemptStateRecord[] = [];
+
+  /**
+   * A later attempt never trusts what the earlier one left behind: the form is re-tagged from the
+   * live DOM (a site may have re-rendered or replaced it), and any required control that was
+   * committed before the previous Submit but no longer is gets filled again -- the same fill, not
+   * another Submit.
+   */
+  async function refreshStateBeforeAttempt(): Promise<SecondAttemptStateRefresh> {
+    await tagAndReadFields(form).catch(() => []);
+    const previous = attemptRecords[attemptRecords.length - 1]?.beforeSubmit?.controls ?? null;
+    const current = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+    const previouslyCommitted = new Set((previous ?? []).filter((c) => c.committed).map((c) => c.fieldId));
+    const stale = current ? requiredUncommitted(current.controls).filter((id) => previouslyCommitted.has(id)) : [];
+    let refilled: string[] = [];
+    if (stale.length > 0) {
+      const { filledIds } = await fillAllRequired(new Set(stale));
+      refilled = [...filledIds];
+    }
+    return { fieldsRetagged: true, staleRequiredFieldIds: stale, refilledFieldIds: refilled };
+  }
+
   async function attemptSubmit(config: SubmissionObservationConfig): Promise<{
     postSubmit: PostSubmitDiagnostics;
     succeeded: boolean;
@@ -1532,6 +1713,12 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     confirmationAppeared: boolean;
     observation: PostSubmitObservation | null;
   }> {
+    const attemptNumber = attemptRecords.length + 1;
+    const refresh = attemptNumber > 1 ? await refreshStateBeforeAttempt() : null;
+    if (attemptNumber === 1) await tagAndReadFields(form).catch(() => []);
+    const beforeSubmit = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+    const record: SubmitAttemptStateRecord = { attempt: attemptNumber, beforeSubmit, afterCancellation: null, classification: null, refresh };
+    attemptRecords.push(record);
     // A control disabled until the last field's change/blur fires is a real pattern: give the
     // page that one commit event, briefly and bounded, instead of letting click() wait out its
     // ~30s actionability timeout and then throw with no diagnosable cause.
@@ -1546,6 +1733,22 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     }
     if (!submitControlEnabled) {
       const postSubmit = await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false, preSubmitHiddenSnapshot);
+      record.afterCancellation = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+      record.classification = {
+        ...classifyClientSideCancellation({
+          attempt: attemptNumber,
+          probe: null,
+          pageUrl: beforeUrl,
+          formActionUrl: null,
+          businessRequestObservedOnNetwork: false,
+          succeeded: false,
+          challengeDetected: false,
+          requiredAcknowledgementUncheckedIds: beforeSubmit ? requiredAcknowledgementUnchecked(beforeSubmit.controls) : [],
+          requiredUncommittedFieldIds: beforeSubmit ? requiredUncommitted(beforeSubmit.controls) : [],
+        }),
+        cancellationStage: "submit_event_never_fired",
+        cancellationReason: "the Submit control stayed disabled after a final commit event, so it was never clicked",
+      };
       return {
         postSubmit,
         succeeded: false,
@@ -1570,6 +1773,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
         }
       })
       .catch(() => null);
+    // Marked before the observer starts, so the probe's own attribute writes never count as page activity.
+    await beginProbeAttempt(page, form, submit, attemptNumber);
     const { ariaInvalidBefore } = await installSubmissionObserver(form, submit);
     // Started before the click -- correlates purely by "happened during this submit attempt's
     // window", never by URL/brand. Never a request/response body, never a typed or submitted value.
@@ -1612,6 +1817,20 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     // page before the click proves nothing.
     const confirmationAppeared = !urlChanged && postSubmit.invalidFieldIds.length === 0 && observedConfirmation;
     const succeeded = postSubmit.invalidFieldIds.length === 0 && observation.terminalState === "succeeded";
+    const probe = urlChanged ? null : await readProbeAttempt(page);
+    if (!urlChanged && !succeeded) record.afterCancellation = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+    const businessSeen = businessRequests.length > 0 || observation.businessRequestDetected;
+    record.classification = classifyClientSideCancellation({
+      attempt: attemptNumber,
+      probe,
+      pageUrl: beforeUrl,
+      formActionUrl,
+      businessRequestObservedOnNetwork: businessSeen || urlChanged,
+      succeeded,
+      challengeDetected: observation.terminalState === "blocked_or_challenged" && !businessSeen,
+      requiredAcknowledgementUncheckedIds: beforeSubmit ? requiredAcknowledgementUnchecked(beforeSubmit.controls) : [],
+      requiredUncommittedFieldIds: beforeSubmit ? requiredUncommitted(beforeSubmit.controls) : [],
+    });
     return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation };
   }
 
@@ -1734,6 +1953,47 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       }
     }
   }
+  function buildSubmitCancellationDiagnostics(): SubmitCancellationDiagnostics {
+    const purposes = new Map<string, string>();
+    for (const p of initialPlan) {
+      const purpose = p.matchedField ?? (p.descriptor.selectProxyKind && !p.descriptor.visible ? "unclassified_required_select" : undefined);
+      if (purpose) purposes.set(p.descriptor.id, purpose);
+    }
+    const label = (snapshot: SnapshotWithCompanions | null): ControlStateSnapshot[] | null =>
+      snapshot
+        ? snapshot.controls.map((c) => ({ ...c, purpose: purposes.get(c.fieldId) ?? (c.proxyRole === "select_proxy" ? "select_proxy_display" : c.type === "hidden" ? "hidden_field" : "unclassified") }))
+        : null;
+    const relabel = (snapshot: SnapshotWithCompanions | null): SnapshotWithCompanions | null => (snapshot ? { ...snapshot, controls: label(snapshot)! } : null);
+    const attempts = attemptRecords.map((r) => ({
+      attempt: r.attempt,
+      cancellationStage: r.classification?.cancellationStage ?? null,
+      cancellationReason: r.classification?.cancellationReason ?? "not classified",
+      evidence: r.classification?.evidence ?? null,
+      stateRefreshBeforeAttempt: r.refresh,
+      preSubmitSnapshot: label(r.beforeSubmit),
+      postCancellationSnapshot: label(r.afterCancellation),
+    }));
+    const first = attempts[0];
+    const second = attempts[1];
+    const snapshotDifferences = [
+      ...diffSnapshots("attempt1_before_submit_vs_attempt1_after_cancellation", first?.preSubmitSnapshot ?? null, first?.postCancellationSnapshot ?? null),
+      ...diffSnapshots("attempt1_after_cancellation_vs_attempt2_before_submit", first?.postCancellationSnapshot ?? null, second?.preSubmitSnapshot ?? null),
+      ...diffSnapshots("attempt2_before_submit_vs_attempt2_after_cancellation", second?.preSubmitSnapshot ?? null, second?.postCancellationSnapshot ?? null),
+      ...diffSnapshots("attempt1_before_submit_vs_attempt2_before_submit", first?.preSubmitSnapshot ?? null, second?.preSubmitSnapshot ?? null),
+    ];
+    return {
+      probeInstalled: submitProbeInstalled,
+      attempts,
+      snapshotDifferences,
+      acknowledgementCheckboxes: buildAcknowledgementCheckboxDiagnostics({
+        fillStart: relabel(fillStartSnapshot),
+        afterFill: relabel(afterFillSnapshot),
+        beforeSubmit: attemptRecords.map((r) => relabel(r.beforeSubmit)),
+        engineActivations: checkboxActivations,
+      }),
+    };
+  }
+
   const submitAttemptSummary: SubmitAttemptSummary = {
     firstAttemptConsentMode: firstAttemptConsentModeOf(preSubmitActionableOptional, preSubmitNonActionableOptional.length),
     firstAttemptConsentCommitted: consentResult.optionalDeclineNotCommittedGroups.length === 0,
@@ -1858,6 +2118,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     retryReason: retryDecision,
     postSubmitObservation: attempt.observation,
     submitAttemptSummary,
+    submitCancellationDiagnostics: buildSubmitCancellationDiagnostics(),
   };
 
   if (!attempt.succeeded) {
