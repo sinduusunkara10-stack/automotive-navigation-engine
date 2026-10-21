@@ -93,7 +93,7 @@ import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
 import { inventorySubmitListeners } from "./submitListenerInventory.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
-import { isPhoneFieldKey, normalisePhoneForInput } from "../forms/phoneFormat.js";
+import { isPhoneFieldKey, phoneValueForField } from "../forms/phoneFormat.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 
@@ -719,11 +719,17 @@ async function applyDecision(
   }
   switch (plannedField.decision.kind) {
     case "fill_text":
-      await field.fill(
-        isPhoneFieldKey(plannedField.decision.field)
-          ? normalisePhoneForInput(plannedField.decision.value)
-          : plannedField.decision.value,
-      );
+      if (isPhoneFieldKey(plannedField.decision.field)) {
+        const constraints = await field
+          .evaluate((el) => {
+            const input = el as HTMLInputElement;
+            return { pattern: input.getAttribute("pattern"), maxLength: input.maxLength, minLength: input.minLength };
+          })
+          .catch(() => ({}));
+        await field.fill(phoneValueForField(plannedField.decision.value, constraints));
+      } else {
+        await field.fill(plannedField.decision.value);
+      }
       return { key: plannedField.decision.field };
     case "select_option": {
       await field.selectOption({ value: plannedField.decision.value });
