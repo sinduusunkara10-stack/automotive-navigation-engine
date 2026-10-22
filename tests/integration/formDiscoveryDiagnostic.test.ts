@@ -109,6 +109,7 @@ test("formDiscoveryDebug: EMITTED log marker never includes submitted field valu
     const joined = captured.logs.join("\n");
     assert.ok(!joined.includes("test@test.com"), "log markers must never contain the test email value");
     assert.ok(!joined.includes("+44 7700 900123"), "log markers must never contain the test phone value");
+    assert.ok(!joined.includes("+447700900123"), "log markers must never contain the normalised test phone value");
   } finally {
     await page.close();
     await browser.close();

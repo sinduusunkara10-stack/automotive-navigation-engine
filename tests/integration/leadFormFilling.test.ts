@@ -35,7 +35,7 @@ test("fill_form: fills required fields, skips hidden/optional/prefilled, and suc
     assert.equal(url.searchParams.get("firstName"), "Test");
     assert.equal(url.searchParams.get("lastName"), "Test");
     assert.equal(url.searchParams.get("email"), "test@test.com");
-    assert.equal(url.searchParams.get("mobile"), "+44 7700 900123");
+    assert.equal(url.searchParams.get("mobile"), "+447700900123");
     assert.equal(url.searchParams.get("postcode"), "SW1A 1AA");
     // Optional comments field left blank, honeypot never filled, optional consent left unchecked.
     assert.equal(url.searchParams.get("comments"), "");
@@ -1373,3 +1373,27 @@ test("fill_form: an authoritative role=\"radio\" dealer result that only appears
     await close();
   }
 });
+
+for (const [fixture, expectedMobile] of [
+  ["lead-form-phone-pattern-formatted.html", "+44 7700 900123"],
+  ["lead-form-phone-pattern-compact.html", "+447700900123"],
+] as const) {
+  test(`fill_form: phone value honours the field's own pattern/maxlength (${fixture})`, async () => {
+    const { baseUrl, close } = await startStaticServer(fixturesDir);
+    const browser = await chromium.launch();
+    const page = await browser.newPage();
+    try {
+      await page.goto(`${baseUrl}/${fixture}`);
+      const result = await executeFillForm({ page, action: { type: "fill_form" }, captures: {}, stepIndex: 1, captureModules: [] });
+      assert.equal(result.formFillOutcome, "submitted");
+      const url = new URL(result.resultingUrl!);
+      assert.equal(url.searchParams.get("mobile"), expectedMobile);
+      assert.equal(url.searchParams.get("postcode"), "SW1A 1AA");
+      assert.equal(url.searchParams.get("email"), "test@test.com");
+    } finally {
+      await page.close();
+      await browser.close();
+      await close();
+    }
+  });
+}
