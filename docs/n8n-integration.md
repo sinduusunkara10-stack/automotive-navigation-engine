@@ -1400,3 +1400,9 @@ The dealer-lookup timing evidence is additive to response `1.53.0` and needs no 
 Network requests add `bodyFinishedAtMs` and `structureUnknownReason`, activation steps add
 `startedAtMs`, and the dealer-lookup execution trace adds `lateResultObservation`,
 `escalationSkipped`, `lookupControlTimeline` and `lookupStateClassification`.
+
+Setting `FORM_VISUAL_EVIDENCE=1` in the engine's environment adds `formVisualEvidence` to the
+`fill_form` step's action result: at most 8 viewport JPEG screenshots, base64-encoded, taken
+around the dealer lookup and each Submit. They add a few hundred kilobytes to the response, so an
+Extract node that copies the whole action result into a document should drop
+`formVisualEvidence` or save the images separately.

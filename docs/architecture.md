@@ -4250,3 +4250,23 @@ flight. To show which case a run hit, the trace also records (diagnostics only, 
   engine action, a request pending at timeout, a body still arriving, results appearing after the
   timeout, a control that became usable but was not clicked, a control present but disabled, a
   request that completed with the UI unchanged, or nothing at all.
+
+### Lead-form filling: opt-in visual evidence (additive to response 1.53.0; request 1.51.0 unchanged)
+
+The only screenshots the engine took were from explicit `capture` steps with the `screenshots`
+module. Those were written to the server's local disk, and the response returned only the file
+path. Nothing was captured while a form was filled, a dealer lookup ran, or Submit was clicked.
+
+With `FORM_VISUAL_EVIDENCE=1`, `src/diagnostics/visualEvidence.ts` takes a viewport-only JPEG
+(quality 35, at most 8 per `fill_form` action) at each transition the structured diagnostics
+describe:
+
+- right after the postcode/location value is entered
+- when a control near the field first becomes usable (from the dealer-lookup control timeline)
+- when the lookup ends, and again after the post-timeout watch
+- before each Submit click, and after its outcome
+
+The screenshots are returned base64-encoded on `actionResult.formVisualEvidence`. Nothing is
+written to disk. A capture never scrolls, never takes a full page (which resizes the viewport) and
+leaves the caret alone, so the page is not changed. A failed capture is counted, not raised.
+`npm run manual:extract-visual-evidence -- response.json out-dir` writes the JPEGs to files.

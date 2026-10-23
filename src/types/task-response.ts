@@ -764,6 +764,21 @@ export interface ActionResult {
    * trigger-to-field candidate pair was accepted or rejected and why. Never carries a typed
    * field value, a selected suggestion's own text, or any other submitted personal data.
    */
+  /** Opt-in (FORM_VISUAL_EVIDENCE=1) viewport screenshots at lead-form state transitions -- see src/diagnostics/visualEvidence.ts. */
+  formVisualEvidence?: {
+    shots: {
+      stage: "lookup_after_input" | "lookup_control_became_actionable" | "lookup_outcome" | "lookup_after_late_observation" | "submit_before_click" | "submit_outcome";
+      submitAttempt: number | null;
+      capturedAt: string;
+      mimeType: "image/jpeg";
+      viewportWidth: number | null;
+      viewportHeight: number | null;
+      byteLength: number;
+      dataBase64: string;
+    }[];
+    omittedStages: string[];
+    failedCaptureCount: number;
+  };
   dealerLookupTrace?: {
     enabled: true;
     runId: string;

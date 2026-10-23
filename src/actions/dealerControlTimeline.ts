@@ -128,11 +128,15 @@ export function startLookupControlTimeline(
     loadingIndicatorSelector: string;
     lookupVocabulary: (text: string) => boolean;
     geolocationVocabulary: (attributeText: string) => boolean;
+    /** Called once, the first time a control that was not usable at the first sample becomes usable. */
+    onControlBecameActionable?: () => Promise<void>;
   },
 ): LookupControlTimelineRecorder {
   const entries: LookupControlTimelineEntry[] = [];
   let truncated = false;
   let lastSignature = "";
+  let initiallyActionable: Set<number> | null = null;
+  let becameActionableNotified = false;
 
   async function read(): Promise<{ controls: RawControl[]; loading: boolean } | null> {
     return callInPageFunction<{ controls: RawControl[]; loading: boolean }>(scope, "__navEngineReadLookupControls", READ_CONTROLS_SOURCE, {
@@ -164,6 +168,13 @@ export function startLookupControlTimeline(
       const signature = JSON.stringify([raw.loading, controls]);
       if (signature === lastSignature) return;
       lastSignature = signature;
+      const usable = controls.filter((c) => c.rendered && c.onScreen && c.enabled).map((c) => c.controlId);
+      if (initiallyActionable === null) {
+        initiallyActionable = new Set(usable);
+      } else if (!becameActionableNotified && usable.some((id) => !initiallyActionable!.has(id))) {
+        becameActionableNotified = true;
+        await options.onControlBecameActionable?.();
+      }
       if (entries.length >= MAX_TIMELINE_ENTRIES) {
         truncated = true;
         entries[entries.length - 1] = { atMs: options.now(), phase, loadingIndicatorVisible: raw.loading, controls };

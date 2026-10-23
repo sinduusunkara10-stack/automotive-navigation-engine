@@ -1,5 +1,6 @@
 import type { ElementHandle, Frame, Locator, Page } from "playwright";
 import { isLookupLikePurpose, startDealerLookupNetworkCapture, type DealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
+import type { VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
 import { startLookupControlTimeline, type LookupControlTimeline, type LookupControlTimelineRecorder } from "./dealerControlTimeline.js";
 import { detectHiddenCommit, startDealerLookupProbe, type DealerLookupProbe, type HiddenFieldPurpose, type HiddenFieldState } from "./dealerLookupProbe.js";
 
@@ -1150,6 +1151,8 @@ export interface ResolveDealerLookupOptions {
   /** Diagnostics only: after an unresolved stage timeout, keep watching (never acting) for
    * DEALER_LATE_RESULT_OBSERVATION_MS and record whether a result appeared later. */
   observeLateResultsForDiagnostics?: boolean;
+  /** Opt-in screenshots at lookup state transitions (see diagnostics/visualEvidence.ts). */
+  visualEvidence?: VisualEvidenceRecorder;
 }
 
 /**
@@ -1182,7 +1185,7 @@ export async function resolveDealerLookup(
 ): Promise<DealerLookupOutcome> {
   const capture = startDealerLookupNetworkCapture(page);
   const probe = await startDealerLookupProbe(form, field, scope);
-  const timeline = options.observeLateResultsForDiagnostics
+  const timeline = options.observeLateResultsForDiagnostics || options.visualEvidence
     ? startLookupControlTimeline(page, scope, {
         now: () => capture.now(),
         triggerIndexAttr: TRIGGER_INDEX_ATTR,
@@ -1190,10 +1193,12 @@ export async function resolveDealerLookup(
         loadingIndicatorSelector: LOADING_INDICATOR_SELECTOR,
         lookupVocabulary: matchesLookupTriggerVocabulary,
         geolocationVocabulary: matchesGeolocationVocabulary,
+        onControlBecameActionable: options.visualEvidence ? () => options.visualEvidence!.capture("lookup_control_became_actionable") : undefined,
       })
     : undefined;
   try {
     const outcome = await resolveDealerLookupCore(page, scope, trigger, field, form, options, probe, capture, timeline);
+    await options.visualEvidence?.capture("lookup_outcome");
     const requests = await capture.stop();
     const stats = capture.stats();
     const trace = outcome.executionTrace;
@@ -1223,6 +1228,7 @@ export async function resolveDealerLookup(
     // the lookup itself, so watching cannot change what the run does next.
     if (options.observeLateResultsForDiagnostics && !outcome.dealerValueVerified && trace.timedOutStage !== null && trace.retryRecommendation === "none") {
       trace.lateResultObservation = await observeLateResult(page, scope, probe, capture, trace.timedOutStage, timeline);
+      await options.visualEvidence?.capture("lookup_after_late_observation");
     }
     capture.detachBodyFinishListener();
     if (timeline) {
@@ -1457,6 +1463,7 @@ async function resolveDealerLookupCore(
     }
     fieldValueRetainedAfterInput = retained;
     await recordStep("keyboard_input", inputStarted, inputStartMs, false, false);
+    await options.visualEvidence?.capture("lookup_after_input");
 
     // Observe whether real typing alone starts the lookup (debounced autocompletes need the field
     // to keep focus -- the old immediate blur() cancelled them).
