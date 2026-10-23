@@ -1406,3 +1406,8 @@ Setting `FORM_VISUAL_EVIDENCE=1` in the engine's environment adds `formVisualEvi
 around the dealer lookup and each Submit. They add a few hundred kilobytes to the response, so an
 Extract node that copies the whole action result into a document should drop
 `formVisualEvidence` or save the images separately.
+
+With `FORM_DISCOVERY_DIAGNOSTIC=1`, page-touching steps add `formPresence` to their action result,
+and a `no_form_found` adds `formDiscoveryDebug.formPresence`. Both are additive to response
+`1.53.0`, are counts only (no field values or labels), and reach the Extract node through
+`journeyPathEvidence[].actionOutcome` with no Build or Extract node change.

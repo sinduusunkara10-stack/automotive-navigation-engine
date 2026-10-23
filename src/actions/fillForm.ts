@@ -93,6 +93,7 @@ import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
 import { inventorySubmitListeners } from "./submitListenerInventory.js";
 import { isFormVisualEvidenceEnabled, startVisualEvidenceRecorder, type VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
+import { observeLateFormRender, probeFormPresence } from "../diagnostics/formPresenceProbe.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 import { isPhoneFieldKey, phoneValueForField } from "../forms/phoneFormat.js";
 
@@ -1156,6 +1157,14 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   const forms = page.locator("form");
   const formsOnPage = await forms.count();
   if (formsOnPage === 0) {
+    await visualEvidenceByPage.get(page)?.capture("form_not_found");
+    let formPresence: NonNullable<ActionExecutorResult["formDiscoveryDebug"]>["formPresence"];
+    if (isFormDiscoveryDiagnosticEnabled()) {
+      const atDiscovery = await probeFormPresence(page).catch(() => undefined);
+      const lateRender = await observeLateFormRender(page).catch(() => undefined);
+      if (lateRender) await visualEvidenceByPage.get(page)?.capture("form_not_found_after_late_watch");
+      formPresence = atDiscovery ? { atDiscovery, ...(lateRender ? { lateRender } : {}) } : undefined;
+    }
     const formDiscoveryDebug = await emitDiagnostic("no_form_found", [], new Map(), {
       selectedFormIndex: null,
       runnerUpIndex: null,
@@ -1164,7 +1173,12 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       ambiguous: false,
       rejectionReason: "no <form> element on the page",
     });
-    return { success: false, error: "no_form_found", formLocationGateDiagnostics: locationGateOutcome, formDiscoveryDebug };
+    return {
+      success: false,
+      error: "no_form_found",
+      formLocationGateDiagnostics: locationGateOutcome,
+      formDiscoveryDebug: formDiscoveryDebug && formPresence ? { ...formDiscoveryDebug, formPresence } : formDiscoveryDebug,
+    };
   }
 
   /**

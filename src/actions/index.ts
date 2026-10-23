@@ -16,6 +16,8 @@ import { executeStopSuccess } from "./stopSuccess.js";
 import { executeStopBlocked } from "./stopBlocked.js";
 import { executeStopFailure } from "./stopFailure.js";
 import { executeFillForm } from "./fillForm.js";
+import { isFormDiscoveryDiagnosticEnabled } from "../diagnostics/formDiscoveryDiagnostic.js";
+import { probeFormPresence } from "../diagnostics/formPresenceProbe.js";
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import type { FormJourneyContext, FormSelectionAmbiguityResolver } from "../forms/formRelevance.js";
 
@@ -183,6 +185,8 @@ async function dispatchByType(params: DispatchParams): Promise<ActionExecutorRes
   }
 }
 
+const PAGE_PRESENCE_PROBED_ACTIONS: ReadonlySet<SelectedAction["type"]> = new Set(["click", "scroll", "wait", "go_back", "navigate", "capture"]);
+
 export async function dispatchAction(params: DispatchParams): Promise<ActionResult> {
   const { page } = params;
   const urlBeforeDispatch = safePageUrl(page) ?? "";
@@ -194,5 +198,9 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
     snapshotBeforeDispatch,
     result,
   });
-  return { ...result, interactionOutcome };
+  const formPresence =
+    isFormDiscoveryDiagnosticEnabled() && PAGE_PRESENCE_PROBED_ACTIONS.has(params.action.type) && !page.isClosed()
+      ? await probeFormPresence(page).catch(() => undefined)
+      : undefined;
+  return { ...result, interactionOutcome, ...(formPresence ? { formPresence } : {}) };
 }

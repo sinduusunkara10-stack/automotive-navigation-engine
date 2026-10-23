@@ -1223,6 +1223,50 @@
                   "type": "string"
                 }
               }
+            },
+            "formPresence": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "1.53.0 additive amendment: on no_form_found only. atDiscovery is the probe when discovery ran; lateRender is a passive watch (at most 15 s) afterwards that stops as soon as a <form> and a visible fillable control are both seen. The action's own result is decided before the watch.",
+              "required": [
+                "atDiscovery"
+              ],
+              "properties": {
+                "atDiscovery": {
+                  "$ref": "#/$defs/formPresenceProbe"
+                },
+                "lateRender": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "watchedMs",
+                    "formElementAppearedAtMs",
+                    "visibleFillableAppearedAtMs",
+                    "finalProbe"
+                  ],
+                  "properties": {
+                    "watchedMs": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "formElementAppearedAtMs": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "visibleFillableAppearedAtMs": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "finalProbe": {
+                      "$ref": "#/$defs/formPresenceProbe"
+                    }
+                  }
+                }
+              }
             }
           }
         },
@@ -4166,7 +4210,7 @@
         "formVisualEvidence": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Opt-in (FORM_VISUAL_EVIDENCE=1) viewport JPEG screenshots taken at lead-form state transitions (dealer lookup and Submit), at most 8 per fill_form action. No full-page capture, no scrolling. Optional (additive in 1.53.0).",
+          "description": "Opt-in (FORM_VISUAL_EVIDENCE=1) viewport JPEG screenshots taken at lead-form state transitions (dealer lookup, Submit, and form discovery finding no <form>), at most 8 per fill_form action. No full-page capture, no scrolling. Optional (additive in 1.53.0).",
           "required": [
             "shots",
             "omittedStages",
@@ -4197,7 +4241,9 @@
                       "lookup_outcome",
                       "lookup_after_late_observation",
                       "submit_before_click",
-                      "submit_outcome"
+                      "submit_outcome",
+                      "form_not_found",
+                      "form_not_found_after_late_watch"
                     ]
                   },
                   "submitAttempt": {
@@ -4254,6 +4300,9 @@
               "type": "number"
             }
           }
+        },
+        "formPresence": {
+          "$ref": "#/$defs/formPresenceProbe"
         }
       }
     },
@@ -8745,6 +8794,266 @@
           "type": [
             "integer",
             "null"
+          ]
+        }
+      }
+    },
+    "formPresenceCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Counts of form structure in one document (src/diagnostics/formPresenceProbe.ts). Fillable means a text-like input, select, textarea, contenteditable, role=textbox or role=combobox. Counts only, never a field's value, label, name or id.",
+      "required": [
+        "formElements",
+        "fillableControls",
+        "fillableVisible",
+        "fillableHiddenByStyle",
+        "fillableZeroSize",
+        "fillableDisabled",
+        "fillableVisibleOutsideAnyForm",
+        "openShadowHosts",
+        "formsInOpenShadowDom",
+        "fillableInOpenShadowDom",
+        "iframeElements",
+        "undefinedCustomElements",
+        "ariaBusyElements",
+        "progressIndicators",
+        "viewportCoveredByOverlay",
+        "bodyTextLength"
+      ],
+      "properties": {
+        "formElements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableControls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableVisible": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableHiddenByStyle": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableZeroSize": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableDisabled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableVisibleOutsideAnyForm": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "openShadowHosts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "formsInOpenShadowDom": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fillableInOpenShadowDom": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "iframeElements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "undefinedCustomElements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ariaBusyElements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "progressIndicators": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "viewportCoveredByOverlay": {
+          "type": "boolean"
+        },
+        "bodyTextLength": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "formPresenceProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "1.53.0 additive amendment, FORM_DISCOVERY_DIAGNOSTIC=1 only: where fillable form controls are on the page (main document, open shadow DOM, child frames by origin), whether they are hidden, and page readiness signals, with a classification. Read-only.",
+      "required": [
+        "capturedAt",
+        "main",
+        "frames",
+        "framesTruncated",
+        "classification"
+      ],
+      "properties": {
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "main": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "formElements",
+                "fillableControls",
+                "fillableVisible",
+                "fillableHiddenByStyle",
+                "fillableZeroSize",
+                "fillableDisabled",
+                "fillableVisibleOutsideAnyForm",
+                "openShadowHosts",
+                "formsInOpenShadowDom",
+                "fillableInOpenShadowDom",
+                "iframeElements",
+                "undefinedCustomElements",
+                "ariaBusyElements",
+                "progressIndicators",
+                "viewportCoveredByOverlay",
+                "bodyTextLength",
+                "readyState",
+                "msSinceNavigationStart",
+                "domContentLoadedAtMs",
+                "loadEventAtMs"
+              ],
+              "properties": {
+                "formElements": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/formElements"
+                },
+                "fillableControls": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableControls"
+                },
+                "fillableVisible": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableVisible"
+                },
+                "fillableHiddenByStyle": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableHiddenByStyle"
+                },
+                "fillableZeroSize": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableZeroSize"
+                },
+                "fillableDisabled": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableDisabled"
+                },
+                "fillableVisibleOutsideAnyForm": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableVisibleOutsideAnyForm"
+                },
+                "openShadowHosts": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/openShadowHosts"
+                },
+                "formsInOpenShadowDom": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/formsInOpenShadowDom"
+                },
+                "fillableInOpenShadowDom": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/fillableInOpenShadowDom"
+                },
+                "iframeElements": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/iframeElements"
+                },
+                "undefinedCustomElements": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/undefinedCustomElements"
+                },
+                "ariaBusyElements": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/ariaBusyElements"
+                },
+                "progressIndicators": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/progressIndicators"
+                },
+                "viewportCoveredByOverlay": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/viewportCoveredByOverlay"
+                },
+                "bodyTextLength": {
+                  "$ref": "#/$defs/formPresenceCounts/properties/bodyTextLength"
+                },
+                "readyState": {
+                  "type": "string"
+                },
+                "msSinceNavigationStart": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "domContentLoadedAtMs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "loadEventAtMs": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "frames": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "frameIndex",
+              "origin",
+              "accessible",
+              "counts"
+            ],
+            "properties": {
+              "frameIndex": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "origin": {
+                "type": "string"
+              },
+              "accessible": {
+                "type": "boolean"
+              },
+              "counts": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/formPresenceCounts"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "framesTruncated": {
+          "type": "boolean"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "semantic_form_with_fields",
+            "fields_without_semantic_form",
+            "form_without_fillable_fields",
+            "fields_only_hidden",
+            "fields_in_child_frame",
+            "fields_in_open_shadow_dom",
+            "inaccessible_child_frame",
+            "no_fields_detected"
           ]
         }
       }
