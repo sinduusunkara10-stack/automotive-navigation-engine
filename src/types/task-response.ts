@@ -4,6 +4,7 @@ import type { ConsentInteractionPolicy } from "./task-request.js";
 import type { JourneyMemoryDiagnostics } from "./journeyMemory.js";
 import type { SubmitCancellationDiagnostics } from "../actions/submitCancellationProbe.js";
 import type { ProxiedSelectOutcome } from "../forms/selectProxy.js";
+import type { FormLateRenderObservation, FormPresenceProbe } from "../diagnostics/formPresenceProbe.js";
 import type {
   AlternativeExplorationDiagnostics,
   ConsentDiagnostics,
@@ -721,6 +722,8 @@ export interface ActionResult {
       ambiguous: boolean;
       rejectionReason: string;
     };
+    /** 1.53.0 additive amendment: on no_form_found only, where fillable controls were (or were not) at discovery time, and whether any rendered during a passive watch afterwards. */
+    formPresence?: { atDiscovery: FormPresenceProbe; lateRender?: FormLateRenderObservation };
   };
   /**
    * Diagnostics for the generic postcode -> dealer-results -> select -> verify flow a
@@ -767,7 +770,15 @@ export interface ActionResult {
   /** Opt-in (FORM_VISUAL_EVIDENCE=1) viewport screenshots at lead-form state transitions -- see src/diagnostics/visualEvidence.ts. */
   formVisualEvidence?: {
     shots: {
-      stage: "lookup_after_input" | "lookup_control_became_actionable" | "lookup_outcome" | "lookup_after_late_observation" | "submit_before_click" | "submit_outcome";
+      stage:
+        | "lookup_after_input"
+        | "lookup_control_became_actionable"
+        | "lookup_outcome"
+        | "lookup_after_late_observation"
+        | "submit_before_click"
+        | "submit_outcome"
+        | "form_not_found"
+        | "form_not_found_after_late_watch";
       submitAttempt: number | null;
       capturedAt: string;
       mimeType: "image/jpeg";
@@ -1199,6 +1210,13 @@ export interface ActionResult {
    * was ever attempted against the page.
    */
   interactionOutcome: "NAVIGATION" | "IN_PAGE_STATE_CHANGE" | "NO_OBSERVABLE_CHANGE";
+  /**
+   * 1.53.0 additive amendment, FORM_DISCOVERY_DIAGNOSTIC=1 only: form-control presence on the page
+   * after a page-touching action other than fill_form (which reports its own on no_form_found).
+   * The observation sent to the reasoning layer lists buttons and links but never text fields, so
+   * this is how a run shows whether a form page actually had fields while the engine scrolled or left it.
+   */
+  formPresence?: FormPresenceProbe;
 }
 
 export interface Progress {

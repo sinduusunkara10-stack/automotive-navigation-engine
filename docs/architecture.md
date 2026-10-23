@@ -4270,3 +4270,31 @@ The screenshots are returned base64-encoded on `actionResult.formVisualEvidence`
 written to disk. A capture never scrolls, never takes a full page (which resizes the viewport) and
 leaves the caret alone, so the page is not changed. A failed capture is counted, not raised.
 `npm run manual:extract-visual-evidence -- response.json out-dir` writes the JPEGs to files.
+
+### Lead-form filling: form-presence evidence (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A `fill_form` that finds no `<form>` reported only `no_form_found`. The observation sent to the
+reasoning layer lists buttons and links but never text fields. So a run could not show whether
+a form page had no fields at all, had them only later, hid them, or rendered them somewhere
+discovery does not look: a child frame, open shadow DOM, or a container without a `<form>`.
+
+With `FORM_DISCOVERY_DIAGNOSTIC=1`, `src/diagnostics/formPresenceProbe.ts` counts, without
+touching the page, the following for the main document and each child frame (by origin):
+
+- `<form>` elements and fillable controls
+- which controls are visible, hidden or zero-size, and which visible ones sit outside any form
+- open shadow roots, and the forms and fields inside them
+- iframes, unregistered custom elements, `aria-busy` and progress indicators
+- whether an overlay covers the viewport
+- document readiness and navigation timing
+
+It then classifies the page. The probe runs:
+
+- on `no_form_found`, as `formDiscoveryDebug.formPresence.atDiscovery`. A passive watch of at
+  most 15 s (`lateRender`) follows and stops as soon as a form and a visible field appear. The
+  action's result is decided before the watch and is never changed by it.
+- after every click, scroll, wait, go_back, navigate and capture step, as
+  `actionResult.formPresence`.
+
+With `FORM_VISUAL_EVIDENCE=1`, `no_form_found` also adds the `form_not_found` and
+`form_not_found_after_late_watch` screenshots.

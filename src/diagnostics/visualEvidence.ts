@@ -17,7 +17,9 @@ export type VisualEvidenceStage =
   | "lookup_outcome"
   | "lookup_after_late_observation"
   | "submit_before_click"
-  | "submit_outcome";
+  | "submit_outcome"
+  | "form_not_found"
+  | "form_not_found_after_late_watch";
 
 export interface VisualEvidenceShot {
   stage: VisualEvidenceStage;
