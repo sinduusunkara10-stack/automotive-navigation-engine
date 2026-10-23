@@ -152,3 +152,6 @@ diagnostics/form-discovery/
 # Claude Code agent worktree scratch state (isolated background-agent checkouts)
 .claude/
 test-output.txt
+
+# Screenshots extracted by npm run manual:extract-visual-evidence
+visual-evidence/

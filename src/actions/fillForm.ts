@@ -92,6 +92,7 @@ import {
 import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
 import { inventorySubmitListeners } from "./submitListenerInventory.js";
+import { isFormVisualEvidenceEnabled, startVisualEvidenceRecorder, type VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 import { isPhoneFieldKey, phoneValueForField } from "../forms/phoneFormat.js";
 
@@ -775,7 +776,7 @@ async function applyDecision(
       const triggerIndex = plannedField.decision.triggerIndex;
       const trigger = triggerIndex ? await triggerByIndex(form, triggerIndex) : null;
       const scope = await dealerScopeFor(form, plannedField.descriptor.id);
-      const outcome = await resolveDealerLookup(page, scope, trigger, field, form, { value: plannedField.decision.postcode, mode: dealerLookupMode, observeLateResultsForDiagnostics: isFormDiscoveryDiagnosticEnabled() });
+      const outcome = await resolveDealerLookup(page, scope, trigger, field, form, { value: plannedField.decision.postcode, mode: dealerLookupMode, observeLateResultsForDiagnostics: isFormDiscoveryDiagnosticEnabled(), visualEvidence: visualEvidenceByPage.get(page) });
       return { key: "dealerSearch", dealerLookup: outcome };
     }
     default:
@@ -1071,7 +1072,23 @@ function scorePlan(plan: PlannedField[]): number {
   return plan.filter((p) => p.decision.kind !== "skip").length;
 }
 
+// Keyed by page so the module-level fill/submit helpers reach the recorder of the action in progress.
+const visualEvidenceByPage = new WeakMap<Page, VisualEvidenceRecorder>();
+
 export async function executeFillForm(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
+  if (!isFormVisualEvidenceEnabled()) return executeFillFormInner(params);
+  const recorder = startVisualEvidenceRecorder(params.page);
+  visualEvidenceByPage.set(params.page, recorder);
+  try {
+    const result = await executeFillFormInner(params);
+    const evidence = recorder.result();
+    return evidence ? { ...result, formVisualEvidence: evidence } : result;
+  } finally {
+    visualEvidenceByPage.delete(params.page);
+  }
+}
+
+async function executeFillFormInner(params: ExecuteFillFormParams): Promise<ActionExecutorResult> {
   const { page, captures, stepIndex, captureModules, unmappedFieldResolver, selectionAmbiguityResolver, taskId, activeSurfaceInfo, submissionObservationConfig } = params;
   const fallbackFlagEnabled = params.optionalConsentOptInFallbackForTest === true;
   const journeyContext: FormJourneyContext = params.journeyContext ?? {};
@@ -1807,6 +1824,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     // window", never by URL/brand. Never a request/response body, never a typed or submitted value.
     const capture = startDealerLookupNetworkCapture(page, { includeDocumentRequests: true });
     capture.setStep("submit_click");
+    await visualEvidenceByPage.get(page)?.capture("submit_before_click", attemptNumber);
     await submit.click({ timeout: 10_000 }).catch(() => {});
     const { observation, urlChanged, confirmationAppeared: observedConfirmation } = await observeSubmissionOutcome({
       page,
@@ -1819,6 +1837,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
       detectChallenge: detectCaptchaOnPage,
       config,
     });
+    await visualEvidenceByPage.get(page)?.capture("submit_outcome", attemptNumber);
     const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
     capture.detachBodyFinishListener();

@@ -4162,6 +4162,98 @@
             "NO_OBSERVABLE_CHANGE"
           ],
           "description": "Generic outcome classification computed uniformly for every action type (actions/index.ts's dispatchAction), never gated by, or aware of, any particular action's semantics, a capture module, brand, or URL pattern. \"NAVIGATION\": resultingUrl differs from the URL observed before this action was dispatched. \"IN_PAGE_STATE_CHANGE\": no navigation, but a generic before/after interactive-element/dialog/panel snapshot diff (the same primitive actions/click.ts already uses for surfaceChangeDetected/surfaceChangeType) found a structural change. \"NO_OBSERVABLE_CHANGE\": neither -- including stop_success/stop_blocked/stop_failure and the engine's own forced/synthetic terminal steps, for which nothing is ever dispatched to the page."
+        },
+        "formVisualEvidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Opt-in (FORM_VISUAL_EVIDENCE=1) viewport JPEG screenshots taken at lead-form state transitions (dealer lookup and Submit), at most 8 per fill_form action. No full-page capture, no scrolling. Optional (additive in 1.53.0).",
+          "required": [
+            "shots",
+            "omittedStages",
+            "failedCaptureCount"
+          ],
+          "properties": {
+            "shots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "stage",
+                  "submitAttempt",
+                  "capturedAt",
+                  "mimeType",
+                  "viewportWidth",
+                  "viewportHeight",
+                  "byteLength",
+                  "dataBase64"
+                ],
+                "properties": {
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "lookup_after_input",
+                      "lookup_control_became_actionable",
+                      "lookup_outcome",
+                      "lookup_after_late_observation",
+                      "submit_before_click",
+                      "submit_outcome"
+                    ]
+                  },
+                  "submitAttempt": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "capturedAt": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "enum": [
+                      "image/jpeg"
+                    ]
+                  },
+                  "viewportWidth": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "viewportHeight": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "byteLength": {
+                    "type": "number"
+                  },
+                  "dataBase64": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "omittedStages": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "lookup_after_input",
+                  "lookup_control_became_actionable",
+                  "lookup_outcome",
+                  "lookup_after_late_observation",
+                  "submit_before_click",
+                  "submit_outcome"
+                ]
+              }
+            },
+            "failedCaptureCount": {
+              "type": "number"
+            }
+          }
         }
       }
     },
