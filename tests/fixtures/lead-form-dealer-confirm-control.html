@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Request a Quote</title>
+  </head>
+  <body>
+    <h1>Request a Quote</h1>
+    <form id="lead-form">
+      <label for="first-name">First name</label>
+      <input type="text" id="first-name" name="firstName" required />
+      <label for="last-name">Last name</label>
+      <input type="text" id="last-name" name="lastName" required />
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required />
+      <div class="locator">
+        <input type="text" id="locator-field" name="locatorField" required />
+        <button type="button" id="locator-icon"><svg width="16" height="16"><path d="M2 2h12v12H2z"></path></svg></button>
+        <button type="button" id="locator-confirm" style="position: absolute; left: -9999px"></button>
+      </div>
+      <div id="locator-results"></div>
+      <input type="hidden" id="locator-committed" name="locatorSelection" />
+      <div id="confirmation" style="display: none">Thank you! We'll be in touch soon.</div>
+      <button type="submit" id="submit-lead">Submit</button>
+    </form>
+    <script>
+      // Typing alone never searches, and the textless icon next to the field does nothing. A
+      // confirm control parked off-screen is moved next to the field a short while after a value
+      // is entered; only clicking it runs the lookup. With
+      // window.__confirmStaysDisabled (set by a test's init script) the control is revealed but
+      // stays disabled. Nothing here is site-, brand- or language-specific.
+      window.__confirmClicks = 0;
+      const field = document.getElementById("locator-field");
+      const confirm = document.getElementById("locator-confirm");
+      let revealTimer = null;
+      field.addEventListener("input", () => {
+        clearTimeout(revealTimer);
+        revealTimer = setTimeout(() => {
+          if (field.value.trim() === "") return;
+          confirm.textContent = "OK";
+          confirm.style.position = "static";
+          confirm.disabled = window.__confirmStaysDisabled === true;
+        }, 400);
+      });
+      confirm.addEventListener("click", () => {
+        window.__confirmClicks += 1;
+        const results = document.getElementById("locator-results");
+        results.innerHTML = '<label><input type="radio" name="locatorChoice" value="0" /> Garage Alpha</label>';
+        results.querySelector("input").addEventListener("change", () => {
+          document.getElementById("locator-committed").value = "DLR-1";
+        });
+      });
+      document.getElementById("lead-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!document.getElementById("locator-committed").value) return;
+        document.getElementById("confirmation").style.display = "block";
+      });
+    </script>
+  </body>
+</html>

@@ -1395,3 +1395,8 @@ change. Each attempt adds `fieldValidationBeforeSubmit`, `fieldValidationAfterCa
 `submitCancellationDiagnostics` adds `probeMode` and `submitListenerInventory`. Setting
 `SUBMIT_PROBE_MODE=passive` in the engine's environment runs the probe without call recorders.
 
+
+The dealer-lookup timing evidence is additive to response `1.53.0` and needs no Build-node change.
+Network requests add `bodyFinishedAtMs` and `structureUnknownReason`, activation steps add
+`startedAtMs`, and the dealer-lookup execution trace adds `lateResultObservation`,
+`escalationSkipped`, `lookupControlTimeline` and `lookupStateClassification`.

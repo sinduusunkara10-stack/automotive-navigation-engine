@@ -4213,3 +4213,40 @@ No barrier, extra wait, blur or re-commit was added: the trace showed no request
 Submit and the cause is not yet proven. The next live run's
 `submitCancellationDiagnostics.attempts[].siteRejectedFields`, `fieldValidationAfterCancellation`,
 `evidence.preventDefaultCalls` and `submitListenerInventory` decide the generic fix.
+
+### Dealer lookup: timing evidence for a lookup that times out (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A live run's location lookup fired at the same step and with the same input as earlier successful
+runs, but its request took 8.2 s instead of about 0.2 s. The stage gave up at its 9 s cap about a
+second after the response headers arrived, with no DOM change in that second, and the response
+structure was unreadable. The trace could not show whether the body was still arriving or whether
+a result would have rendered later. This change adds evidence only; no lookup behaviour changes.
+
+- `src/actions/dealerLookupNetwork.ts`: each request records `bodyFinishedAtMs` (the body fully
+  received, as opposed to `durationMs`, which ends at the headers) and, when the response
+  structure is unknown, `structureUnknownReason`.
+- `src/actions/dealerLookup.ts`: each activation step records `startedAtMs` on the network
+  evidence's clock. Under `FORM_DISCOVERY_DIAGNOSTIC=1`, an unresolved stage timeout is followed
+  by a passive 15 s watch (`DEALER_LATE_RESULT_OBSERVATION_MS`) using the same result finder,
+  recorded as `execution.lateResultObservation`. Nothing found during the watch is selected, so
+  the outcome is unchanged.
+
+Sites do not all start a lookup the same way: some search as the value is typed, some reveal or
+enable a search/OK control next to the field only after a value is entered, and some controls
+respond late. The lookup only clicks the trigger it associated with the field when the form was
+planned, and it abandons the remaining activation steps once a stage wait has seen a request in
+flight. To show which case a run hit, the trace also records (diagnostics only, under the same flag):
+
+- `escalationSkipped`: which activation steps (ArrowDown, Enter, Tab, trigger click) were never tried
+  because the wait had seen the lookup in flight, and how many lookup requests were still pending
+  at that moment.
+- `lookupControlTimeline` (`src/actions/dealerControlTimeline.ts`): read-only samples, recorded on
+  change, of the buttons in the lookup scope and every planned trigger. Each sample records whether
+  the button is rendered, on screen and enabled, whether this engine clicked it, its text length,
+  and whether it matches the generic lookup or geolocation vocabulary. It never records the text
+  itself. `controlsBecameActionable` lists controls that became usable after typing;
+  `controlsDisabledAtEnd` lists the ones still disabled.
+- `lookupStateClassification`: the end state, one of results appearing automatically or after an
+  engine action, a request pending at timeout, a body still arriving, results appearing after the
+  timeout, a control that became usable but was not clicked, a control present but disabled, a
+  request that completed with the UI unchanged, or nothing at all.

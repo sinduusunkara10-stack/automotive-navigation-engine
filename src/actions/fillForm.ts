@@ -775,7 +775,7 @@ async function applyDecision(
       const triggerIndex = plannedField.decision.triggerIndex;
       const trigger = triggerIndex ? await triggerByIndex(form, triggerIndex) : null;
       const scope = await dealerScopeFor(form, plannedField.descriptor.id);
-      const outcome = await resolveDealerLookup(page, scope, trigger, field, form, { value: plannedField.decision.postcode, mode: dealerLookupMode });
+      const outcome = await resolveDealerLookup(page, scope, trigger, field, form, { value: plannedField.decision.postcode, mode: dealerLookupMode, observeLateResultsForDiagnostics: isFormDiscoveryDiagnosticEnabled() });
       return { key: "dealerSearch", dealerLookup: outcome };
     }
     default:
@@ -1821,6 +1821,7 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
     });
     const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
+    capture.detachBodyFinishListener();
     const businessRequests = selectBusinessRequests(allRequests, { pageUrl: beforeUrl, formActionUrl });
     const afterUrl = page.url();
     // A URL change already proves the submit went through -- `form` now refers to whatever
