@@ -22,7 +22,7 @@ jobs:
   build-and-test:
     name: Typecheck, schema validation, automated tests, Docker build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     # Real Redis for tests/integration/redisRealServer.test.ts, which exercises the
     # Redis-backed TaskStore (src/api/redisTaskStore.ts) against an actual server rather
     # than the ioredis-mock used by the rest of the suite -- see that test file's own
