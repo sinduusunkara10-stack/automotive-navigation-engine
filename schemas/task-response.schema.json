@@ -202,6 +202,29 @@
             "boolean",
             "null"
           ]
+        },
+        "bodyFinishedAtMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "When the response body finished arriving (relative to capture start); durationMs ends at the response headers. Null when it never finished while the capture ran. Optional (additive in 1.53.0)."
+        },
+        "structureUnknownReason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "body_too_large",
+            "unsupported_content_type",
+            "body_read_timeout",
+            "body_unreadable",
+            "unparseable",
+            "read_incomplete_at_capture_stop",
+            null
+          ],
+          "description": "Why resultCategory is unknown for a completed response. Optional (additive in 1.53.0)."
         }
       }
     },
@@ -289,6 +312,10 @@
         },
         "lookupActivityObserved": {
           "type": "boolean"
+        },
+        "startedAtMs": {
+          "type": "number",
+          "description": "Step start on the same clock as the network evidence's startedAtMs. Optional (additive in 1.53.0)."
         }
       }
     },
@@ -1914,6 +1941,56 @@
                 },
                 "lookupFailureExplanation": {
                   "type": "string"
+                },
+                "lateResultObservation": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Diagnostics only: what happened after a dealer-lookup stage timed out, watched (never acted on) for a bounded window. Times on the network evidence clock. Optional (additive in 1.53.0).",
+                  "required": [
+                    "timedOutStage",
+                    "observationStartedAtMs",
+                    "observationWindowMs",
+                    "resultAppeared",
+                    "resultAppearedAtMs",
+                    "resultAuthoritative",
+                    "domMutationCount"
+                  ],
+                  "properties": {
+                    "timedOutStage": {
+                      "type": "string",
+                      "enum": [
+                        "location_suggestions",
+                        "dealer_results"
+                      ]
+                    },
+                    "observationStartedAtMs": {
+                      "type": "number"
+                    },
+                    "observationWindowMs": {
+                      "type": "number"
+                    },
+                    "resultAppeared": {
+                      "type": "boolean"
+                    },
+                    "resultAppearedAtMs": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "resultAuthoritative": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "domMutationCount": {
+                      "type": "number"
+                    }
+                  }
                 }
               }
             },

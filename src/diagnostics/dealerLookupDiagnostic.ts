@@ -2,6 +2,7 @@ import type { Locator, Page } from "playwright";
 import {
   FIELD_INDEX_ATTR,
   TRIGGER_INDEX_ATTR,
+  type DealerLateResultObservation,
   type DealerActivationStepRecord,
   type DealerLookupExecutionTrace,
   type DealerLookupFailureClassification,
@@ -141,6 +142,7 @@ export interface DealerLookupExecutionSummary {
   retryRecommendation: DealerLookupExecutionTrace["retryRecommendation"];
   lookupFailureClassification: DealerLookupFailureClassification | null;
   lookupFailureExplanation: string;
+  lateResultObservation: DealerLateResultObservation | null;
 }
 
 export interface DealerLookupTrace {
@@ -476,6 +478,7 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     retryRecommendation: trace?.retryRecommendation ?? "none",
     lookupFailureClassification: trace?.lookupFailureClassification ?? null,
     lookupFailureExplanation: trace?.lookupFailureExplanation ?? "",
+    lateResultObservation: trace?.lateResultObservation ?? null,
   };
 
   const completenessBeforeTruncation = computeCompleteness({

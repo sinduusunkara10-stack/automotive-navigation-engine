@@ -4213,3 +4213,20 @@ No barrier, extra wait, blur or re-commit was added: the trace showed no request
 Submit and the cause is not yet proven. The next live run's
 `submitCancellationDiagnostics.attempts[].siteRejectedFields`, `fieldValidationAfterCancellation`,
 `evidence.preventDefaultCalls` and `submitListenerInventory` decide the generic fix.
+
+### Dealer lookup: timing evidence for a lookup that times out (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A live run's location lookup fired at the same step and with the same input as earlier successful
+runs, but its request took 8.2 s instead of about 0.2 s. The stage gave up at its 9 s cap about a
+second after the response headers arrived, with no DOM change in that second, and the response
+structure was unreadable. The trace could not show whether the body was still arriving or whether
+a result would have rendered later. This change adds evidence only; no lookup behaviour changes.
+
+- `src/actions/dealerLookupNetwork.ts`: each request records `bodyFinishedAtMs` (the body fully
+  received, as opposed to `durationMs`, which ends at the headers) and, when the response
+  structure is unknown, `structureUnknownReason`.
+- `src/actions/dealerLookup.ts`: each activation step records `startedAtMs` on the network
+  evidence's clock. Under `FORM_DISCOVERY_DIAGNOSTIC=1`, an unresolved stage timeout is followed
+  by a passive 15 s watch (`DEALER_LATE_RESULT_OBSERVATION_MS`) using the same result finder,
+  recorded as `execution.lateResultObservation`. Nothing found during the watch is selected, so
+  the outcome is unchanged.

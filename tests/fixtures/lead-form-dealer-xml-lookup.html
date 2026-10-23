@@ -31,6 +31,8 @@
       // unrelated tracking beacons plus a configuration request -- the real lookup request must
       // never be pushed out of the evidence by them. The test routes /api/dealers/search to the
       // body/status/delay each scenario needs, and counts how many lookups were actually sent.
+      // window.__resultRenderDelayMs (set by a test's init script) delays rendering after the
+      // response has fully arrived.
       window.__lookupRequests = 0;
       window.__fieldClears = 0;
       let warmed = false;
@@ -50,6 +52,7 @@
         results.innerHTML = '<span role="status">Searching</span>';
         fetch(`/api/dealers/search?q=${encodeURIComponent(field.value)}`)
           .then((response) => response.text())
+          .then((text) => new Promise((resolve) => setTimeout(() => resolve(text), window.__resultRenderDelayMs ?? 0)))
           .then((text) => {
             const xml = new DOMParser().parseFromString(text, "text/xml");
             const records = Array.from(xml.getElementsByTagName("dealer"));

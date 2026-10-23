@@ -64,7 +64,16 @@ export interface SanitizedNetworkRequestEvidence {
   /** Filled in by the caller: whether the activation step this request started in was followed by
    * any observable DOM/hidden-field/accessibility change. Null when the caller never assessed it. */
   followedByObservableChange: boolean | null;
+  /** When the response body finished arriving (relative to capture start), as opposed to
+   * `durationMs`, which ends when the response headers arrive. Null when it never finished while
+   * this capture was running. */
+  bodyFinishedAtMs?: number | null;
+  /** Why `resultCategory` is "unknown" for a completed response, or null when the structure was
+   * derived (or never attempted). */
+  structureUnknownReason?: StructureUnknownReason | null;
 }
+
+export type StructureUnknownReason = "body_too_large" | "unsupported_content_type" | "body_read_timeout" | "body_unreadable" | "unparseable" | "read_incomplete_at_capture_stop";
 
 export interface DealerLookupNetworkStats {
   /** Every captured request, tracking included, before any output bound was applied. */
@@ -301,9 +310,14 @@ interface StructureEvidence {
   xmlRootElement: string | null;
   structureElementNames: string[];
   resultCategory: NetworkResultCategory;
+  unknownReason?: StructureUnknownReason;
 }
 
 const UNKNOWN_STRUCTURE: StructureEvidence = { appearsToContainRecords: null, recordCount: null, xmlRootElement: null, structureElementNames: [], resultCategory: "unknown" };
+
+function unknownStructure(unknownReason: StructureUnknownReason): StructureEvidence {
+  return { ...UNKNOWN_STRUCTURE, unknownReason };
+}
 
 function jsonStructure(body: unknown): StructureEvidence {
   const keyNames = (record: unknown): string[] =>
@@ -333,28 +347,32 @@ function jsonStructure(body: unknown): StructureEvidence {
   return UNKNOWN_STRUCTURE;
 }
 
+const BODY_READ_TIMED_OUT: unique symbol = Symbol("body_read_timed_out");
+
 /** Reads the body only to derive structure, inside a bounded timeout and size cap, then drops it --
  * the body itself is never stored, returned, or logged. */
 async function deriveStructureEvidence(response: Response): Promise<StructureEvidence> {
   const contentType = (response.headers()["content-type"] ?? "").toLowerCase();
   const declaredLength = Number(response.headers()["content-length"] ?? "0");
-  if (declaredLength > MAX_STRUCTURE_BODY_BYTES) return UNKNOWN_STRUCTURE;
+  if (declaredLength > MAX_STRUCTURE_BODY_BYTES) return unknownStructure("body_too_large");
   const isJson = contentType.includes("json");
   const isXml = contentType.includes("xml");
-  if (!isJson && !isXml && !contentType.startsWith("text/plain")) return { ...UNKNOWN_STRUCTURE, resultCategory: response.status() === 204 ? "empty" : "unknown" };
+  if (!isJson && !isXml && !contentType.startsWith("text/plain")) return response.status() === 204 ? { ...UNKNOWN_STRUCTURE, resultCategory: "empty" } : unknownStructure("unsupported_content_type");
   try {
     const text = await Promise.race([
-      response.text(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), BODY_READ_TIMEOUT_MS)),
+      response.text().catch(() => null),
+      new Promise<typeof BODY_READ_TIMED_OUT>((resolve) => setTimeout(() => resolve(BODY_READ_TIMED_OUT), BODY_READ_TIMEOUT_MS)),
     ]);
-    if (text.length > MAX_STRUCTURE_BODY_BYTES) return UNKNOWN_STRUCTURE;
+    if (text === BODY_READ_TIMED_OUT) return unknownStructure("body_read_timeout");
+    if (typeof text !== "string") return unknownStructure("body_unreadable");
+    if (text.length > MAX_STRUCTURE_BODY_BYTES) return unknownStructure("body_too_large");
     const trimmed = text.trim();
     if (trimmed.length === 0) return { ...UNKNOWN_STRUCTURE, appearsToContainRecords: false, recordCount: 0, resultCategory: "empty" };
     if (isJson || trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         return jsonStructure(JSON.parse(trimmed));
       } catch {
-        return UNKNOWN_STRUCTURE;
+        return unknownStructure("unparseable");
       }
     }
     if (trimmed.startsWith("<")) {
@@ -367,9 +385,9 @@ async function deriveStructureEvidence(response: Response): Promise<StructureEvi
         resultCategory: xml.recordCount > 0 ? "records" : xml.errorSignal ? "error" : "empty",
       };
     }
-    return UNKNOWN_STRUCTURE;
+    return unknownStructure("unparseable");
   } catch {
-    return UNKNOWN_STRUCTURE;
+    return unknownStructure("body_unreadable");
   }
 }
 
@@ -382,6 +400,9 @@ export interface DealerLookupNetworkCapture {
   now(): number;
   /** Requests still awaiting a response right now that look lookup-like. */
   pendingLookupLike(): number;
+  /** stop() leaves body-completion tracking attached so a slow body that finishes after the stage
+   * gave up is still timed; call this once nothing else will be observed. */
+  detachBodyFinishListener(): void;
   /** Live view of every request observed so far (same objects stop() later bounds), for callers that classify while observing. */
   snapshot(): readonly SanitizedNetworkRequestEvidence[];
   /** Detaches the listeners and returns the sanitised, bounded evidence collected so far. */
@@ -401,6 +422,7 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
   const start = Date.now();
   const entries: SanitizedNetworkRequestEvidence[] = [];
   const pending = new Map<Request, SanitizedNetworkRequestEvidence>();
+  const byRequest = new Map<Request, SanitizedNetworkRequestEvidence>();
   const structureReads: Promise<void>[] = [];
   let step = "before_activation";
   let dropped = 0;
@@ -437,6 +459,8 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
       purposeEvidence: "",
       activationStep: step,
       followedByObservableChange: null,
+      bodyFinishedAtMs: null,
+      structureUnknownReason: null,
     };
     reclassify(evidence);
     if (entries.length >= MAX_REQUESTS_OBSERVED && evidence.purpose === "unrelated_tracking") {
@@ -444,6 +468,7 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
       return;
     }
     pending.set(request, evidence);
+    byRequest.set(request, evidence);
     entries.push(evidence);
   };
 
@@ -461,6 +486,7 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
       evidence.resultCategory = "not_applicable";
       return;
     }
+    evidence.structureUnknownReason = "read_incomplete_at_capture_stop";
     structureReads.push(
       deriveStructureEvidence(response)
         .then((derived) => {
@@ -469,6 +495,7 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
           evidence.xmlRootElement = derived.xmlRootElement;
           evidence.structureElementNames = derived.structureElementNames;
           evidence.resultCategory = derived.resultCategory;
+          evidence.structureUnknownReason = derived.unknownReason ?? null;
           reclassify(evidence);
         })
         .catch(() => {}),
@@ -483,9 +510,15 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
     evidence.durationMs = Date.now() - start - evidence.startedAtMs;
   };
 
+  const onRequestFinished = (request: Request): void => {
+    const evidence = byRequest.get(request);
+    if (evidence) evidence.bodyFinishedAtMs = Date.now() - start;
+  };
+
   page.on("request", onRequest);
   page.on("response", onResponse);
   page.on("requestfailed", onRequestFailed);
+  page.on("requestfinished", onRequestFinished);
 
   return {
     setStep(next: string) {
@@ -532,6 +565,9 @@ export function startDealerLookupNetworkCapture(page: Page, options: { includeDo
     },
     stats() {
       return stats;
+    },
+    detachBodyFinishListener() {
+      page.off("requestfinished", onRequestFinished);
     },
   };
 }

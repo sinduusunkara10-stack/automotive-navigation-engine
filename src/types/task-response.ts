@@ -902,6 +902,15 @@ export interface ActionResult {
         | "no_reaction_to_any_activation"
         | null;
       lookupFailureExplanation: string;
+      lateResultObservation?: {
+        timedOutStage: "location_suggestions" | "dealer_results";
+        observationStartedAtMs: number;
+        observationWindowMs: number;
+        resultAppeared: boolean;
+        resultAppearedAtMs: number | null;
+        resultAuthoritative: boolean | null;
+        domMutationCount: number;
+      } | null;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";
@@ -2171,11 +2180,14 @@ export interface SanitizedNetworkRequestEvidenceWire {
   purposeEvidence: string;
   activationStep: string;
   followedByObservableChange: boolean | null;
+  bodyFinishedAtMs?: number | null;
+  structureUnknownReason?: "body_too_large" | "unsupported_content_type" | "body_read_timeout" | "body_unreadable" | "unparseable" | "read_incomplete_at_capture_stop" | null;
 }
 
 /** One dealer-lookup activation/selection step -- see src/actions/dealerLookup.ts. */
 export interface DealerActivationStepWire {
   step: string;
+  startedAtMs?: number;
   durationMs: number;
   fieldValueRetained: boolean | null;
   focusInField: boolean;

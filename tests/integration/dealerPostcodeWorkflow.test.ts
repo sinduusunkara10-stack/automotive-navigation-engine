@@ -182,6 +182,55 @@ test("dealer workflow: a lookup still in flight at the bounded wait is re-polled
   assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, true);
   assert.equal(pageState.__lookupRequests, 1, "the retry must never send a second lookup that would reset the first");
   assert.equal(result.dealerLookupTrace?.execution.eventsDispatched.includes("type_with_keyboard"), false, "the final (retry) call never re-types");
+  assert.equal(result.dealerLookupTrace?.execution.lateResultObservation ?? null, null, "a lookup re-polled by the retry is never also watched passively");
+});
+
+test("dealer workflow: a lookup whose result renders only after the stage gave up is watched (never acted on) and the late result is recorded with request/step timing", async () => {
+  const { result, pageState } = await runFixture("lead-form-dealer-xml-lookup.html", async (page) => {
+    await routeDealerSearch(page, { body: DEALERS_XML });
+    await page.addInitScript(() => {
+      (window as unknown as { __resultRenderDelayMs: number }).__resultRenderDelayMs = 10_000;
+    });
+  });
+  const execution = result.dealerLookupTrace?.execution;
+  assert.ok(execution);
+  assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false, "the late result is never selected");
+  assert.equal(result.formPostSubmitDiagnostics?.submitAttempted, false);
+  assert.equal(pageState.__lookupRequests, 1);
+  assert.equal(execution.retryRecommendation, "none");
+  const late = execution.lateResultObservation;
+  assert.ok(late, "an unresolved timeout with nothing in flight is watched");
+  assert.equal(late.resultAppeared, true);
+  assert.ok(late.resultAppearedAtMs !== null && late.resultAppearedAtMs > late.observationStartedAtMs);
+  assert.ok(late.domMutationCount > 0);
+  const lookup = execution.networkRequests.find((r) => r.endpointPattern.endsWith("/api/dealers/search"));
+  assert.ok(lookup && typeof lookup.bodyFinishedAtMs === "number" && lookup.bodyFinishedAtMs >= lookup.startedAtMs);
+  assert.ok(late.resultAppearedAtMs! > lookup.bodyFinishedAtMs!, "the result rendered after the body had fully arrived");
+  assert.ok(execution.activationSteps.every((s) => typeof s.startedAtMs === "number"));
+});
+
+test("dealer workflow: a lookup that never renders anything after a timeout is watched for the bounded window and recorded as no late result", async () => {
+  const { result } = await runFixture("lead-form-dealer-xml-lookup.html", async (page) => {
+    await routeDealerSearch(page, { body: DEALERS_XML });
+    await page.addInitScript(() => {
+      (window as unknown as { __resultRenderDelayMs: number }).__resultRenderDelayMs = 120_000;
+    });
+  });
+  const late = result.dealerLookupTrace?.execution.lateResultObservation;
+  assert.ok(late);
+  assert.equal(late.resultAppeared, false);
+  assert.equal(late.resultAppearedAtMs, null);
+  assert.equal(late.resultAuthoritative, null);
+  assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+});
+
+test("dealer workflow: a response body that cannot be read as XML or JSON says why its structure is unknown", async () => {
+  const { result } = await runFixture("lead-form-dealer-xml-lookup.html", (page) => routeDealerSearch(page, { body: "not a structured body" }));
+  const lookup = result.dealerLookupTrace?.execution.networkRequests.find((r) => r.endpointPattern.endsWith("/api/dealers/search"));
+  assert.equal(lookup?.resultCategory, "unknown");
+  assert.equal(lookup?.structureUnknownReason, "unparseable");
+  const config = result.dealerLookupTrace?.execution.networkRequests.find((r) => r.endpointPattern.endsWith("/api/form/config"));
+  assert.equal(config?.structureUnknownReason ?? null, null, "a derived structure carries no unknown reason");
 });
 
 test("dealer workflow: XML location suggestions in a portal, then XML dealer results after the location is chosen, each committed through hidden identifiers (Polish market, language-neutral widget)", async () => {

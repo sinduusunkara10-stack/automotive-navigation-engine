@@ -51,6 +51,10 @@ export const DEALER_STAGE_WAIT_EXTENSION_MS = 3000;
  * regardless of what the page does, so the engine cannot stall indefinitely on a dealer widget. */
 export const DEALER_STAGE_WAIT_MAX_MS = DEALER_RESULT_WAIT_TIMEOUT_MS + DEALER_STAGE_WAIT_EXTENSION_MS;
 export const DEALER_RESULT_POLL_INTERVAL_MS = 250;
+/** Diagnostics only: how long a timed-out lookup keeps being watched (never acted on) to record
+ * whether a result would have appeared later -- the evidence needed to tell a slow lookup from one
+ * that never renders anything. */
+export const DEALER_LATE_RESULT_OBSERVATION_MS = 15000;
 /** Short, bounded check for a suggestion list appearing entirely on its own -- from typing alone,
  * with no trigger click or keyboard action yet -- run once right after the field is filled and
  * before deciding whether to activate a trigger at all. */
@@ -685,6 +689,38 @@ async function findResultOnce(ctx: DiscoveryContext): Promise<FoundResult | null
   return null;
 }
 
+async function observeLateResult(
+  page: Page,
+  scope: Locator,
+  probe: DealerLookupProbe,
+  network: DealerLookupNetworkCapture,
+  timedOutStage: "location_suggestions" | "dealer_results",
+): Promise<DealerLateResultObservation> {
+  const ctx: DiscoveryContext = { page, scope, probe, network, stageSeq: await probe.markStage() };
+  const mutationsBefore = (await probe.snapshot(null)).mutationCount;
+  const observationStartedAtMs = network.now();
+  const deadline = Date.now() + DEALER_LATE_RESULT_OBSERVATION_MS;
+  let found: FoundResult | null = null;
+  let resultAppearedAtMs: number | null = null;
+  while (Date.now() < deadline) {
+    found = await findResultOnce(ctx);
+    if (found) {
+      resultAppearedAtMs = network.now();
+      break;
+    }
+    await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
+  }
+  return {
+    timedOutStage,
+    observationStartedAtMs,
+    observationWindowMs: DEALER_LATE_RESULT_OBSERVATION_MS,
+    resultAppeared: found !== null,
+    resultAppearedAtMs,
+    resultAuthoritative: found ? found.authoritative : null,
+    domMutationCount: Math.max(0, (await probe.snapshot(null)).mutationCount - mutationsBefore),
+  };
+}
+
 async function loadingIndicatorVisible(ctx: DiscoveryContext): Promise<boolean> {
   if (await ctx.scope.locator(LOADING_INDICATOR_SELECTOR).first().isVisible().catch(() => false)) return true;
   return (await ctx.probe.snapshot(null)).busy;
@@ -881,6 +917,9 @@ export type DealerLookupEvent =
 /** One bounded step of the activation ladder or selection sequence, and what followed it. */
 export interface DealerActivationStepRecord {
   step: string;
+  /** On the same clock as the network evidence's startedAtMs/bodyFinishedAtMs, so a step can be
+   * placed against the requests that ran during it. */
+  startedAtMs?: number;
   durationMs: number;
   /** Whether the field still held exactly the typed value (whitespace/case-insensitive) after this
    * step -- a boolean only, never the value. Null when not applicable (no value was typed). */
@@ -1001,6 +1040,20 @@ export interface DealerLookupExecutionTrace {
   lookupFailureClassification: DealerLookupFailureClassification | null;
   /** Human-readable explanation of lookupFailureClassification, built only from recorded evidence. */
   lookupFailureExplanation: string;
+  /** Present only when the post-timeout diagnostic observation ran -- see DEALER_LATE_RESULT_OBSERVATION_MS. */
+  lateResultObservation?: DealerLateResultObservation | null;
+}
+
+/** What happened on the page after a stage gave up -- recorded only, never acted on, so the
+ * outcome of the run is unchanged. Times are on the network evidence's clock. */
+export interface DealerLateResultObservation {
+  timedOutStage: "location_suggestions" | "dealer_results";
+  observationStartedAtMs: number;
+  observationWindowMs: number;
+  resultAppeared: boolean;
+  resultAppearedAtMs: number | null;
+  resultAuthoritative: boolean | null;
+  domMutationCount: number;
 }
 
 export interface DealerLookupOutcome {
@@ -1037,6 +1090,9 @@ export interface ResolveDealerLookupOptions {
   /** "await_pending_lookup" re-polls a lookup that was observably still in flight, without
    * re-entering the value or re-activating anything (which could reset it). */
   mode?: "full" | "await_pending_lookup";
+  /** Diagnostics only: after an unresolved stage timeout, keep watching (never acting) for
+   * DEALER_LATE_RESULT_OBSERVATION_MS and record whether a result appeared later. */
+  observeLateResultsForDiagnostics?: boolean;
 }
 
 /**
@@ -1096,9 +1152,16 @@ export async function resolveDealerLookup(
       trace.lookupFailureExplanation = classified.explanation;
       trace.retryRecommendation = classified.classification === "lookup_request_still_pending_at_timeout" ? "await_pending_lookup" : "none";
     }
+    // Runs only after the outcome and retry decision are final, and never when a retry will re-poll
+    // the lookup itself, so watching cannot change what the run does next.
+    if (options.observeLateResultsForDiagnostics && !outcome.dealerValueVerified && trace.timedOutStage !== null && trace.retryRecommendation === "none") {
+      trace.lateResultObservation = await observeLateResult(page, scope, probe, capture, trace.timedOutStage);
+    }
+    capture.detachBodyFinishListener();
     return outcome;
   } catch (error) {
     await capture.stop().catch(() => {});
+    capture.detachBodyFinishListener();
     throw error;
   } finally {
     await probe.stop();
@@ -1250,6 +1313,7 @@ async function resolveDealerLookupCore(
     if (lookupActivityObserved && lookupActivityStep === null) lookupActivityStep = stepName;
     activationSteps.push({
       step: stepName,
+      startedAtMs: stepStartMs,
       durationMs: Date.now() - startedAt,
       fieldValueRetained: now.fieldValueRetained,
       focusInField: now.focusInField,
