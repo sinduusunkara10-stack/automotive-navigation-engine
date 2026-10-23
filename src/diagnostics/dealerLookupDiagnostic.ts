@@ -143,6 +143,9 @@ export interface DealerLookupExecutionSummary {
   lookupFailureClassification: DealerLookupFailureClassification | null;
   lookupFailureExplanation: string;
   lateResultObservation: DealerLateResultObservation | null;
+  escalationSkipped: DealerLookupExecutionTrace["escalationSkipped"];
+  lookupControlTimeline: DealerLookupExecutionTrace["lookupControlTimeline"];
+  lookupStateClassification: DealerLookupExecutionTrace["lookupStateClassification"];
 }
 
 export interface DealerLookupTrace {
@@ -479,6 +482,9 @@ export async function buildDealerLookupTrace(params: BuildDealerLookupTraceParam
     lookupFailureClassification: trace?.lookupFailureClassification ?? null,
     lookupFailureExplanation: trace?.lookupFailureExplanation ?? "",
     lateResultObservation: trace?.lateResultObservation ?? null,
+    escalationSkipped: trace?.escalationSkipped ?? null,
+    lookupControlTimeline: trace?.lookupControlTimeline ?? null,
+    lookupStateClassification: trace?.lookupStateClassification ?? null,
   };
 
   const completenessBeforeTruncation = computeCompleteness({

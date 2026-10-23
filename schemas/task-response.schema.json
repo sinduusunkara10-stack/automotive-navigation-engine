@@ -1991,6 +1991,201 @@
                       "type": "number"
                     }
                   }
+                },
+                "escalationSkipped": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Set when the activation ladder stopped early because the stage wait had seen the lookup in flight. Optional (additive in 1.53.0).",
+                  "required": [
+                    "reason",
+                    "lookupLikeRequestsPendingAtDecision",
+                    "stepsNotTried"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "type": "string",
+                      "enum": [
+                        "lookup_request_pending_during_wait",
+                        "loading_indicator_visible_after_wait"
+                      ]
+                    },
+                    "lookupLikeRequestsPendingAtDecision": {
+                      "type": "number"
+                    },
+                    "stepsNotTried": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "lookupControlTimeline": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "additionalProperties": false,
+                  "description": "Diagnostics only: read-only samples of the buttons around the lookup field (rendered/on screen/enabled/clicked by the engine), recorded on change. Never a control's text. Optional (additive in 1.53.0).",
+                  "required": [
+                    "entries",
+                    "truncated",
+                    "controlsBecameActionable",
+                    "controlsDisabledAtEnd"
+                  ],
+                  "properties": {
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "atMs",
+                          "phase",
+                          "loadingIndicatorVisible",
+                          "controls"
+                        ],
+                        "properties": {
+                          "atMs": {
+                            "type": "number"
+                          },
+                          "phase": {
+                            "type": "string"
+                          },
+                          "loadingIndicatorVisible": {
+                            "type": "boolean"
+                          },
+                          "controls": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "controlId",
+                                "triggerIndex",
+                                "tag",
+                                "inputType",
+                                "rendered",
+                                "onScreen",
+                                "enabled",
+                                "textLength",
+                                "lookupVocabulary",
+                                "geolocationVocabulary",
+                                "clickedByEngine"
+                              ],
+                              "properties": {
+                                "controlId": {
+                                  "type": "number"
+                                },
+                                "triggerIndex": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "tag": {
+                                  "type": "string"
+                                },
+                                "inputType": {
+                                  "type": [
+                                    "string",
+                                    "null"
+                                  ]
+                                },
+                                "rendered": {
+                                  "type": "boolean"
+                                },
+                                "onScreen": {
+                                  "type": "boolean"
+                                },
+                                "enabled": {
+                                  "type": "boolean"
+                                },
+                                "textLength": {
+                                  "type": "number"
+                                },
+                                "lookupVocabulary": {
+                                  "type": "boolean"
+                                },
+                                "geolocationVocabulary": {
+                                  "type": "boolean"
+                                },
+                                "clickedByEngine": {
+                                  "type": "boolean"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "controlsBecameActionable": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "controlId",
+                          "atMs",
+                          "phase",
+                          "clickedByEngine",
+                          "lookupVocabulary",
+                          "geolocationVocabulary"
+                        ],
+                        "properties": {
+                          "controlId": {
+                            "type": "number"
+                          },
+                          "atMs": {
+                            "type": "number"
+                          },
+                          "phase": {
+                            "type": "string"
+                          },
+                          "clickedByEngine": {
+                            "type": "boolean"
+                          },
+                          "lookupVocabulary": {
+                            "type": "boolean"
+                          },
+                          "geolocationVocabulary": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "controlsDisabledAtEnd": {
+                      "type": "array",
+                      "items": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                },
+                "lookupStateClassification": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Diagnostics only: the observable state the lookup ended in. Optional (additive in 1.53.0).",
+                  "enum": [
+                    "results_appeared_automatically",
+                    "results_appeared_after_engine_action",
+                    "request_pending_at_timeout",
+                    "request_body_still_arriving_at_timeout",
+                    "results_appeared_after_timeout",
+                    "actionable_control_appeared_not_clicked",
+                    "control_present_but_disabled",
+                    "request_completed_ui_unchanged",
+                    "no_request_no_result",
+                    null
+                  ]
                 }
               }
             },

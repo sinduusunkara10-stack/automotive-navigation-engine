@@ -71,6 +71,7 @@ test("dealer workflow: real typing that keeps focus opens a debounced, blur-canc
   assert.equal(pageState.__geoClicks, 0);
   assert.equal(pageState.__formSubmitted, 1, "only the final, verified submit");
   assert.ok(execution.hiddenFieldCommitPurposes.includes("dealer_identifier"));
+  assert.equal(execution.lookupStateClassification, "results_appeared_automatically");
 });
 
 test("dealer workflow: the live trace's shape -- a textless, type-less button that requests geolocation and a field that never looks anything up -- resolves to a definitive explanation, and the lead form is never submitted during the lookup", async () => {
@@ -207,6 +208,7 @@ test("dealer workflow: a lookup whose result renders only after the stage gave u
   assert.ok(lookup && typeof lookup.bodyFinishedAtMs === "number" && lookup.bodyFinishedAtMs >= lookup.startedAtMs);
   assert.ok(late.resultAppearedAtMs! > lookup.bodyFinishedAtMs!, "the result rendered after the body had fully arrived");
   assert.ok(execution.activationSteps.every((s) => typeof s.startedAtMs === "number"));
+  assert.equal(execution.lookupStateClassification, "results_appeared_after_timeout");
 });
 
 test("dealer workflow: a lookup that never renders anything after a timeout is watched for the bounded window and recorded as no late result", async () => {
@@ -222,7 +224,37 @@ test("dealer workflow: a lookup that never renders anything after a timeout is w
   assert.equal(late.resultAppearedAtMs, null);
   assert.equal(late.resultAuthoritative, null);
   assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+  assert.equal(result.dealerLookupTrace?.execution.lookupStateClassification, "request_completed_ui_unchanged");
 });
+
+for (const [name, staysDisabled, expected] of [
+  ["a confirm control that appears only after typing", false, "actionable_control_appeared_not_clicked"],
+  ["a confirm control that appears after typing but stays disabled", true, "control_present_but_disabled"],
+] as const) {
+  test(`dealer workflow diagnostics: ${name} is recorded in the control timeline, never clicked by the diagnostics`, async () => {
+    const { result, pageState } = await runFixture("lead-form-dealer-confirm-control.html", async (page) => {
+      if (staysDisabled) {
+        await page.addInitScript(() => {
+          (window as unknown as { __confirmStaysDisabled: boolean }).__confirmStaysDisabled = true;
+        });
+      }
+    });
+    const execution = result.dealerLookupTrace?.execution;
+    assert.ok(execution);
+    const timeline = execution.lookupControlTimeline;
+    assert.ok(timeline && timeline.entries.length >= 2);
+    assert.equal(execution.lookupStateClassification, expected);
+    if (expected === "actionable_control_appeared_not_clicked") {
+      assert.equal(pageState.__confirmClicks, 0, "neither the engine nor the diagnostics clicked the control");
+      const appeared = timeline.controlsBecameActionable[0];
+      assert.ok(appeared && appeared.clickedByEngine === false && appeared.lookupVocabulary === true);
+    } else {
+      assert.ok(timeline.controlsDisabledAtEnd.length > 0);
+    }
+    assert.equal(result.formDealerSearchDiagnostics?.dealerValueVerified, false);
+    assert.equal(JSON.stringify(timeline).includes("OK"), false, "control text never leaves the page");
+  });
+}
 
 test("dealer workflow: a response body that cannot be read as XML or JSON says why its structure is unknown", async () => {
   const { result } = await runFixture("lead-form-dealer-xml-lookup.html", (page) => routeDealerSearch(page, { body: "not a structured body" }));

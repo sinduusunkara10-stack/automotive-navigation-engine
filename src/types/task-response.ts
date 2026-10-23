@@ -911,6 +911,45 @@ export interface ActionResult {
         resultAuthoritative: boolean | null;
         domMutationCount: number;
       } | null;
+      escalationSkipped?: {
+        reason: "lookup_request_pending_during_wait" | "loading_indicator_visible_after_wait";
+        lookupLikeRequestsPendingAtDecision: number;
+        stepsNotTried: string[];
+      } | null;
+      lookupControlTimeline?: {
+        entries: {
+          atMs: number;
+          phase: string;
+          loadingIndicatorVisible: boolean;
+          controls: {
+            controlId: number;
+            triggerIndex: string | null;
+            tag: string;
+            inputType: string | null;
+            rendered: boolean;
+            onScreen: boolean;
+            enabled: boolean;
+            textLength: number;
+            lookupVocabulary: boolean;
+            geolocationVocabulary: boolean;
+            clickedByEngine: boolean;
+          }[];
+        }[];
+        truncated: boolean;
+        controlsBecameActionable: { controlId: number; atMs: number; phase: string; clickedByEngine: boolean; lookupVocabulary: boolean; geolocationVocabulary: boolean }[];
+        controlsDisabledAtEnd: number[];
+      } | null;
+      lookupStateClassification?:
+        | "results_appeared_automatically"
+        | "results_appeared_after_engine_action"
+        | "request_pending_at_timeout"
+        | "request_body_still_arriving_at_timeout"
+        | "results_appeared_after_timeout"
+        | "actionable_control_appeared_not_clicked"
+        | "control_present_but_disabled"
+        | "request_completed_ui_unchanged"
+        | "no_request_no_result"
+        | null;
     };
     diagnosticCompleteness: {
       status: "COMPLETE" | "INCOMPLETE";

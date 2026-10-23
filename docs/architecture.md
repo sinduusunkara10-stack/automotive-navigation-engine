@@ -4230,3 +4230,23 @@ a result would have rendered later. This change adds evidence only; no lookup be
   by a passive 15 s watch (`DEALER_LATE_RESULT_OBSERVATION_MS`) using the same result finder,
   recorded as `execution.lateResultObservation`. Nothing found during the watch is selected, so
   the outcome is unchanged.
+
+Sites do not all start a lookup the same way: some search as the value is typed, some reveal or
+enable a search/OK control next to the field only after a value is entered, and some controls
+respond late. The lookup only clicks the trigger it associated with the field when the form was
+planned, and it abandons the remaining activation steps once a stage wait has seen a request in
+flight. To show which case a run hit, the trace also records (diagnostics only, under the same flag):
+
+- `escalationSkipped`: which activation steps (ArrowDown, Enter, Tab, trigger click) were never tried
+  because the wait had seen the lookup in flight, and how many lookup requests were still pending
+  at that moment.
+- `lookupControlTimeline` (`src/actions/dealerControlTimeline.ts`): read-only samples, recorded on
+  change, of the buttons in the lookup scope and every planned trigger. Each sample records whether
+  the button is rendered, on screen and enabled, whether this engine clicked it, its text length,
+  and whether it matches the generic lookup or geolocation vocabulary. It never records the text
+  itself. `controlsBecameActionable` lists controls that became usable after typing;
+  `controlsDisabledAtEnd` lists the ones still disabled.
+- `lookupStateClassification`: the end state, one of results appearing automatically or after an
+  engine action, a request pending at timeout, a body still arriving, results appearing after the
+  timeout, a control that became usable but was not clicked, a control present but disabled, a
+  request that completed with the UI unchanged, or nothing at all.

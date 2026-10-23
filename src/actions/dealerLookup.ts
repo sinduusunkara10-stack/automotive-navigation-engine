@@ -1,5 +1,6 @@
 import type { ElementHandle, Frame, Locator, Page } from "playwright";
 import { isLookupLikePurpose, startDealerLookupNetworkCapture, type DealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
+import { startLookupControlTimeline, type LookupControlTimeline, type LookupControlTimelineRecorder } from "./dealerControlTimeline.js";
 import { detectHiddenCommit, startDealerLookupProbe, type DealerLookupProbe, type HiddenFieldPurpose, type HiddenFieldState } from "./dealerLookupProbe.js";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
@@ -106,6 +107,11 @@ export function normalizeText(value: string): string {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "");
+}
+
+export function matchesGeolocationVocabulary(attributeText: string): boolean {
+  const normalized = normalizeText(attributeText).replace(/[^a-z0-9]+/g, " ");
+  return GEOLOCATION_CONTROL_MARKERS.some((marker) => normalized.includes(marker));
 }
 
 export function matchesLookupTriggerVocabulary(text: string): boolean {
@@ -603,6 +609,8 @@ interface DiscoveryContext {
   /** Probe mutation sequence at the start of the current stage -- only DOM changes after it count. */
   stageSeq: number;
   network: DealerLookupNetworkCapture;
+  /** Diagnostics only (read-only sampling) -- absent unless the diagnostic flag is on. */
+  timeline?: LookupControlTimelineRecorder;
 }
 
 /** Marks every authoritative result visible right now in each same-origin child frame, so a later
@@ -695,8 +703,9 @@ async function observeLateResult(
   probe: DealerLookupProbe,
   network: DealerLookupNetworkCapture,
   timedOutStage: "location_suggestions" | "dealer_results",
+  timeline: LookupControlTimelineRecorder | undefined,
 ): Promise<DealerLateResultObservation> {
-  const ctx: DiscoveryContext = { page, scope, probe, network, stageSeq: await probe.markStage() };
+  const ctx: DiscoveryContext = { page, scope, probe, network, timeline, stageSeq: await probe.markStage() };
   const mutationsBefore = (await probe.snapshot(null)).mutationCount;
   const observationStartedAtMs = network.now();
   const deadline = Date.now() + DEALER_LATE_RESULT_OBSERVATION_MS;
@@ -708,6 +717,7 @@ async function observeLateResult(
       resultAppearedAtMs = network.now();
       break;
     }
+    await timeline?.sample("late_observation");
     await page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
   }
   return {
@@ -757,6 +767,7 @@ async function pollForStageResult(ctx: DiscoveryContext, baseTimeoutMs: number, 
       }
       return { result: null, timedOut: true, extended, loadingIndicatorObserved, pendingRequestObservedAtTimeout: pendingRequestObservedAtTimeout || ctx.network.pendingLookupLike() > 0 };
     }
+    await ctx.timeline?.sample("stage_wait");
     await ctx.page.waitForTimeout(DEALER_RESULT_POLL_INTERVAL_MS);
   }
 }
@@ -1042,6 +1053,52 @@ export interface DealerLookupExecutionTrace {
   lookupFailureExplanation: string;
   /** Present only when the post-timeout diagnostic observation ran -- see DEALER_LATE_RESULT_OBSERVATION_MS. */
   lateResultObservation?: DealerLateResultObservation | null;
+  /** Set when the activation ladder (ArrowDown, Enter, Tab, trigger click) stopped early because the
+   * stage wait had seen the lookup in flight -- the remaining steps were never tried. */
+  escalationSkipped?: DealerEscalationSkipped | null;
+  /** Diagnostics only: read-only samples of the lookup controls around the field. */
+  lookupControlTimeline?: LookupControlTimeline | null;
+  /** Diagnostics only: which observable state the lookup ended in, derived from the evidence above. */
+  lookupStateClassification?: DealerLookupStateClassification | null;
+}
+
+export interface DealerEscalationSkipped {
+  reason: "lookup_request_pending_during_wait" | "loading_indicator_visible_after_wait";
+  /** Lookup-like requests still awaiting a response when the ladder was abandoned. */
+  lookupLikeRequestsPendingAtDecision: number;
+  stepsNotTried: string[];
+}
+
+export type DealerLookupStateClassification =
+  | "results_appeared_automatically"
+  | "results_appeared_after_engine_action"
+  | "request_pending_at_timeout"
+  | "request_body_still_arriving_at_timeout"
+  | "results_appeared_after_timeout"
+  | "actionable_control_appeared_not_clicked"
+  | "control_present_but_disabled"
+  | "request_completed_ui_unchanged"
+  | "no_request_no_result";
+
+/** Orders the recorded evidence into the single state the run ended in. Evidence only -- it never
+ * feeds back into what the lookup does. */
+export function classifyLookupState(trace: DealerLookupExecutionTrace, verified: boolean): DealerLookupStateClassification {
+  if (verified) {
+    const engineActed = trace.eventsDispatched.some((e) => e !== "type_with_keyboard" && e !== "fill_input_fallback" && e !== "click_location_suggestion" && e !== "click_dealer_result");
+    return engineActed ? "results_appeared_after_engine_action" : "results_appeared_automatically";
+  }
+  const lookups = trace.networkRequests.filter((r) => isLookupLikePurpose(r.purpose));
+  if (trace.retryRecommendation === "await_pending_lookup" || lookups.some((r) => r.outcome === "pending")) return "request_pending_at_timeout";
+  if (trace.lateResultObservation?.resultAppeared) return "results_appeared_after_timeout";
+  const timeline = trace.lookupControlTimeline;
+  if (timeline?.controlsBecameActionable.some((c) => !c.clickedByEngine && !c.geolocationVocabulary)) return "actionable_control_appeared_not_clicked";
+  if (timeline && timeline.controlsDisabledAtEnd.length > 0) return "control_present_but_disabled";
+  const timedOutAtMs = trace.lateResultObservation?.observationStartedAtMs ?? null;
+  if (timedOutAtMs !== null && lookups.some((r) => r.outcome === "completed" && (r.bodyFinishedAtMs == null || r.bodyFinishedAtMs > timedOutAtMs))) {
+    return "request_body_still_arriving_at_timeout";
+  }
+  if (lookups.some((r) => r.outcome === "completed")) return "request_completed_ui_unchanged";
+  return "no_request_no_result";
 }
 
 /** What happened on the page after a stage gave up -- recorded only, never acted on, so the
@@ -1125,8 +1182,18 @@ export async function resolveDealerLookup(
 ): Promise<DealerLookupOutcome> {
   const capture = startDealerLookupNetworkCapture(page);
   const probe = await startDealerLookupProbe(form, field, scope);
+  const timeline = options.observeLateResultsForDiagnostics
+    ? startLookupControlTimeline(page, scope, {
+        now: () => capture.now(),
+        triggerIndexAttr: TRIGGER_INDEX_ATTR,
+        activatedAttr: DEALER_ALREADY_ACTIVATED_ATTR,
+        loadingIndicatorSelector: LOADING_INDICATOR_SELECTOR,
+        lookupVocabulary: matchesLookupTriggerVocabulary,
+        geolocationVocabulary: matchesGeolocationVocabulary,
+      })
+    : undefined;
   try {
-    const outcome = await resolveDealerLookupCore(page, scope, trigger, field, form, options, probe, capture);
+    const outcome = await resolveDealerLookupCore(page, scope, trigger, field, form, options, probe, capture, timeline);
     const requests = await capture.stop();
     const stats = capture.stats();
     const trace = outcome.executionTrace;
@@ -1155,9 +1222,14 @@ export async function resolveDealerLookup(
     // Runs only after the outcome and retry decision are final, and never when a retry will re-poll
     // the lookup itself, so watching cannot change what the run does next.
     if (options.observeLateResultsForDiagnostics && !outcome.dealerValueVerified && trace.timedOutStage !== null && trace.retryRecommendation === "none") {
-      trace.lateResultObservation = await observeLateResult(page, scope, probe, capture, trace.timedOutStage);
+      trace.lateResultObservation = await observeLateResult(page, scope, probe, capture, trace.timedOutStage, timeline);
     }
     capture.detachBodyFinishListener();
+    if (timeline) {
+      await timeline.sample("final");
+      trace.lookupControlTimeline = timeline.result();
+      trace.lookupStateClassification = classifyLookupState(trace, outcome.dealerValueVerified);
+    }
     return outcome;
   } catch (error) {
     await capture.stop().catch(() => {});
@@ -1244,8 +1316,7 @@ async function classifyTrigger(trigger: Locator | null): Promise<{ classificatio
       };
     })
     .catch(() => ({ visibleText: "", attributeText: "" }));
-  const attributeText = normalizeText(info.attributeText).replace(/[^a-z0-9]+/g, " ");
-  if (GEOLOCATION_CONTROL_MARKERS.some((marker) => attributeText.includes(marker))) {
+  if (matchesGeolocationVocabulary(info.attributeText)) {
     return { classification: "geolocation_control", skipReason: "trigger_matches_geolocation_vocabulary" };
   }
   if (info.visibleText.length === 0) return { classification: "textless_unknown", skipReason: null };
@@ -1261,6 +1332,7 @@ async function resolveDealerLookupCore(
   options: ResolveDealerLookupOptions,
   probe: DealerLookupProbe,
   network: DealerLookupNetworkCapture,
+  timeline: LookupControlTimelineRecorder | undefined,
 ): Promise<DealerLookupOutcome> {
   const mode = options.mode ?? "full";
   const typed = options.value;
@@ -1276,7 +1348,8 @@ async function resolveDealerLookupCore(
   // elsewhere on the page that merely shares the same ARIA role.
   await markPageBaselineAuthoritative(page);
   await markFrameBaselineAuthoritative(page);
-  const ctx: DiscoveryContext = { page, scope, probe, network, stageSeq: await probe.markStage() };
+  const ctx: DiscoveryContext = { page, scope, probe, network, timeline, stageSeq: await probe.markStage() };
+  await timeline?.sample(mode === "full" ? "before_input" : "before_await_pending_lookup");
   let previous = await probe.snapshot(typed);
   let lastHidden = baselineHidden;
 
@@ -1334,6 +1407,7 @@ async function resolveDealerLookupCore(
     });
     previous = now;
     lastHidden = hidden;
+    await timeline?.sample(stepName);
   }
 
   async function fullStageWait(stepName: string): Promise<StagePollResult> {
@@ -1351,6 +1425,7 @@ async function resolveDealerLookupCore(
   let autoDropdownDetected = false;
   let stage1: StagePollResult = { result: null, timedOut: false, extended: false, loadingIndicatorObserved: false, pendingRequestObservedAtTimeout: false };
   let fullWaitRan = false;
+  let escalationSkipped: DealerEscalationSkipped | null = null;
   const triggerInfo = await classifyTrigger(trigger);
 
   if (mode === "full") {
@@ -1425,7 +1500,14 @@ async function resolveDealerLookupCore(
       if (stage1.result) break;
       // Never escalate over a lookup that is observably still in flight -- a further key or click
       // could reset it.
-      if (fullWaitRan && (stage1.pendingRequestObservedAtTimeout || (await loadingIndicatorVisible(ctx)))) break;
+      if (fullWaitRan && (stage1.pendingRequestObservedAtTimeout || (await loadingIndicatorVisible(ctx)))) {
+        escalationSkipped = {
+          reason: stage1.pendingRequestObservedAtTimeout ? "lookup_request_pending_during_wait" : "loading_indicator_visible_after_wait",
+          lookupLikeRequestsPendingAtDecision: network.pendingLookupLike(),
+          stepsNotTried: escalation.slice(escalation.indexOf(step)).map((s) => s.name),
+        };
+        break;
+      }
       const stepStartMs = network.now();
       network.setStep(step.name);
       await step.run();
@@ -1484,6 +1566,7 @@ async function resolveDealerLookupCore(
     retryRecommendation: "none",
     lookupFailureClassification: null,
     lookupFailureExplanation: "",
+    escalationSkipped,
   });
   const refreshCounters = (trace: DealerLookupExecutionTrace): DealerLookupExecutionTrace => ({ ...trace, implicitSubmitBlockedCount, lookupActivityStep });
 
