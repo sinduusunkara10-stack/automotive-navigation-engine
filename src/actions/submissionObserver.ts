@@ -1,4 +1,5 @@
 import type { Locator, Page } from "playwright";
+import { DEEP_QUERY_ALL_SOURCE } from "../observation/openShadowDom.js";
 
 import { isSameRegistrableDomain } from "../discovery/registrableDomain.js";
 import type { DealerLookupNetworkCapture, SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
@@ -186,11 +187,13 @@ const OBSERVER_SOURCE = `(() => {
     const st = window.getComputedStyle(el);
     return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
   };
-  const form = document.querySelector("[data-nav-engine-submit-form]");
-  const submit = document.querySelector("[data-nav-engine-submit-control]");
-  const region = (form && (form.parentElement && form.parentElement.parentElement || form.parentElement)) || document.body;
+  const deepAll = ${DEEP_QUERY_ALL_SOURCE};
+  const form = deepAll(document, "[data-nav-engine-submit-form]")[0] || null;
+  const submit = deepAll(document, "[data-nav-engine-submit-control]")[0] || null;
+  const formRoot = form ? form.getRootNode() : document;
+  const region = (form && (form.parentElement && form.parentElement.parentElement || form.parentElement)) || (formRoot !== document ? formRoot : null) || document.body;
   const SURFACE = '[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [aria-live="polite"], [aria-live="assertive"], dialog';
-  const baselineSurfaces = new Set(Array.from(document.querySelectorAll(SURFACE)).map((el) => el));
+  const baselineSurfaces = new Set(deepAll(document, SURFACE));
   const baselineSurfaceText = new Map(Array.from(baselineSurfaces).map((el) => [el, visible(el) ? norm(el.innerText) : ""]));
   const dl = Array.isArray(window.dataLayer) ? window.dataLayer : null;
   const state = { regionMutations: 0, lastRegionMutationAt: 0, dataLayerStart: dl ? dl.length : 0, startedAt: Date.now() };
@@ -204,6 +207,7 @@ const OBSERVER_SOURCE = `(() => {
     }
   });
   observer.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  if (formRoot !== document) observer.observe(formRoot, { subtree: true, childList: true, attributes: true, characterData: true });
   const tokens = (v) => norm(String(v)).split(/[^a-z0-9]+/).filter(Boolean);
   const isSuccessEvent = (entry) => {
     if (!entry || typeof entry !== "object") return false;
@@ -221,7 +225,7 @@ const OBSERVER_SOURCE = `(() => {
       let statusError = false;
       let statusDuplicateOrRateLimit = false;
       let newSurfaces = 0;
-      Array.from(document.querySelectorAll(SURFACE)).forEach((el) => {
+      deepAll(document, SURFACE).forEach((el) => {
         if (!visible(el)) return;
         const text = norm(el.innerText);
         if (!text) return;
@@ -238,7 +242,7 @@ const OBSERVER_SOURCE = `(() => {
       const layer = Array.isArray(window.dataLayer) ? window.dataLayer : [];
       const fresh = layer.slice(state.dataLayerStart);
       const busyEls = Array.from(region.querySelectorAll('[aria-busy="true"], [role="progressbar"], .spinner, .loader, [class*="spinner"]')).concat(
-        Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"]')).filter((el) => window.getComputedStyle(el).position === "fixed"),
+        deepAll(document, '[aria-busy="true"], [role="progressbar"]').filter((el) => window.getComputedStyle(el).position === "fixed"),
       );
       return {
         formConnected: Boolean(form && form.isConnected),

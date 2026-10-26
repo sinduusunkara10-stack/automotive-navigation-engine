@@ -94,30 +94,30 @@ async function captureCandidateDebug(page: Page, index: number): Promise<DebugCa
   // a page.evaluate callback is wrapped in a dev-time __name(...) call by this repo's tsx/
   // esbuild toolchain, which is missing at browser-serialize time and throws
   // "ReferenceError: __name is not defined" (a recurring, documented repo-wide gotcha).
-  return page.evaluate((idx) => {
-    const forms = Array.from(document.querySelectorAll("form"));
-    const form = forms[idx];
-    if (!form) {
-      return {
-        index: idx,
-        id: null,
-        name: null,
-        className: null,
-        action: null,
-        visible: false,
-        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
-        withinOverlayLikeContainer: false,
-        fieldsInSubtree: 0,
-        fieldsAssociatedViaFormAttribute: 0,
-        totalEffectiveFieldCount: 0,
-        fields: [],
-      };
-    }
-
+  // The same locator fill_form's own discovery uses, so the index means the same form in light
+  // DOM and inside open shadow roots alike.
+  const forms = page.locator("form");
+  if ((await forms.count().catch(() => 0)) <= index) {
+    return {
+      index,
+      id: null,
+      name: null,
+      className: null,
+      action: null,
+      visible: false,
+      boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+      withinOverlayLikeContainer: false,
+      fieldsInSubtree: 0,
+      fieldsAssociatedViaFormAttribute: 0,
+      totalEffectiveFieldCount: 0,
+      fields: [],
+    };
+  }
+  return forms.nth(index).evaluate((form, idx) => {
     const subtreeFields = Array.from(form.querySelectorAll("input, select, textarea"));
     const formAttrFields =
       form.id && typeof CSS !== "undefined" && typeof CSS.escape === "function"
-        ? Array.from(document.querySelectorAll(`input[form="${CSS.escape(form.id)}"], select[form="${CSS.escape(form.id)}"], textarea[form="${CSS.escape(form.id)}"]`)).filter(
+        ? Array.from((form.getRootNode() as Document | ShadowRoot).querySelectorAll(`input[form="${CSS.escape(form.id)}"], select[form="${CSS.escape(form.id)}"], textarea[form="${CSS.escape(form.id)}"]`)).filter(
             (el) => !subtreeFields.includes(el),
           )
         : [];
@@ -158,7 +158,7 @@ async function captureCandidateDebug(page: Page, index: number): Promise<DebugCa
       fields: allFields.map((el) => {
         const inputEl = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
         const id = inputEl.id || null;
-        const rawLabel = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim()) || el.closest("label")?.textContent?.trim() || null;
+        const rawLabel = (id && (el.getRootNode() as Document | ShadowRoot).querySelector(`label[for="${CSS.escape(id)}"]`)?.textContent?.trim()) || el.closest("label")?.textContent?.trim() || null;
         // A radio's label is an answer (on a dealer widget, a dealer's name or address), never returned.
         const label =
           rawLabel === null
@@ -181,7 +181,7 @@ async function captureCandidateDebug(page: Page, index: number): Promise<DebugCa
           visible: fieldVisible,
           disabled: Boolean((inputEl as HTMLInputElement).disabled),
           readonly: Boolean((inputEl as HTMLInputElement).readOnly),
-          closestFormIndex: closestForm ? forms.indexOf(closestForm) : null,
+          closestFormIndex: closestForm ? (closestForm === form ? idx : Array.from(document.querySelectorAll("form")).indexOf(closestForm)) : null,
           formAttr: el.getAttribute("form"),
           boundingBox: { x: fieldRect.x, y: fieldRect.y, width: fieldRect.width, height: fieldRect.height },
         };

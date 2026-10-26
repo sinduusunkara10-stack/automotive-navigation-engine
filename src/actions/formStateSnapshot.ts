@@ -1,4 +1,5 @@
 import type { Locator } from "playwright";
+import { TREE_ELEMENT_BY_ID_SOURCE } from "../observation/openShadowDom.js";
 import { callInPageFunction } from "../forms/inPageFunction.js";
 
 export type CheckedCategory = "checked" | "unchecked" | "not_applicable";
@@ -66,7 +67,7 @@ const SNAPSHOT_SOURCE = `(formEl, arg) => {
   };
   const errorNear = (el) => {
     const ids = (el.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean);
-    if (ids.some((id) => { const d = document.getElementById(id); return d && shown(d) && (d.textContent || "").trim().length > 0; })) return true;
+    if (ids.some((id) => { const d = (${TREE_ELEMENT_BY_ID_SOURCE})(el, id); return d && shown(d) && (d.textContent || "").trim().length > 0; })) return true;
     const host = el.parentElement;
     if (!host) return false;
     return Array.from(host.querySelectorAll('[role="alert"], [class*="error" i], [class*="invalid" i]')).some(

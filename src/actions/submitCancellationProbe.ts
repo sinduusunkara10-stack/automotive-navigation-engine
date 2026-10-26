@@ -1,4 +1,5 @@
 import type { Locator, Page } from "playwright";
+import { DEEP_QUERY_ALL_SOURCE } from "../observation/openShadowDom.js";
 import { classifyBusinessRequest } from "./submissionObserver.js";
 import { classifyRequestPurpose } from "./dealerLookupNetwork.js";
 import type { AcknowledgementCheckboxDiagnostic, ControlStateSnapshot, SnapshotDifference } from "./formStateSnapshot.js";
@@ -78,6 +79,7 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
     }).observe({ type: "resource", buffered: true });
   } catch (e) {}
   const isProbeForm = (f) => Boolean(f && f.nodeType === 1 && f.tagName === "FORM" && f.hasAttribute(FORM_ATTR));
+  const probeForm = () => (${DEEP_QUERY_ALL_SOURCE})(document, "form[" + FORM_ATTR + "]")[0] || null;
   const shown = (n) => {
     const r = n.getBoundingClientRect();
     const s = window.getComputedStyle(n);
@@ -196,11 +198,12 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
   const targetCategory = (t) => {
     if (t === window) return "window";
     if (t === document) return "document";
+    if (t && t.nodeType === 11) return "form_ancestor";
     if (!t || t.nodeType !== 1) return "other";
     if (isProbeForm(t)) return "form";
     if (t.hasAttribute(SUBMIT_ATTR)) return "submit_control";
     if (t === document.body) return "body";
-    const form = document.querySelector("form[" + FORM_ATTR + "]");
+    const form = probeForm();
     if (form && t.contains(form)) return "form_ancestor";
     if (form && form.contains(t)) return "inside_form";
     return "other";
@@ -219,7 +222,8 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
   const relevantEvent = (ev) => {
     if (!ev || !ev.target) return false;
     if (ev.type === "submit") return isProbeForm(ev.target);
-    return ev.type === "click" && Boolean(ev.target.closest && ev.target.closest("[" + SUBMIT_ATTR + "]"));
+    const origin = ev.composedPath && ev.composedPath()[0] ? ev.composedPath()[0] : ev.target;
+    return ev.type === "click" && Boolean(origin.closest && origin.closest("[" + SUBMIT_ATTR + "]"));
   };
   wrap(Event.prototype, "preventDefault", (ev) => {
     const rec = state.rec;
@@ -244,14 +248,15 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
 
   window.addEventListener("click", function navEngineProbeClick1(e) {
     const rec = state.rec;
-    if (!rec || !e.target || !e.target.closest) return;
-    if (e.target.closest("[" + SUBMIT_ATTR + "]")) {
+    const origin = e.composedPath ? e.composedPath()[0] : e.target;
+    if (!rec || !origin || !origin.closest) return;
+    if (origin.closest("[" + SUBMIT_ATTR + "]")) {
       rec.clickReceived = true;
       rec.clickAt = now();
       rec.clickTrusted = e.isTrusted;
     }
   }, true);
-  window.addEventListener("submit", function navEngineProbeSubmit2(e) {
+  const onSubmitCapture = function navEngineProbeSubmit2(e) {
     const rec = state.rec;
     if (!rec) return;
     if (!isProbeForm(e.target)) {
@@ -276,27 +281,38 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
       state.inDispatch = false;
       rec.defaultPrevented = e.defaultPrevented;
     }, 0);
-  }, true);
-  window.addEventListener("submit", function navEngineProbeSubmit3(e) {
+  };
+  const onSubmitBubble = function navEngineProbeSubmit3(e) {
     if (state.rec && isProbeForm(e.target)) state.rec.reachedWindowBubble = true;
-  }, false);
-  window.addEventListener("invalid", function navEngineProbeInvalid4(e) {
+  };
+  const onInvalid = function navEngineProbeInvalid4(e) {
     const rec = state.rec;
     const t = e.target;
     if (!rec || !t || !isProbeForm(t.form)) return;
     rec.invalidEventCount += 1;
     const id = t.getAttribute && t.getAttribute(FIELD_ATTR);
     if (id !== null && id !== undefined && rec.invalidFieldIds.length < MAX_ITEMS && !rec.invalidFieldIds.includes(id)) rec.invalidFieldIds.push(id);
-  }, true);
-  window.addEventListener("reset", function navEngineProbeReset5(e) {
+  };
+  const onReset = function navEngineProbeReset5(e) {
     const rec = state.rec;
     if (!rec || !isProbeForm(e.target)) return;
     rec.resetEventFired = true;
     if (rec.dispatches.length === 0) rec.resetBeforeDispatch = true;
-  }, true);
-  window.addEventListener("formdata", function navEngineProbeFormdata6(e) {
+  };
+  const onFormData = function navEngineProbeFormdata6(e) {
     if (afterClick(state.rec) && isProbeForm(e.target)) state.rec.formDataEventCount += 1;
-  }, true);
+  };
+  // submit/invalid/reset/formdata are not composed: from a form inside a shadow root they never
+  // reach window, so the same listeners also go on that root (once per root).
+  const listenForFormEvents = (target) => {
+    target.addEventListener("submit", onSubmitCapture, true);
+    target.addEventListener("submit", onSubmitBubble, false);
+    target.addEventListener("invalid", onInvalid, true);
+    target.addEventListener("reset", onReset, true);
+    target.addEventListener("formdata", onFormData, true);
+  };
+  listenForFormEvents(window);
+  const listenedRoots = new WeakSet();
   window.addEventListener("error", function navEngineProbeError7(e) {
     const rec = state.rec;
     if (!afterClick(rec) || !e || e.target !== window || rec.errors.length >= MAX_ITEMS) return;
@@ -319,7 +335,12 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
   window[KEY] = {
     begin(attempt) {
       wrapJquery();
-      const form = document.querySelector("form[" + FORM_ATTR + "]");
+      const form = probeForm();
+      const formRoot = form ? form.getRootNode() : document;
+      if (formRoot !== document && !listenedRoots.has(formRoot)) {
+        listenedRoots.add(formRoot);
+        listenForFormEvents(formRoot);
+      }
       state.rec = {
         attempt,
         formRef: form,
@@ -360,7 +381,7 @@ export function buildSubmitProbeSource(mode: SubmitProbeMode): string {
     read() {
       const rec = state.rec;
       if (!rec) return null;
-      const current = document.querySelector("form[" + FORM_ATTR + "]");
+      const current = probeForm();
       const out = Object.assign({}, rec);
       delete out.formRef;
       out.formConnected = Boolean(rec.formRef && rec.formRef.isConnected);
@@ -455,7 +476,7 @@ export async function beginProbeAttempt(page: Page, form: Locator, submit: Locat
   await page
     .mainFrame()
     .evaluate(
-      `(() => { document.querySelectorAll("[${PROBE_FORM_ATTR}],[${PROBE_SUBMIT_ATTR}]").forEach((n) => { n.removeAttribute("${PROBE_FORM_ATTR}"); n.removeAttribute("${PROBE_SUBMIT_ATTR}"); }); return true; })()`,
+      `(() => { (${DEEP_QUERY_ALL_SOURCE})(document, "[${PROBE_FORM_ATTR}],[${PROBE_SUBMIT_ATTR}]").forEach((n) => { n.removeAttribute("${PROBE_FORM_ATTR}"); n.removeAttribute("${PROBE_SUBMIT_ATTR}"); }); return true; })()`,
     )
     .catch(() => false);
   const formMarked = await form

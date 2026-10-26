@@ -9,6 +9,7 @@ import {
 } from "./radioGroupClassifier.js";
 import type { SupportedLanguage } from "./testData.js";
 import { callInPageFunction } from "./inPageFunction.js";
+import { TREE_ELEMENT_BY_ID_SOURCE } from "../observation/openShadowDom.js";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
@@ -113,13 +114,14 @@ const DISCOVER_SOURCE = `(formEl, attrs) => {
     const onScreen = right - left >= 1 && bottom - top >= 1;
     let hitTestable = false;
     if (onScreen && !clipped) {
-      const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      const hitRoot = typeof el.getRootNode().elementFromPoint === "function" ? el.getRootNode() : document;
+      const hit = hitRoot.elementFromPoint((left + right) / 2, (top + bottom) / 2);
       hitTestable = Boolean(hit) && owners.some((o) => o === hit || o.contains(hit));
     }
     return { found: true, visible: true, onScreen, clipped, hitTestable };
   };
   const textOfIds = (ids) =>
-    norm((ids || "").split(/\\s+/).filter(Boolean).map((id) => { const el = document.getElementById(id); return el ? el.textContent : ""; }).join(" "));
+    norm((ids || "").split(/\\s+/).filter(Boolean).map((id) => { const el = (${TREE_ELEMENT_BY_ID_SOURCE})(formEl, id); return el ? el.textContent : ""; }).join(" "));
   const radios = Array.from(formEl.querySelectorAll('input[type="radio"]'));
   const groups = new Map();
   radios.forEach((radio) => {

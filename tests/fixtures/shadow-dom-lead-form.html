@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Book a Test Drive</title>
+  </head>
+  <body>
+    <header>
+      <nav><a href="#models">Models</a> <a href="#offers">Offers</a></nav>
+    </header>
+    <main>
+      <lead-request-app></lead-request-app>
+    </main>
+    <script>
+      // A generic web-component lead form: every control, label, validation message, dealer result
+      // and the confirmation lives inside one open shadow root, and the light DOM holds only the
+      // page chrome. Scenarios are chosen by the test through the query string.
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || "ok";
+      window.__leadPosts = [];
+
+      const FORM = `
+        <style>
+          .row { margin: 6px 0; }
+          .proxy { width: 260px; }
+          .proxy-list { list-style: none; margin: 0; padding: 0; border: 1px solid #888; background: #fff; width: 260px; }
+          .proxy-list li { padding: 4px 8px; cursor: pointer; }
+          .native-hidden { display: none; }
+          .error { color: #b00; }
+          [role="radio"] { display: block; padding: 4px; cursor: pointer; }
+          [aria-checked="true"] { font-weight: bold; }
+        </style>
+        <h2>Request a test drive</h2>
+        <form id="lead" novalidate>
+          <div class="row">
+            <label for="title-display">Title*</label>
+            <div class="proxy-wrap">
+              <input id="title-display" class="proxy" type="text" readonly placeholder="Choose" />
+              <ul class="proxy-list" style="display:none"><li data-value="mr">Mr</li><li data-value="ms">Ms</li></ul>
+              <select id="title" name="title" class="native-hidden" required>
+                <option value="">Choose</option><option value="mr">Mr</option><option value="ms">Ms</option>
+              </select>
+            </div>
+          </div>
+          <div class="row"><label for="first-name">First name*</label><input id="first-name" name="firstName" required aria-describedby="first-name-error" /><span id="first-name-error" class="error"></span></div>
+          <div class="row"><label for="last-name">Last name*</label><input id="last-name" name="lastName" required aria-describedby="last-name-error" /><span id="last-name-error" class="error"></span></div>
+          <div class="row"><label for="email">Email*</label><input id="email" name="email" type="email" required aria-describedby="email-error" /><span id="email-error" class="error"></span></div>
+          <div class="row"><label for="phone">Mobile*</label><input id="phone" name="phone" type="tel" required aria-describedby="phone-error" /><span id="phone-error" class="error"></span></div>
+          <div class="row"><label for="address">Address</label><input id="address" name="address" aria-describedby="address-error" /><span id="address-error" class="error"></span></div>
+          <div class="row">
+            <label for="model">Model of interest*</label>
+            <select id="model" name="model" required>
+              <option value="" disabled selected>Select a model</option>
+              <option value="hatch">Hatchback</option>
+              <option value="suv">SUV</option>
+            </select>
+          </div>
+          <fieldset id="dealer-box">
+            <legend>Choose your dealer</legend>
+            <label for="dealer-postcode">Postcode*</label>
+            <input id="dealer-postcode" name="dealerPostcode" required />
+            <button type="button" id="dealer-search">Find dealers</button>
+            <div id="dealer-results" role="radiogroup" aria-label="Dealers"></div>
+            <input type="hidden" name="dealerId" id="dealer-id" value="" />
+            <span id="dealer-error" class="error"></span>
+          </fieldset>
+          <fieldset>
+            <legend>Would you like to receive offers and news by email?</legend>
+            <label><input type="radio" name="marketingOptIn" value="yes" /> Yes</label>
+            <label><input type="radio" name="marketingOptIn" value="no" /> No</label>
+          </fieldset>
+          <div class="row">
+            <input type="checkbox" id="privacy" name="privacyAccepted" required />
+            <label for="privacy">I have read and accept the privacy policy*</label>
+          </div>
+          <div id="captcha-slot"></div>
+          <p id="form-error" role="alert"></p>
+          <button type="submit" id="send">Send request</button>
+        </form>
+        <div id="done" role="status"></div>
+      `;
+
+      customElements.define(
+        "lead-request-app",
+        class extends HTMLElement {
+          connectedCallback() {
+            if (this.shadowRoot || this.childElementCount > 0) return;
+            // dom=light renders the identical form into the light DOM, for a like-for-like comparison.
+            const root = params.get("dom") === "light" ? this : this.attachShadow({ mode: "open" });
+            root.innerHTML = FORM;
+            const $ = (id) => root.querySelector("#" + id);
+            if (params.get("address") === "required") {
+              $("address").required = true;
+              root.querySelector('label[for="address"]').textContent = "Address*";
+            }
+            if (scenario === "captcha") $("captcha-slot").innerHTML = '<div class="g-recaptcha" data-sitekey="placeholder-site-key"></div>';
+
+            const display = $("title-display");
+            const list = root.querySelector(".proxy-list");
+            const select = $("title");
+            display.addEventListener("click", () => {
+              list.style.display = list.style.display === "none" ? "block" : "none";
+            });
+            list.querySelectorAll("li").forEach((li) =>
+              li.addEventListener("click", () => {
+                select.value = li.getAttribute("data-value");
+                display.value = li.textContent;
+                list.style.display = "none";
+                select.dispatchEvent(new Event("change", { bubbles: true }));
+              }),
+            );
+
+            // Dealer results only exist after the lookup: they are created on demand, after a delay.
+            $("dealer-search").addEventListener("click", () => {
+              const results = $("dealer-results");
+              results.innerHTML = "";
+              if (!$("dealer-postcode").value.trim()) return;
+              setTimeout(() => {
+                ["Northside Motors", "Riverside Cars"].forEach((name, i) => {
+                  const item = document.createElement("div");
+                  item.setAttribute("role", "radio");
+                  item.setAttribute("aria-checked", "false");
+                  item.tabIndex = 0;
+                  item.textContent = name;
+                  item.addEventListener("click", () => {
+                    results.querySelectorAll('[role="radio"]').forEach((r) => r.setAttribute("aria-checked", "false"));
+                    item.setAttribute("aria-checked", "true");
+                    $("dealer-id").value = "D-" + (i + 1);
+                  });
+                  results.appendChild(item);
+                });
+              }, 400);
+            });
+
+            const form = $("lead");
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              let valid = true;
+              const flag = (id, message) => {
+                const el = $(id);
+                el.setAttribute("aria-invalid", "true");
+                const out = $(id + "-error");
+                if (out) out.textContent = message;
+                valid = false;
+              };
+              form.querySelectorAll("[aria-invalid]").forEach((el) => el.removeAttribute("aria-invalid"));
+              form.querySelectorAll(".error").forEach((el) => (el.textContent = ""));
+              ["first-name", "last-name", "address"].forEach((id) => {
+                if ($(id).required && !$(id).value.trim()) flag(id, "This field is required");
+              });
+              if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test($("email").value) || scenario === "reject_email") flag("email", "Please enter a valid email address");
+              if (!/^\+?\d{10,15}$/.test($("phone").value)) flag("phone", "Please enter a valid phone number without spaces");
+              if (!select.value || !$("model").value || !$("privacy").checked) valid = false;
+              if (!$("dealer-id").value) {
+                $("dealer-error").textContent = "Please choose a dealer";
+                valid = false;
+              }
+              if (!valid) {
+                $("form-error").textContent = "Please correct the highlighted fields";
+                return;
+              }
+              const body = Object.fromEntries(new FormData(form).entries());
+              window.__leadPosts.push(body);
+              const response = await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+              if (response.ok) {
+                form.remove();
+                $("done").textContent = "Thank you, your request has been received. A dealer will contact you shortly.";
+              } else {
+                $("form-error").textContent = "Something went wrong, please try again";
+              }
+            });
+          }
+        },
+      );
+    </script>
+  </body>
+</html>

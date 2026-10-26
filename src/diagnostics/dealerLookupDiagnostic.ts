@@ -1,4 +1,5 @@
 import type { Locator, Page } from "playwright";
+import { MAX_OPEN_SHADOW_ROOTS } from "../observation/openShadowDom.js";
 import {
   FIELD_INDEX_ATTR,
   TRIGGER_INDEX_ATTR,
@@ -215,10 +216,16 @@ async function readElementTrace(
 ): Promise<DealerLookupFieldTrace[]> {
   if (targets.length === 0) return [];
   return page.evaluate(
-    (args: { targets: { elementId: string; role: "field" | "trigger"; index: string }[]; fieldAttr: string; triggerAttr: string; maxDomAncestryDepth: number }) => {
+    (args: { targets: { elementId: string; role: "field" | "trigger"; index: string }[]; fieldAttr: string; triggerAttr: string; maxDomAncestryDepth: number; maxOpenShadowRoots: number }) => {
+      const scopes: (Document | ShadowRoot)[] = [document];
+      for (let i = 0; i < scopes.length && scopes.length <= args.maxOpenShadowRoots; i += 1) {
+        for (const n of Array.from(scopes[i]!.querySelectorAll("*"))) {
+          if (n.shadowRoot) scopes.push(n.shadowRoot);
+        }
+      }
       return args.targets.map((target) => {
         const attr = target.role === "field" ? args.fieldAttr : args.triggerAttr;
-        const el = document.querySelector(`[${attr}="${target.index}"]`) as HTMLElement | null;
+        const el = (scopes.map((sc) => sc.querySelector(`[${attr}="${target.index}"]`)).find((n) => n !== null) ?? null) as HTMLElement | null;
         if (!el) {
           return {
             elementId: target.elementId,
@@ -250,7 +257,8 @@ async function readElementTrace(
         const tag = el.tagName.toLowerCase();
         const inputType = tag === "input" ? el.getAttribute("type") : null;
         const id = el.getAttribute("id");
-        const byForLabel = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const elRoot = el.getRootNode() as Document | ShadowRoot;
+        const byForLabel = id ? elRoot.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
         const rawLabel = byForLabel?.textContent?.trim() || el.closest("label")?.textContent?.trim() || el.getAttribute("aria-label")?.trim() || null;
         // An option's label is an answer -- on a dealer widget a dealer's name or address -- so it is never returned.
         const isOption = (el.getAttribute("type") ?? "") === "radio" || ["radio", "option"].includes(el.getAttribute("role") ?? "");
@@ -277,7 +285,7 @@ async function readElementTrace(
             .split(/\s+/)
             .filter(Boolean)
             .forEach((targetId) => {
-              ariaRelationshipTargets.push({ attribute: attrName, targetId, targetExists: document.getElementById(targetId) !== null });
+              ariaRelationshipTargets.push({ attribute: attrName, targetId, targetExists: (elRoot.getElementById(targetId) ?? document.getElementById(targetId)) !== null });
             });
         });
 
@@ -336,7 +344,7 @@ async function readElementTrace(
         };
       });
     },
-    { targets, fieldAttr: FIELD_INDEX_ATTR, triggerAttr: TRIGGER_INDEX_ATTR, maxDomAncestryDepth: DEALER_TRACE_MAX_DOM_ANCESTRY_DEPTH },
+    { targets, fieldAttr: FIELD_INDEX_ATTR, triggerAttr: TRIGGER_INDEX_ATTR, maxDomAncestryDepth: DEALER_TRACE_MAX_DOM_ANCESTRY_DEPTH, maxOpenShadowRoots: MAX_OPEN_SHADOW_ROOTS },
   );
 }
 

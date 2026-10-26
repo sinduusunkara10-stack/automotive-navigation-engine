@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright";
 import { callInPageFunction } from "./inPageFunction.js";
+import { DEEP_QUERY_ALL_SOURCE } from "../observation/openShadowDom.js";
 
 export type SelectProxyKind = "readonly_input" | "combobox" | "button";
 
@@ -41,17 +42,17 @@ const MARK_OPTION_SOURCE = `(el, arg) => {
     const s = window.getComputedStyle(n);
     return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
   };
-  const matches = Array.from(document.querySelectorAll('[role="option"], li, a, span, div, label, button, p')).filter((n) => {
+  const matches = (${DEEP_QUERY_ALL_SOURCE})(document, '[role="option"], li, a, span, div, label, button, p').filter((n) => {
     if (n.closest("select")) return false;
     if (norm(n.textContent) !== wanted) return false;
     return !Array.from(n.children).some((c) => norm(c.textContent) === wanted);
   });
   if (arg.baseline) {
-    document.querySelectorAll("[" + arg.baselineAttr + "]").forEach((n) => n.removeAttribute(arg.baselineAttr));
+    (${DEEP_QUERY_ALL_SOURCE})(document, "[" + arg.baselineAttr + "]").forEach((n) => n.removeAttribute(arg.baselineAttr));
     matches.filter(shown).forEach((n) => n.setAttribute(arg.baselineAttr, "1"));
     return true;
   }
-  document.querySelectorAll("[" + arg.optionAttr + "]").forEach((n) => n.removeAttribute(arg.optionAttr));
+  (${DEEP_QUERY_ALL_SOURCE})(document, "[" + arg.optionAttr + "]").forEach((n) => n.removeAttribute(arg.optionAttr));
   const fresh = matches.filter((n) => shown(n) && !n.hasAttribute(arg.baselineAttr));
   const preferred = fresh.find((n) => n.getAttribute("role") === "option") || fresh[0];
   if (!preferred) return false;

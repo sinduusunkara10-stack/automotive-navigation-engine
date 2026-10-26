@@ -1,6 +1,8 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
+import { basename, extname, join, normalize } from "node:path";
+
+import { isShadowTransformable, openShadowModeEnabled, toOpenShadowFixture } from "./openShadowFixture.js";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -33,7 +35,10 @@ export async function startStaticServer(rootDir: string): Promise<LocalStaticSer
           res.writeHead(403).end("Forbidden");
           return;
         }
-        const body = await readFile(filePath);
+        let body: Buffer | string = await readFile(filePath);
+        if (extname(filePath) === ".html" && openShadowModeEnabled() && isShadowTransformable(basename(filePath), body.toString("utf-8"))) {
+          body = toOpenShadowFixture(body.toString("utf-8"));
+        }
         const contentType = CONTENT_TYPES[extname(filePath)] ?? "application/octet-stream";
         res.writeHead(200, { "Content-Type": contentType }).end(body);
       } catch {
