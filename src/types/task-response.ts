@@ -695,6 +695,8 @@ export interface ActionResult {
       visibilityProminenceScore: number;
       fieldActionabilityScore: number;
       totalFormScore: number;
+      /** Every input each score component was computed from, for this candidate. Additive to 1.53.0. */
+      scoringEvidence?: FormScoringEvidence;
       fields: {
         tag: string;
         type: string | null;
@@ -2277,4 +2279,31 @@ export interface DealerActivationStepWire {
   implicitSubmitBlocked: boolean;
   geolocationRequested: boolean;
   lookupActivityObserved: boolean;
+}
+
+/** The inputs fill_form's form-selection scoring used for one candidate form (see src/forms/formRelevance.ts). Page text is clipped and has echoed values masked. */
+export interface FormScoringEvidence {
+  /** Every input/select/textarea under the form, hidden backing inputs included. */
+  discoveredControls: number;
+  /** Controls a user could operate (rendered, enabled, not type=hidden): the field-actionability denominator. */
+  userActionableControls: number;
+  /** Controls the fill plan would act on: the field-actionability numerator. */
+  plannableControls: number;
+  headingText: string;
+  /** Where the heading came from: "form", "preceding_sibling", "ancestor_N" (N steps out, crossing shadow roots to their host) or "none". */
+  headingSource: string;
+  submitControlText: string;
+  /** "final_submit" (rendered submit control with no operable field after it), "last_rendered_submit", or "none". */
+  submitControlSource: "final_submit" | "last_rendered_submit" | "none";
+  /** Other rendered submit-type controls in the form that were not taken as its submission control. */
+  skippedSubmitControlTexts: string[];
+  pageTitle: string;
+  journeyAnchors: { text: string; coverage: number }[];
+  anchorScore: number;
+  positiveMatches: string[];
+  negativeMatches: string[];
+  negativeVeto: boolean;
+  purposeBonus: number;
+  visibility: { visible: boolean; inChrome: boolean; areaRatio: number; hasNearbyHeading: boolean; hasVisibleSubmitButton: boolean };
+  weights: { journey: number; visibility: number; fieldActionability: number };
 }

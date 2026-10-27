@@ -1,7 +1,7 @@
 import type { Page } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ActionResult, ActiveSurfaceInfo } from "../types/task-response.js";
+import type { ActionResult, ActiveSurfaceInfo, FormScoringEvidence } from "../types/task-response.js";
 import type { FormJourneyContext, FormScoreBreakdown } from "../forms/formRelevance.js";
 import { FORM_SELECTION_ADOPT_THRESHOLD, FORM_SELECTION_REJECT_THRESHOLD } from "../forms/formRelevance.js";
 
@@ -200,6 +200,8 @@ export interface BuildFormDiscoveryDebugParams {
   candidateIndexes: number[];
   /** Per-candidate score, keyed by the same index as candidateIndexes, from the already-computed candidateEvidence in fillForm.ts (never recomputed here). */
   scoresByIndex: Map<number, FormScoreBreakdown>;
+  /** Per-candidate scoring inputs, keyed like scoresByIndex (from fillForm.ts, never recomputed here). */
+  scoringEvidenceByIndex?: Map<number, FormScoringEvidence>;
   selection: {
     selectedFormIndex: number | null;
     runnerUpIndex: number | null;
@@ -212,7 +214,7 @@ export interface BuildFormDiscoveryDebugParams {
 
 /** Builds the full ActionResult.formDiscoveryDebug payload -- a pure read, no production-behavior side effects. */
 export async function buildFormDiscoveryDebug(params: BuildFormDiscoveryDebugParams): Promise<NonNullable<ActionResult["formDiscoveryDebug"]>> {
-  const { page, taskId, journeyContext, currentLastClickLabel, activeSurfaceInfo, captureStage, candidateIndexes, scoresByIndex, selection } = params;
+  const { page, taskId, journeyContext, currentLastClickLabel, activeSurfaceInfo, captureStage, candidateIndexes, scoresByIndex, scoringEvidenceByIndex, selection } = params;
 
   const candidates = await Promise.all(
     candidateIndexes.map(async (index) => {
@@ -224,6 +226,7 @@ export async function buildFormDiscoveryDebug(params: BuildFormDiscoveryDebugPar
         visibilityProminenceScore: score?.visibilityProminenceScore ?? 0,
         fieldActionabilityScore: score?.fieldActionabilityScore ?? 0,
         totalFormScore: score?.totalFormScore ?? 0,
+        ...(scoringEvidenceByIndex?.has(index) ? { scoringEvidence: scoringEvidenceByIndex.get(index)! } : {}),
       };
     }),
   );

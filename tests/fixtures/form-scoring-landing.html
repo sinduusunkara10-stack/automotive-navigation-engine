@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Example Motors</title>
+  </head>
+  <body>
+    <main>
+      <h1>Nouveau modèle</h1>
+      <p><a id="cta" href="#">Demandez un essai</a></p>
+    </main>
+    <script>
+      // The CTA forwards its own query string (dom/hidden/search/...) to the form page.
+      document.getElementById("cta").href = "form-scoring-parity.html" + location.search;
+    </script>
+  </body>
+</html>

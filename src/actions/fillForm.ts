@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
-import type { ActionExecutorResult, ActiveSurfaceInfo } from "../types/task-response.js";
+import type { ActionExecutorResult, ActiveSurfaceInfo, FormScoringEvidence } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -80,6 +80,8 @@ import {
 } from "./submitAttemptPlan.js";
 import {
   computeFormScore,
+  explainJourneyRelevance,
+  FORM_SCORE_WEIGHTS,
   resolveAmbiguousFormSelection,
   selectBestForm,
   type FormCandidate,
@@ -376,6 +378,7 @@ interface RawFieldDescriptor {
   dealerLookupTriggerIndex?: string;
   selectProxyKind?: "readonly_input" | "combobox" | "button";
   isSelectProxy: boolean;
+  disabled: boolean;
 }
 
 /**
@@ -528,7 +531,7 @@ async function tagAndReadFields(form: Locator): Promise<RawFieldDescriptor[]> {
       };
     });
     // A proxy can precede its select in document order, so it is only known once every select ran.
-    return described.map((d, i) => ({ ...d, isSelectProxy: fields[i]!.hasAttribute(`${attr}-proxy-for`) }));
+    return described.map((d, i) => ({ ...d, isSelectProxy: fields[i]!.hasAttribute(`${attr}-proxy-for`), disabled: fields[i]!.disabled }));
   }, FIELD_INDEX_ATTR);
 }
 
@@ -539,7 +542,10 @@ interface RawFormSignals {
   hasNearbyHeading: boolean;
   hasVisibleSubmitButton: boolean;
   nearestHeadingText: string;
+  headingSource: string;
   submitButtonText: string;
+  submitControlSource: "final_submit" | "last_rendered_submit" | "none";
+  skippedSubmitControlTexts: string[];
   formAttributesText: string;
 }
 
@@ -550,58 +556,68 @@ interface RawFormSignals {
  * above.
  */
 async function gatherFormSignals(form: Locator): Promise<RawFormSignals> {
-  return form.evaluate((formEl: HTMLFormElement) => {
+  const finalSubmit = await markFinalSubmitControl(form);
+  const signals = await form.evaluate((formEl: HTMLFormElement, finalSubmitAttr: string) => {
     const rect = formEl.getBoundingClientRect();
     const style = window.getComputedStyle(formEl);
     const onScreen = rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
     const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && onScreen;
-    const inChrome =
-      formEl.closest('nav, header, footer, [role="navigation"], [role="banner"], [role="contentinfo"], [role="menu"], [role="menubar"]') !== null;
+    const chromeSelector = 'nav, header, footer, [role="navigation"], [role="banner"], [role="contentinfo"], [role="menu"], [role="menubar"]';
+    // Ancestry continues from a shadow root to its host, so a form rendered inside a web component
+    // sees the same surrounding page (headings, header/footer chrome) as the same form in light DOM.
+    let inChrome = false;
+    for (let node: Element | null = formEl; node && !inChrome; node = (node.parentElement ?? (node.getRootNode() instanceof ShadowRoot ? (node.getRootNode() as ShadowRoot).host : null))) {
+      inChrome = node.matches(chromeSelector);
+    }
     const viewportArea = Math.max(1, window.innerWidth * window.innerHeight);
     const areaRatio = Math.min(1, (rect.width * rect.height) / viewportArea);
 
     const headingSelector = "h1, h2, h3, h4";
     let nearestHeadingText = "";
+    let headingSource = "";
     const ownHeading = formEl.querySelector(headingSelector);
     if (ownHeading) {
       nearestHeadingText = ownHeading.textContent?.trim() ?? "";
+      headingSource = "form";
     } else {
       let sibling: Element | null = formEl.previousElementSibling;
       let siblingSteps = 0;
       while (sibling && siblingSteps < 6 && !nearestHeadingText) {
         if (sibling.matches(headingSelector)) {
           nearestHeadingText = sibling.textContent?.trim() ?? "";
+          headingSource = "preceding_sibling";
         }
         sibling = sibling.previousElementSibling;
         siblingSteps += 1;
       }
-      let ancestor: Element | null = formEl.parentElement;
+      let child: Element = formEl;
+      let ancestor: Element | null = (formEl.parentElement ?? (formEl.getRootNode() instanceof ShadowRoot ? (formEl.getRootNode() as ShadowRoot).host : null));
       let ancestorSteps = 0;
       while (ancestor && ancestorSteps < 4 && !nearestHeadingText) {
-        const heading = ancestor.querySelector(headingSelector);
+        // Stepping out of a shadow root reaches its host: search the root first (the host's own
+        // light subtree does not include it), as the same form's wrapper would be in light DOM.
+        const childRoot = child.getRootNode();
+        const heading =
+          (childRoot instanceof ShadowRoot && childRoot.host === ancestor ? childRoot.querySelector(headingSelector) : null) ??
+          ancestor.querySelector(headingSelector);
         if (heading) {
           nearestHeadingText = heading.textContent?.trim() ?? "";
+          headingSource = `ancestor_${ancestorSteps + 1}`;
         }
-        ancestor = ancestor.parentElement;
+        child = ancestor;
+        ancestor = (ancestor.parentElement ?? (ancestor.getRootNode() instanceof ShadowRoot ? (ancestor.getRootNode() as ShadowRoot).host : null));
         ancestorSteps += 1;
       }
     }
     const hasNearbyHeading = nearestHeadingText.length > 0;
 
-    const submitEls = Array.from(formEl.querySelectorAll<HTMLElement>('button[type="submit"], input[type="submit"]'));
+    const finalSubmitEl = formEl.querySelector<HTMLElement>(`[${finalSubmitAttr}]`);
     let submitButtonText = "";
     let hasVisibleSubmitButton = false;
-    for (const el of submitEls) {
-      const elRect = el.getBoundingClientRect();
-      const elStyle = window.getComputedStyle(el);
-      const elVisible = elRect.width > 0 && elRect.height > 0 && elStyle.visibility !== "hidden" && elStyle.display !== "none";
-      if (elVisible) {
-        hasVisibleSubmitButton = true;
-        submitButtonText = el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || (el as HTMLInputElement).value || "";
-        break;
-      }
-    }
-    if (!hasVisibleSubmitButton && submitEls.length === 0) {
+    if (finalSubmitEl) {
+      hasVisibleSubmitButton = true;
+      submitButtonText = finalSubmitEl.getAttribute("aria-label")?.trim() || finalSubmitEl.textContent?.trim() || (finalSubmitEl as HTMLInputElement).value || "";
+    } else if (formEl.querySelectorAll('button[type="submit"], input[type="submit"]').length === 0) {
       const genericButtons = Array.from(formEl.querySelectorAll<HTMLElement>("button"));
       const lastButton = genericButtons[genericButtons.length - 1];
       if (lastButton) {
@@ -616,8 +632,49 @@ async function gatherFormSignals(form: Locator): Promise<RawFormSignals> {
       formEl.getAttribute("action") ?? "",
     ].join(" ");
 
-    return { visible, inChrome, areaRatio, hasNearbyHeading, hasVisibleSubmitButton, nearestHeadingText, submitButtonText, formAttributesText };
-  });
+    return { visible, inChrome, areaRatio, hasNearbyHeading, hasVisibleSubmitButton, nearestHeadingText, headingSource, submitButtonText, formAttributesText };
+  }, FINAL_SUBMIT_ATTR);
+  return { ...signals, submitControlSource: finalSubmit.source, skippedSubmitControlTexts: finalSubmit.skippedTexts };
+}
+
+const FINAL_SUBMIT_ATTR = "data-nav-engine-final-submit";
+
+/**
+ * Marks the form's own final submission control: the rendered submit-type control with no
+ * user-operable field after it. A rendered submit-type control that still has operable fields
+ * after it (an in-form dealer/address search) submits a sub-step, not the form, so it is never
+ * the control clicked to submit nor the text the form's purpose is judged by. When every rendered
+ * submit-type control has a field after it, the last one is used.
+ */
+async function markFinalSubmitControl(
+  form: Locator,
+): Promise<{ source: "final_submit" | "last_rendered_submit" | "none"; skippedTexts: string[]; typedIndex: number | null }> {
+  return form
+    .evaluate((formEl: HTMLFormElement, attr: string) => {
+      formEl.querySelectorAll(`[${attr}]`).forEach((el) => el.removeAttribute(attr));
+      const submits = Array.from(formEl.querySelectorAll<HTMLElement>('button[type="submit"], input[type="submit"]')).filter((el) => {
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+      });
+      const operable = Array.from(formEl.querySelectorAll<HTMLInputElement>("input, select, textarea")).filter((el) => {
+        const r = el.getBoundingClientRect();
+        const st = window.getComputedStyle(el);
+        return el.type !== "hidden" && !el.disabled && r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+      });
+      const finals = submits.filter((el) => !operable.some((field) => el.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING));
+      const chosen = finals[0] ?? submits[submits.length - 1];
+      if (!chosen) return { source: "none" as const, skippedTexts: [], typedIndex: null };
+      chosen.setAttribute(attr, "1");
+      return {
+        typedIndex: Array.from(formEl.querySelectorAll('button[type="submit"], input[type="submit"]')).indexOf(chosen),
+        source: finals[0] ? ("final_submit" as const) : ("last_rendered_submit" as const),
+        skippedTexts: submits
+          .filter((el) => el !== chosen)
+          .map((el) => (el.getAttribute("aria-label")?.trim() || el.textContent?.trim() || (el as HTMLInputElement).value || "").slice(0, 80)),
+      };
+    }, FINAL_SUBMIT_ATTR)
+    .catch(() => ({ source: "none" as const, skippedTexts: [], typedIndex: null }));
 }
 
 function toDescriptor(raw: RawFieldDescriptor): FormFieldDescriptor {
@@ -851,13 +908,14 @@ async function applyProxiedSelectDecision(
 }
 
 async function findSubmitControl(form: Locator): Promise<Locator | null> {
+  // A form can carry another layout's hidden copy of its Submit control, or an in-form search
+  // control that only submits a sub-step; neither submits the form (see markFinalSubmitControl).
   const typedAll = form.locator('button[type="submit"], input[type="submit"]');
+  const final = await markFinalSubmitControl(form);
+  // A positional locator, not the mark: a site that re-renders its form between attempts gets the
+  // same control in the new form.
+  if (final.typedIndex !== null) return typedAll.nth(final.typedIndex);
   const typedCount = await typedAll.count();
-  // A form can carry another layout's hidden copy of its Submit control before the rendered one;
-  // clicking that copy can never submit, so the first rendered control wins.
-  for (let i = 0; i < typedCount; i += 1) {
-    if (await typedAll.nth(i).isVisible().catch(() => false)) return typedAll.nth(i);
-  }
   const typed = typedAll.first();
   if (typedCount > 0) return typed;
   for (const marker of SUBMIT_TEXT_MARKERS) {
@@ -1070,6 +1128,49 @@ function classifySubmissionResponses(requests: SanitizedNetworkRequestEvidence[]
   return "failed_or_pending";
 }
 
+/** A control a user could operate: rendered (or a required select operated through its visible stand-in), enabled, and not type=hidden. A select's stand-in counts through its select. */
+function isUserActionableControl(field: RawFieldDescriptor): boolean {
+  if (field.type === "hidden" || field.disabled || field.isSelectProxy) return false;
+  return field.visible || isProxiedRequiredSelect(toDescriptor(field));
+}
+
+function buildScoringEvidence(input: {
+  journeyContext: FormJourneyContext;
+  textSignals: FormTextSignals;
+  formSignals: RawFormSignals;
+  discoveredControls: number;
+  userActionableControlCount: number;
+  plannableFieldCount: number;
+}): FormScoringEvidence {
+  const journey = explainJourneyRelevance(input.journeyContext, input.textSignals);
+  const clip = (text: string) => redactEchoedValues(text).slice(0, 120);
+  return {
+    discoveredControls: input.discoveredControls,
+    userActionableControls: input.userActionableControlCount,
+    plannableControls: input.plannableFieldCount,
+    headingText: clip(input.formSignals.nearestHeadingText),
+    headingSource: input.formSignals.headingSource || "none",
+    submitControlText: clip(input.formSignals.submitButtonText),
+    submitControlSource: input.formSignals.submitControlSource,
+    skippedSubmitControlTexts: input.formSignals.skippedSubmitControlTexts.map(clip),
+    pageTitle: clip(input.textSignals.pageTitle),
+    journeyAnchors: journey.anchors.map((anchor) => ({ text: clip(anchor.text), coverage: anchor.coverage })),
+    anchorScore: journey.anchorScore,
+    positiveMatches: journey.positiveMatches,
+    negativeMatches: journey.negativeMatches,
+    negativeVeto: journey.vetoed,
+    purposeBonus: journey.purposeBonus,
+    visibility: {
+      visible: input.formSignals.visible,
+      inChrome: input.formSignals.inChrome,
+      areaRatio: input.formSignals.areaRatio,
+      hasNearbyHeading: input.formSignals.hasNearbyHeading,
+      hasVisibleSubmitButton: input.formSignals.hasVisibleSubmitButton,
+    },
+    weights: { ...FORM_SCORE_WEIGHTS },
+  };
+}
+
 function scorePlan(plan: PlannedField[]): number {
   return plan.filter((p) => p.decision.kind !== "skip").length;
 }
@@ -1102,6 +1203,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
    * formDiscoveryDiagnostic.ts) for one exit point, a no-op when the env var is unset. Never
    * throws into the caller -- a diagnostic failure must never turn a real result into an error.
    */
+  const scoringEvidenceByIndex = new Map<number, FormScoringEvidence>();
   async function emitDiagnostic(
     captureStage: string,
     candidateIndexes: number[],
@@ -1126,6 +1228,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
         captureStage,
         candidateIndexes,
         scoresByIndex,
+        scoringEvidenceByIndex,
         selection,
       });
       logFormDiscoveryDiagnosticEmitted({ runId: diagnosticRunId, taskId: diagnosticRunId, failureReason: captureStage });
@@ -1204,6 +1307,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     realFieldsDiscovered: number;
     /** The real per-candidate count of visible, required fields -- same reporting-accuracy fix. */
     realRequiredFieldsDetected: number;
+    scoringEvidence: FormScoringEvidence;
   }[] = [];
   for (let i = 0; i < formsOnPage; i += 1) {
     const candidate = forms.nth(i);
@@ -1215,7 +1319,8 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     // address postcode and a dealer-locator postcode/city) sharing identical label vocabulary.
     const dealerSearchWidgetDetectedCandidate = descriptors.some((d) => Boolean(d.dealerLookupTriggerIndex));
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
-    const actionableFieldCount = scorePlan(plan);
+    const plannableFieldCount = scorePlan(plan);
+    const userActionableControlCount = raw.filter(isUserActionableControl).length;
     const formSignals = await gatherFormSignals(candidate);
 
     const textSignals: FormTextSignals = {
@@ -1233,6 +1338,15 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       hasVisibleSubmitButton: formSignals.hasVisibleSubmitButton,
     };
 
+    const scoringEvidence = buildScoringEvidence({
+      journeyContext,
+      textSignals,
+      formSignals,
+      discoveredControls: descriptors.length,
+      userActionableControlCount,
+      plannableFieldCount,
+    });
+    scoringEvidenceByIndex.set(i, scoringEvidence);
     candidateEvidence.push({
       index: i,
       hasCountryCodeSelector: hasCountryCodeSelectorCandidate,
@@ -1240,13 +1354,8 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       textSignals,
       realFieldsDiscovered: descriptors.length,
       realRequiredFieldsDetected: descriptors.filter((d) => d.required && isFillTarget(d)).length,
-      score: computeFormScore({
-        journeyContext,
-        textSignals,
-        visibilitySignals,
-        fieldsDiscovered: descriptors.length,
-        actionableFieldCount,
-      }),
+      score: computeFormScore({ journeyContext, textSignals, visibilitySignals, userActionableControlCount, plannableFieldCount }),
+      scoringEvidence,
     });
   }
 
