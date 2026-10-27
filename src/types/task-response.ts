@@ -2282,13 +2282,36 @@ export interface DealerActivationStepWire {
 }
 
 /** The inputs fill_form's form-selection scoring used for one candidate form (see src/forms/formRelevance.ts). Page text is clipped and has echoed values masked. */
+export interface FormControlScoringEvidence {
+  /** "field" (one input/select/textarea) or "radio_group" (every radio sharing one name). */
+  unit: "field" | "radio_group";
+  /** Field indices this entry covers (the form's own control order). */
+  fieldIds: string[];
+  tag: string;
+  type: string | null;
+  /** The field's label, echo-redacted and clipped; empty for a radio group (whose option labels can name a dealer). */
+  label: string;
+  required: boolean;
+  requiredEvidence: "attribute" | "marker" | "none";
+  plannable: boolean;
+  /** How the fill completes it: "fill_plan", "already_filled" or "radio_group"; null when it does not. */
+  handledBy: "fill_plan" | "already_filled" | "radio_group" | null;
+  /** The fill-plan decision kind for a field, or the classified purpose for a radio group. */
+  action: string;
+  matchedField: string | null;
+  /** Why it is not plannable (a skip reason or the group resolver's reason); null when plannable. */
+  reason: string | null;
+}
+
 export interface FormScoringEvidence {
   /** Every input/select/textarea under the form, hidden backing inputs included. */
   discoveredControls: number;
-  /** Controls a user could operate (rendered, enabled, not type=hidden): the field-actionability denominator. */
+  /** Controls a user could operate (rendered, enabled, not type=hidden), a radio group counted once: the field-actionability denominator. */
   userActionableControls: number;
-  /** Controls the fill plan would act on: the field-actionability numerator. */
+  /** Of those, the ones the fill will complete (a fill-plan action, an already-filled value, or a radio group the group resolver answers or finds answered): the field-actionability numerator. */
   plannableControls: number;
+  /** One entry per user-actionable control (a radio group is one entry), in form order. Additive to 1.53.0. */
+  controls?: FormControlScoringEvidence[];
   headingText: string;
   /** Where the heading came from: "form", "preceding_sibling", "ancestor_N" (N steps out, crossing shadow roots to their host) or "none". */
   headingSource: string;

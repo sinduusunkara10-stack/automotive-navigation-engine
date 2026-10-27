@@ -941,6 +941,54 @@ function lateGroupOutcome(group: ConsentGroupDescriptor, language: SupportedLang
   };
 }
 
+type ConsentGroupPlan =
+  | { kind: "act"; target: ConsentGroupMember; interaction: ConsentInteraction; reason: string; intendedAnswer: ConsentIntendedAnswer }
+  | { kind: "kept_preselected_accept"; reason: string }
+  | { kind: "untouched"; reason: string; completed: boolean };
+
+function planConsentGroup(group: ConsentGroupDescriptor, classified: ReturnType<typeof classifyRadioGroup>, language: SupportedLanguage, journeyContext: FormJourneyContext): ConsentGroupPlan {
+  const checkedBefore = checkedPolarity(group);
+  const untouched = (reason: string, completed = false): ConsentGroupPlan => ({ kind: "untouched", reason, completed });
+
+  if (OPTIONAL_COMMERCIAL_PURPOSES.has(classified.purpose)) {
+    const decline = pickByPolarity(group.members, "negative");
+    if (!decline) return untouched("optional commercial purpose, but no visible decline option could be recognised; left untouched rather than guessed");
+    const interaction: ConsentInteraction =
+      checkedBefore === "negative" ? "committed_preselected_decline" : checkedBefore === "none" ? "selected_decline" : "flipped_preselected_accept_to_decline";
+    return { kind: "act", target: decline, interaction, reason: `${classified.purpose}: declined`, intendedAnswer: "decline" };
+  }
+
+  if (REQUIRED_PURPOSES.has(classified.purpose)) {
+    if (group.requiredEvidence === "none") return untouched("required-processing/terms acknowledgement not marked required for this submission; left untouched");
+    if (checkedBefore === "positive") return { kind: "kept_preselected_accept", reason: "already accepted; marked required for this submission" };
+    const accept = pickByPolarity(group.members, "positive");
+    return accept
+      ? { kind: "act", target: accept, interaction: "accepted_required", reason: `${classified.purpose} marked required (${group.requiredEvidence}): accepted`, intendedAnswer: "accept" }
+      : untouched("required acknowledgement, but no visible accept option could be recognised; left untouched rather than guessed");
+  }
+
+  if (classified.purpose === "journey_intent" || classified.purpose === "customer_qualification") {
+    if (group.checkedMemberFieldId !== null) return untouched("already answered on the page before resolution ran", true);
+    const visibleMembers = group.members.filter((m) => m.actionable);
+    const labels = visibleMembers.map((m) => m.label);
+    const resolution = classified.purpose === "journey_intent" ? resolveJourneyIntentOption(labels, journeyContext, language) : resolvePrivateCustomerOption(labels, language);
+    const target = resolution ? visibleMembers[resolution.index] : undefined;
+    return target && resolution
+      ? { kind: "act", target, interaction: "selected_by_policy", reason: resolution.reason, intendedAnswer: "policy_option" }
+      : untouched(`classified as ${classified.classification} but no option could be confidently resolved; left unresolved rather than guessed`);
+  }
+
+  return untouched("classification was ambiguous; left untouched rather than guessed", group.checkedMemberFieldId !== null);
+}
+
+/** Whether resolveConsentGroups would complete this group as it stands: it is actionable and either gets an answer or is already answered. Read-only, so form selection can count a radio group the way the fill will treat it. */
+export function consentGroupWillResolve(group: ConsentGroupDescriptor, language: SupportedLanguage, journeyContext: FormJourneyContext = {}): { resolves: boolean; purpose: ConsentPurpose; reason: string } {
+  const classified = classifyGroup(group, language);
+  if (!group.actionable) return { resolves: false, purpose: classified.purpose, reason: group.rejection ? `not actionable: ${group.rejection.reason}` : "not actionable" };
+  const plan = planConsentGroup(group, classified, language, journeyContext);
+  return { resolves: plan.kind !== "untouched" || plan.completed, purpose: classified.purpose, reason: plan.reason };
+}
+
 async function resolveOneGroup(
   form: Locator,
   group: ConsentGroupDescriptor,
@@ -948,7 +996,6 @@ async function resolveOneGroup(
   fieldByIndex: (form: Locator, index: string) => Promise<Locator>,
   journeyContext: FormJourneyContext,
 ): Promise<GroupOutcome> {
-  const visibleMembers = group.members.filter((m) => m.actionable);
   const classified = classifyGroup(group, language);
   const base = {
     purpose: classified.purpose,
@@ -957,58 +1004,31 @@ async function resolveOneGroup(
     classificationEvidence: classified.evidence,
     checkedBefore: checkedPolarity(group),
   };
-  const untouched = (reason: string, completed = false): GroupOutcome => ({
-    ...base,
-    interaction: "left_untouched",
-    checkedStateVerified: null,
-    completed,
-    ...(completed ? { selectionReason: reason } : { unresolvedReason: reason }),
-  });
-  const act = async (target: ConsentGroupMember, interaction: ConsentInteraction, reason: string, intendedAnswer: ConsentIntendedAnswer): Promise<GroupOutcome> => {
-    const { verified, activation } = await activateMember(form, fieldByIndex, target, intendedAnswer);
-    return verified
-      ? { ...base, interaction, checkedStateVerified: true, completed: true, selectionReason: reason, activation }
-      : {
-          ...base,
-          interaction,
-          checkedStateVerified: false,
-          completed: false,
-          unresolvedReason: `the intended option did not read back as selected after ${activation.attempts.length} activation routes (${activation.verificationResult})`,
-          activation,
-          ...(intendedAnswer === "decline" ? { outcomeTag: "consent_decline_not_committed" as const } : {}),
-        };
-  };
-
-  if (OPTIONAL_COMMERCIAL_PURPOSES.has(classified.purpose)) {
-    const decline = pickByPolarity(group.members, "negative");
-    if (!decline) return untouched("optional commercial purpose, but no visible decline option could be recognised; left untouched rather than guessed");
-    const interaction: ConsentInteraction =
-      base.checkedBefore === "negative" ? "committed_preselected_decline" : base.checkedBefore === "none" ? "selected_decline" : "flipped_preselected_accept_to_decline";
-    return act(decline, interaction, `${classified.purpose}: declined`, "decline");
+  const plan = planConsentGroup(group, classified, language, journeyContext);
+  if (plan.kind === "untouched") {
+    return {
+      ...base,
+      interaction: "left_untouched",
+      checkedStateVerified: null,
+      completed: plan.completed,
+      ...(plan.completed ? { selectionReason: plan.reason } : { unresolvedReason: plan.reason }),
+    };
   }
-
-  if (REQUIRED_PURPOSES.has(classified.purpose)) {
-    if (group.requiredEvidence === "none") return untouched("required-processing/terms acknowledgement not marked required for this submission; left untouched");
-    if (base.checkedBefore === "positive") {
-      return { ...base, interaction: "kept_preselected_accept_required", checkedStateVerified: null, completed: true, selectionReason: "already accepted; marked required for this submission" };
-    }
-    const accept = pickByPolarity(group.members, "positive");
-    return accept
-      ? act(accept, "accepted_required", `${classified.purpose} marked required (${group.requiredEvidence}): accepted`, "accept")
-      : untouched("required acknowledgement, but no visible accept option could be recognised; left untouched rather than guessed");
+  if (plan.kind === "kept_preselected_accept") {
+    return { ...base, interaction: "kept_preselected_accept_required", checkedStateVerified: null, completed: true, selectionReason: plan.reason };
   }
-
-  if (classified.purpose === "journey_intent" || classified.purpose === "customer_qualification") {
-    if (group.checkedMemberFieldId !== null) return untouched("already answered on the page before resolution ran", true);
-    const labels = visibleMembers.map((m) => m.label);
-    const resolution = classified.purpose === "journey_intent" ? resolveJourneyIntentOption(labels, journeyContext, language) : resolvePrivateCustomerOption(labels, language);
-    const target = resolution ? visibleMembers[resolution.index] : undefined;
-    return target && resolution
-      ? act(target, "selected_by_policy", resolution.reason, "policy_option")
-      : untouched(`classified as ${classified.classification} but no option could be confidently resolved; left unresolved rather than guessed`);
-  }
-
-  return untouched("classification was ambiguous; left untouched rather than guessed", group.checkedMemberFieldId !== null);
+  const { verified, activation } = await activateMember(form, fieldByIndex, plan.target, plan.intendedAnswer);
+  return verified
+    ? { ...base, interaction: plan.interaction, checkedStateVerified: true, completed: true, selectionReason: plan.reason, activation }
+    : {
+        ...base,
+        interaction: plan.interaction,
+        checkedStateVerified: false,
+        completed: false,
+        unresolvedReason: `the intended option did not read back as selected after ${activation.attempts.length} activation routes (${activation.verificationResult})`,
+        activation,
+        ...(plan.intendedAnswer === "decline" ? { outcomeTag: "consent_decline_not_committed" as const } : {}),
+      };
 }
 
 export const EMPTY_CONSENT_GROUP_RESULT: ConsentGroupResolutionResult = {

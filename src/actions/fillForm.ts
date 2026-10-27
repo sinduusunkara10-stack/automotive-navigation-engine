@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import type { Captures } from "../types/task-response.js";
-import type { ActionExecutorResult, ActiveSurfaceInfo, FormScoringEvidence } from "../types/task-response.js";
+import type { ActionExecutorResult, ActiveSurfaceInfo, FormControlScoringEvidence, FormScoringEvidence } from "../types/task-response.js";
 import type { SelectedAction } from "../types/actions.js";
 import type { CaptureModuleName } from "../types/captureModule.js";
 import { captureDataLayer } from "../capture-modules/dataLayer.js";
@@ -33,8 +33,11 @@ import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import {
   applyOptionalConsentOptInForTest,
+  consentGroupWillResolve,
+  discoverConsentGroups,
   rediscoverOptionalConsentGroups,
   resolveConsentGroups,
+  type ConsentGroupDescriptor,
   type ConsentGroupRejection,
   type OptionalConsentOptInResult,
   type OptionalConsentRediscovery,
@@ -1141,6 +1144,7 @@ function buildScoringEvidence(input: {
   discoveredControls: number;
   userActionableControlCount: number;
   plannableFieldCount: number;
+  controls: FormControlScoringEvidence[];
 }): FormScoringEvidence {
   const journey = explainJourneyRelevance(input.journeyContext, input.textSignals);
   const clip = (text: string) => redactEchoedValues(text).slice(0, 120);
@@ -1148,6 +1152,7 @@ function buildScoringEvidence(input: {
     discoveredControls: input.discoveredControls,
     userActionableControls: input.userActionableControlCount,
     plannableControls: input.plannableFieldCount,
+    controls: input.controls,
     headingText: clip(input.formSignals.nearestHeadingText),
     headingSource: input.formSignals.headingSource || "none",
     submitControlText: clip(input.formSignals.submitButtonText),
@@ -1171,8 +1176,70 @@ function buildScoringEvidence(input: {
   };
 }
 
-function scorePlan(plan: PlannedField[]): number {
-  return plan.filter((p) => p.decision.kind !== "skip").length;
+/**
+ * Field actionability counted the way the fill will treat the form: a radio group is one control a
+ * user answers once and is completed by resolveConsentGroups, not by the per-field plan (which skips
+ * every optional radio), and a required field already carrying a real value counts as done, as it
+ * does for the readiness gate.
+ */
+function assessActionability(
+  raw: RawFieldDescriptor[],
+  plan: PlannedField[],
+  radioGroups: ConsentGroupDescriptor[],
+  language: SupportedLanguage,
+  journeyContext: FormJourneyContext,
+): { userActionableControlCount: number; plannableFieldCount: number; controls: FormControlScoringEvidence[] } {
+  const groupByFieldId = new Map<string, ConsentGroupDescriptor>();
+  radioGroups.forEach((group) => group.memberFieldIds.forEach((id) => groupByFieldId.set(id, group)));
+  const planById = new Map(plan.map((p) => [p.descriptor.id, p]));
+  const controls: FormControlScoringEvidence[] = [];
+  const seenGroups = new Set<string>();
+  for (const field of raw) {
+    const id = String(field.index);
+    const group = groupByFieldId.get(id);
+    if (group) {
+      if (seenGroups.has(group.groupId)) continue;
+      const memberFields = raw.filter((f) => groupByFieldId.get(String(f.index)) === group);
+      if (!group.actionable && !memberFields.some(isUserActionableControl)) continue;
+      seenGroups.add(group.groupId);
+      const resolution = consentGroupWillResolve(group, language, journeyContext);
+      controls.push({
+        unit: "radio_group",
+        fieldIds: memberFields.map((f) => String(f.index)),
+        tag: "input",
+        type: "radio",
+        label: "",
+        required: group.requiredEvidence !== "none",
+        requiredEvidence: group.requiredEvidence,
+        plannable: resolution.resolves,
+        handledBy: resolution.resolves ? "radio_group" : null,
+        action: resolution.purpose,
+        matchedField: null,
+        reason: resolution.resolves ? null : resolution.reason,
+      });
+      continue;
+    }
+    if (!isUserActionableControl(field)) continue;
+    const planned = planById.get(id);
+    const decision = planned?.decision;
+    const alreadyFilled = field.required && decision?.kind === "skip" && decision.reason === "prefilled" && (field.type !== "radio" || field.currentValue === "true");
+    const plannable = decision !== undefined && (decision.kind !== "skip" || alreadyFilled);
+    controls.push({
+      unit: "field",
+      fieldIds: [id],
+      tag: field.tagName,
+      type: field.type ?? null,
+      label: redactEchoedValues(field.label ?? "").slice(0, 120),
+      required: field.required,
+      requiredEvidence: field.requiredEvidence,
+      plannable,
+      handledBy: !plannable ? null : alreadyFilled ? "already_filled" : "fill_plan",
+      action: decision?.kind ?? "none",
+      matchedField: planned?.matchedField ?? null,
+      reason: plannable ? null : decision?.kind === "skip" ? decision.reason : "not in the fill plan",
+    });
+  }
+  return { userActionableControlCount: controls.length, plannableFieldCount: controls.filter((c) => c.plannable).length, controls };
 }
 
 // Keyed by page so the module-level fill/submit helpers reach the recorder of the action in progress.
@@ -1319,8 +1386,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     // address postcode and a dealer-locator postcode/city) sharing identical label vocabulary.
     const dealerSearchWidgetDetectedCandidate = descriptors.some((d) => Boolean(d.dealerLookupTriggerIndex));
     const plan = buildFillPlan(descriptors, { language, market, hasCountryCodeSelector: hasCountryCodeSelectorCandidate });
-    const plannableFieldCount = scorePlan(plan);
-    const userActionableControlCount = raw.filter(isUserActionableControl).length;
+    const { userActionableControlCount, plannableFieldCount, controls } = assessActionability(raw, plan, await discoverConsentGroups(candidate), language, journeyContext);
     const formSignals = await gatherFormSignals(candidate);
 
     const textSignals: FormTextSignals = {
@@ -1345,6 +1411,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       discoveredControls: descriptors.length,
       userActionableControlCount,
       plannableFieldCount,
+      controls,
     });
     scoringEvidenceByIndex.set(i, scoringEvidence);
     candidateEvidence.push({

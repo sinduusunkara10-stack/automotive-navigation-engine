@@ -191,6 +191,7 @@ export interface FormScoreBreakdown {
 
 /** Field actionability never dominates: a form with more fillable fields is not automatically the right form (the production bug this module fixes) -- journey relevance and visual prominence together carry 85% of the weight. */
 export const FORM_SCORE_WEIGHTS = { journey: 0.5, visibility: 0.35, fieldActionability: 0.15 } as const;
+const SCORE_ROUNDING = 1e9;
 
 export function computeFormScore(input: {
   journeyContext: FormJourneyContext;
@@ -202,10 +203,11 @@ export function computeFormScore(input: {
   const journeyRelevanceScore = scoreJourneyRelevance(input.journeyContext, input.textSignals);
   const visibilityProminenceScore = scoreVisibilityProminence(input.visibilitySignals);
   const fieldActionabilityScore = scoreFieldActionability(input.userActionableControlCount, input.plannableFieldCount);
-  const totalFormScore = Math.min(
-    1,
-    FORM_SCORE_WEIGHTS.journey * journeyRelevanceScore + FORM_SCORE_WEIGHTS.visibility * visibilityProminenceScore + FORM_SCORE_WEIGHTS.fieldActionability * fieldActionabilityScore,
-  );
+  const weightedSum =
+    FORM_SCORE_WEIGHTS.journey * journeyRelevanceScore + FORM_SCORE_WEIGHTS.visibility * visibilityProminenceScore + FORM_SCORE_WEIGHTS.fieldActionability * fieldActionabilityScore;
+  // Binary floating point makes an exact threshold score land just under it (0.35 + 0.15 * 1/3 is
+  // 0.39999999999999997), so the sum is rounded well below any meaningful score difference first.
+  const totalFormScore = Math.min(1, Math.round(weightedSum * SCORE_ROUNDING) / SCORE_ROUNDING);
   return { journeyRelevanceScore, visibilityProminenceScore, fieldActionabilityScore, totalFormScore };
 }
 
