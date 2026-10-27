@@ -41,10 +41,14 @@ const NEGATIVE_PURPOSE_KEYWORDS: Record<SupportedLanguage, string[]> = {
   pt: ["newsletter", "inscreva-se", "pesquisar", "iniciar sessao"],
 };
 
-function matchesAny(normalizedText: string, keywordsByLanguage: Record<SupportedLanguage, string[]>): boolean {
-  return (Object.keys(keywordsByLanguage) as SupportedLanguage[]).some((language) =>
-    keywordsByLanguage[language].some((keyword) => normalizedText.includes(normalize(keyword))),
+function matchedKeywords(normalizedText: string, keywordsByLanguage: Record<SupportedLanguage, string[]>): string[] {
+  const matches = new Set<string>();
+  (Object.keys(keywordsByLanguage) as SupportedLanguage[]).forEach((language) =>
+    keywordsByLanguage[language].forEach((keyword) => {
+      if (normalizedText.includes(normalize(keyword))) matches.add(keyword);
+    }),
   );
+  return [...matches];
 }
 
 /** What a form's journey relevance is actually compared against -- never a URL pattern or brand name, only the objective/milestone wording the task itself supplied, plus (when available) the accessible name of the CTA that led here. */
@@ -101,17 +105,36 @@ function localFormText(signals: FormTextSignals): string {
  * bonus even when the task's own wording doesn't happen to share vocabulary with the page.
  */
 export function scoreJourneyRelevance(context: FormJourneyContext, signals: FormTextSignals): number {
+  return explainJourneyRelevance(context, signals).score;
+}
+
+/** Every input and intermediate value scoreJourneyRelevance decides from, for diagnostics. */
+export interface JourneyRelevanceExplanation {
+  score: number;
+  anchors: { text: string; coverage: number }[];
+  anchorScore: number;
+  /** Positive purpose vocabulary found in the form's own local text. */
+  positiveMatches: string[];
+  /** Negative purpose vocabulary found in the form's own local text; any match vetoes the score to 0. */
+  negativeMatches: string[];
+  vetoed: boolean;
+  purposeBonus: number;
+}
+
+export function explainJourneyRelevance(context: FormJourneyContext, signals: FormTextSignals): JourneyRelevanceExplanation {
   const text = combinedFormText(signals);
   const normalizedLocalText = normalize(localFormText(signals));
-  if (matchesAny(normalizedLocalText, NEGATIVE_PURPOSE_KEYWORDS)) {
-    return 0;
+  const negativeMatches = matchedKeywords(normalizedLocalText, NEGATIVE_PURPOSE_KEYWORDS);
+  const positiveMatches = matchedKeywords(normalizedLocalText, POSITIVE_PURPOSE_KEYWORDS);
+  const anchors = [context.objective, ...(context.activeMilestoneTexts ?? []), context.previousActionLabel]
+    .filter((anchor): anchor is string => Boolean(anchor && anchor.trim().length > 0))
+    .map((anchor) => ({ text: anchor, coverage: objectiveTokenCoverage(anchor, text) }));
+  if (negativeMatches.length > 0) {
+    return { score: 0, anchors, anchorScore: 0, positiveMatches, negativeMatches, vetoed: true, purposeBonus: 0 };
   }
-  const anchors = [context.objective, ...(context.activeMilestoneTexts ?? []), context.previousActionLabel].filter(
-    (anchor): anchor is string => Boolean(anchor && anchor.trim().length > 0),
-  );
-  const anchorScore = anchors.length === 0 ? 0 : Math.max(...anchors.map((anchor) => objectiveTokenCoverage(anchor, text)));
-  const purposeBonus = matchesAny(normalizedLocalText, POSITIVE_PURPOSE_KEYWORDS) ? 0.3 : 0;
-  return Math.min(1, anchorScore + purposeBonus);
+  const anchorScore = anchors.length === 0 ? 0 : Math.max(...anchors.map((anchor) => anchor.coverage));
+  const purposeBonus = positiveMatches.length > 0 ? 0.3 : 0;
+  return { score: Math.min(1, anchorScore + purposeBonus), anchors, anchorScore, positiveMatches, negativeMatches, vetoed: false, purposeBonus };
 }
 
 /** Visual prominence evidence for a single candidate form, read directly off the live page. */
@@ -146,12 +169,17 @@ export function scoreVisibilityProminence(signals: FormVisibilityProminenceSigna
   return Math.max(0, Math.min(1, score));
 }
 
-/** Field actionability is supporting evidence only (see WEIGHTS below) -- how much of what the form offers the deterministic fill plan can actually act on. */
-export function scoreFieldActionability(fieldsDiscovered: number, actionableFieldCount: number): number {
-  if (fieldsDiscovered === 0) {
+/**
+ * Field actionability is supporting evidence only (see FORM_SCORE_WEIGHTS below) -- how much of what the form
+ * offers a user the deterministic fill plan can actually act on. The denominator is the controls a
+ * user could operate (rendered, enabled, not type=hidden), never every discovered control: form apps
+ * carry many hidden backing inputs and disabled conditional sections that no user ever fills.
+ */
+export function scoreFieldActionability(userActionableControlCount: number, plannableFieldCount: number): number {
+  if (userActionableControlCount === 0) {
     return 0;
   }
-  return Math.min(1, actionableFieldCount / fieldsDiscovered);
+  return Math.min(1, plannableFieldCount / userActionableControlCount);
 }
 
 export interface FormScoreBreakdown {
@@ -162,21 +190,21 @@ export interface FormScoreBreakdown {
 }
 
 /** Field actionability never dominates: a form with more fillable fields is not automatically the right form (the production bug this module fixes) -- journey relevance and visual prominence together carry 85% of the weight. */
-const WEIGHTS = { journey: 0.5, visibility: 0.35, fieldActionability: 0.15 } as const;
+export const FORM_SCORE_WEIGHTS = { journey: 0.5, visibility: 0.35, fieldActionability: 0.15 } as const;
 
 export function computeFormScore(input: {
   journeyContext: FormJourneyContext;
   textSignals: FormTextSignals;
   visibilitySignals: FormVisibilityProminenceSignals;
-  fieldsDiscovered: number;
-  actionableFieldCount: number;
+  userActionableControlCount: number;
+  plannableFieldCount: number;
 }): FormScoreBreakdown {
   const journeyRelevanceScore = scoreJourneyRelevance(input.journeyContext, input.textSignals);
   const visibilityProminenceScore = scoreVisibilityProminence(input.visibilitySignals);
-  const fieldActionabilityScore = scoreFieldActionability(input.fieldsDiscovered, input.actionableFieldCount);
+  const fieldActionabilityScore = scoreFieldActionability(input.userActionableControlCount, input.plannableFieldCount);
   const totalFormScore = Math.min(
     1,
-    WEIGHTS.journey * journeyRelevanceScore + WEIGHTS.visibility * visibilityProminenceScore + WEIGHTS.fieldActionability * fieldActionabilityScore,
+    FORM_SCORE_WEIGHTS.journey * journeyRelevanceScore + FORM_SCORE_WEIGHTS.visibility * visibilityProminenceScore + FORM_SCORE_WEIGHTS.fieldActionability * fieldActionabilityScore,
   );
   return { journeyRelevanceScore, visibilityProminenceScore, fieldActionabilityScore, totalFormScore };
 }

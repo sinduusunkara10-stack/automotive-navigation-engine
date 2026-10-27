@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai | Example Motors</title>
+  </head>
+  <body>
+    <header>
+      <nav><a href="#models">Modèles</a> <a href="#offers">Offres</a></nav>
+    </header>
+    <main>
+      <section id="page-section">
+        <h1 id="page-heading">Demandez un essai</h1>
+        <div class="app-wrap"><lead-scoring-app></lead-scoring-app></div>
+      </section>
+    </main>
+    <script>
+      // A generic lead form whose scoring inputs are chosen by query string, rendered either in the
+      // light DOM (dom=light) or inside one open shadow root (the default), for like-for-like
+      // form-selection scoring comparisons:
+      //   hidden=N      N hidden backing inputs (infrastructure values a form app carries)
+      //   inactive=N    N disabled controls inside a collapsed (display:none) section
+      //   search=1      a dealer-search submit-type button placed before the final Submit
+      //   heading=page  the purpose heading sits outside the form app (default)
+      //   heading=none  no purpose heading anywhere; heading=form puts it inside the form
+      //   kind=newsletter  an e-mail-only newsletter sign-up instead of the lead form
+      //   title=plain   a page title with no purpose wording
+      //   place=footer  the form app sits inside the page footer
+      const params = new URLSearchParams(location.search);
+      if (params.get("place") === "footer") document.body.appendChild(document.createElement("footer")).appendChild(document.querySelector(".app-wrap"));
+      const heading = params.get("heading") || "page";
+      if (heading !== "page") document.getElementById("page-heading").remove();
+      if (params.get("title") === "plain") document.title = "Example Motors";
+      window.__leadPosts = [];
+      window.__searches = 0;
+
+      const hiddenInputs = Array.from({ length: Number(params.get("hidden") || 0) }, (_, i) => `<input type="hidden" name="backing${i}" value="v${i}" />`).join("");
+      const inactive = Array.from({ length: Number(params.get("inactive") || 0) }, (_, i) => `<label for="co-${i}">Entreprise ${i}*</label><input id="co-${i}" name="company${i}" disabled />`).join("");
+      const search = params.get("search") === "1"
+        ? `<fieldset id="dealer-box"><legend>Votre point de vente</legend>
+             <label for="dealer-city">Ville ou code postal</label><input id="dealer-city" name="dealerCity" />
+             <button type="submit" id="dealer-search" name="dealerSearch">Recherchez</button>
+             <div id="dealer-results"></div>
+           </fieldset>`
+        : "";
+      const ownHeading = heading === "form" ? "<h2>Demandez un essai</h2>" : "";
+
+      const LEAD = `
+        <form id="lead" novalidate>
+          ${ownHeading}
+          ${hiddenInputs}
+          <div><label for="first-name">Prénom*</label><input id="first-name" name="firstName" required /></div>
+          <div><label for="last-name">Nom*</label><input id="last-name" name="lastName" required /></div>
+          <div><label for="email">E-mail*</label><input id="email" name="email" type="email" required /></div>
+          <div><label for="phone">Téléphone*</label><input id="phone" name="phone" type="tel" required /></div>
+          <div style="display:none">${inactive}</div>
+          ${search}
+          <div><input type="checkbox" id="privacy" name="privacy" required /><label for="privacy">J'accepte la politique de confidentialité*</label></div>
+          <p role="alert" id="form-error"></p>
+          <button type="submit" id="send">VALIDEZ VOTRE DEMANDE</button>
+        </form>
+        <p role="status" id="done"></p>`;
+      const NEWSLETTER = `
+        <form id="news" novalidate>
+          <h2>Newsletter</h2>
+          <div><label for="nl-email">E-mail*</label><input id="nl-email" name="email" type="email" required /></div>
+          <button type="submit">S'abonner</button>
+        </form>
+        <p role="status" id="done"></p>`;
+
+      customElements.define(
+        "lead-scoring-app",
+        class extends HTMLElement {
+          connectedCallback() {
+            const root = params.get("dom") === "light" ? this : this.attachShadow({ mode: "open" });
+            root.innerHTML = params.get("kind") === "newsletter" ? NEWSLETTER : LEAD;
+            const form = root.querySelector("form");
+            const $ = (id) => root.querySelector("#" + id);
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              if (event.submitter && event.submitter.id === "dealer-search") {
+                window.__searches += 1;
+                $("dealer-results").textContent = "Aucun point de vente trouvé";
+                return;
+              }
+              const missing = Array.from(form.querySelectorAll("[required]")).filter((el) => (el.type === "checkbox" ? !el.checked : !el.value));
+              if (missing.length > 0) {
+                $("form-error").textContent = "Veuillez compléter les champs obligatoires";
+                missing.forEach((el) => el.setAttribute("aria-invalid", "true"));
+                return;
+              }
+              const body = Object.fromEntries(new FormData(form).entries());
+              window.__leadPosts.push(body);
+              const response = await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+              if (response.ok) {
+                form.remove();
+                $("done").textContent = "Merci, votre demande a bien été envoyée.";
+              }
+            });
+          }
+        },
+      );
+    </script>
+  </body>
+</html>

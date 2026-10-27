@@ -4347,3 +4347,44 @@ Not covered: closed shadow roots (unreachable by design), forms split across sev
 (form-associated controls cannot cross a shadow boundary), `activeDialog`, headings and other
 observation text inside shadow roots, and the semantic page match used for run success criteria,
 which still read the light DOM only.
+
+### Lead-form filling: form-selection scoring parity (no contract change beyond an additive diagnostic; request 1.51.0 and response 1.53.0)
+
+A live run had an open-shadow lead form, reached directly by URL, rejected at 0.36 < 0.4 before
+anything was filled. Earlier light-DOM runs that passed had been reached by clicking a CTA. The
+CTA's label is a journey anchor (`previousActionLabel`), and its tokens matched the page, so it
+supplied their journey relevance. English step instructions alone share no tokens with a
+non-English page, so a direct-start form depends on the form's own purpose vocabulary.
+
+A fixture rendered in both DOMs (`tests/fixtures/form-scoring-parity.html`) showed four generic
+defects. Each was fixed where it occurred:
+
+- **Ancestry stopped at the shadow root.** The heading walk and the header/footer chrome check
+  used `parentElement`/`closest`, so a form inside a web component lost the page heading around
+  it. With the purpose heading outside the app, the light DOM scored journey 0.30 and the open
+  shadow root scored 0. Ancestry now continues from a shadow root to its host, searching the root
+  on the way.
+- **Actionability counted every control.** The denominator included hidden backing inputs and
+  disabled conditional sections; the live form had 58 hidden inputs among 79 controls. It now
+  counts only user-actionable controls: rendered (or a required select operated through its
+  stand-in), enabled, and not `type=hidden`.
+- **The first rendered submit-type control was taken as the form's Submit.** An in-form dealer
+  search button ("Recherchez") placed before the real Submit therefore did two things: its text
+  matched the negative purpose vocabulary ("recherche") and vetoed relevance to 0, and it was the
+  control clicked to submit. The form's submission control is now the rendered submit-type
+  control with no operable field after it, or the last rendered one when every candidate has a
+  field after it. Scoring and the Submit click share this choice.
+- **No evidence of scoring inputs.** `formDiscoveryDebug.candidates[].scoringEvidence` (under
+  `FORM_DISCOVERY_DIAGNOSTIC=1`) now records:
+  - control counts (discovered, user-actionable, plannable);
+  - the heading and its source, the submission control and its source, and any skipped
+    submit-type controls;
+  - the page title;
+  - each journey anchor with its token coverage;
+  - positive and negative purpose matches, the veto and the bonus;
+  - the visibility inputs and the weights.
+
+The threshold, the weights, the purpose vocabulary and the local-only negative veto are
+unchanged. A newsletter form is still vetoed, and still loses to a lead form on the same page.
+`tests/integration/formScoringParity.test.ts` covers each case in both DOMs, plus direct-start and
+CTA-navigated end-to-end runs.
