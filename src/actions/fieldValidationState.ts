@@ -1,4 +1,5 @@
 import type { Locator } from "playwright";
+import { DEEP_QUERY_ALL_SOURCE, TREE_ELEMENT_BY_ID_SOURCE } from "../observation/openShadowDom.js";
 import { callInPageFunction } from "../forms/inPageFunction.js";
 import type { ControlStateSnapshot } from "./formStateSnapshot.js";
 
@@ -211,7 +212,7 @@ export const FIELD_VALIDATION_STATE_SOURCE = `(formEl, arg) => {
     let errorIcon = iconOf(el);
     let message = "";
     const flaggedHost = stateTokens.some((t) => t.category === "error") || el.getAttribute("aria-invalid") === "true";
-    const describedBy = (el.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).map((id) => document.getElementById(id)).filter(Boolean);
+    const describedBy = (el.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).map((id) => (${TREE_ELEMENT_BY_ID_SOURCE})(el, id)).filter(Boolean);
     const scope = [host, ...Array.from(host.querySelectorAll("*")), ...describedBy];
     for (const n of scope) {
       if (n === el || labels.has(n) || n.matches("input, select, textarea, option, label")) continue;
@@ -273,7 +274,7 @@ export const FIELD_VALIDATION_STATE_SOURCE = `(formEl, arg) => {
   if (/(^|\\s)ng-(valid|invalid|pristine|dirty|touched|untouched)(\\s|$)/.test(formEl.className || "")) libs.push("angular_forms");
   if (typeof formEl.onsubmit === "function") libs.push("inline_onsubmit_handler");
 
-  const submitEl = document.querySelector("[data-nav-engine-probe-submit]");
+  const submitEl = (${DEEP_QUERY_ALL_SOURCE})(document, "[data-nav-engine-probe-submit]")[0] || null;
   let jqueryHandlers = null;
   let jqueryValidator = null;
   if (jq) {

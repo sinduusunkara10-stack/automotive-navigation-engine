@@ -1,4 +1,5 @@
 import type { ElementHandle, Frame, Locator } from "playwright";
+import { DEEP_QUERY_ALL_SOURCE, OPEN_SHADOW_ROOTS_SOURCE, TREE_ELEMENT_BY_ID_SOURCE } from "../observation/openShadowDom.js";
 
 /**
  * In-page instrumentation for one dealer-lookup resolution, installed into the form's own frame.
@@ -26,7 +27,10 @@ import type { ElementHandle, Frame, Locator } from "playwright";
  */
 const DEALER_PROBE_SOURCE = String.raw`(() => {
   const w = window;
-  if (w.__navEngineDealerProbe && w.__navEngineDealerProbe.version === 2) return true;
+  if (w.__navEngineDealerProbe && w.__navEngineDealerProbe.version === 3) return true;
+  const openShadowRoots = ${OPEN_SHADOW_ROOTS_SOURCE};
+  const deepAll = ${DEEP_QUERY_ALL_SOURCE};
+  const byIdIn = ${TREE_ELEMENT_BY_ID_SOURCE};
   const ITEM_SELECTOR = 'li, a, button, [role="option"], [role="radio"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [onclick], [tabindex], [data-value]';
   const AUTH_SELECTOR = '[role="radio"], input[type="radio"], [role="option"]';
   const ACTIVATED_ATTR = 'data-nav-engine-dealer-already-activated';
@@ -84,7 +88,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
   }
 
   const probe = {
-    version: 2,
+    version: 3,
     seq: 0,
     hiddenSeq: 0,
     mutationCount: 0,
@@ -94,6 +98,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
     blockedSubmitClicks: 0,
     observer: null,
     form: null,
+    formRoot: null,
     allowed: null,
     onSubmit: null,
     onClick: null,
@@ -112,18 +117,34 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       this.blockedSubmitEvents = 0;
       this.blockedSubmitClicks = 0;
       const self = this;
+      const OBSERVE = { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'aria-expanded', 'open'] };
+      // A document-level observer never sees mutations inside a shadow root, so every open root
+      // present now, and any one added during the lookup, is observed too.
+      const observedRoots = new WeakSet();
+      const observeShadowRootsUnder = function (node) {
+        openShadowRoots(node).forEach(function (r) {
+          if (observedRoots.has(r)) return;
+          observedRoots.add(r);
+          self.observer.observe(r, OBSERVE);
+        });
+      };
       this.observer = new MutationObserver(function (list) {
         for (const m of list) {
           self.mutationCount += 1;
           self.seq += 1;
           if (m.type === 'childList') {
-            m.addedNodes.forEach(function (n) { if (n.nodeType === 1) self.push(n, true); });
+            m.addedNodes.forEach(function (n) {
+              if (n.nodeType !== 1) return;
+              self.push(n, true);
+              observeShadowRootsUnder(n);
+            });
           } else if (m.target && m.target.nodeType === 1) {
             self.push(m.target, false);
           }
         }
       });
-      this.observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['style', 'class', 'hidden', 'aria-hidden', 'aria-expanded', 'open'] });
+      this.observer.observe(document.documentElement, OBSERVE);
+      observeShadowRootsUnder(document);
       if (navigator.geolocation && !this.geoOriginal) {
         const g = navigator.geolocation;
         this.geoOriginal = { get: g.getCurrentPosition, watch: g.watchPosition };
@@ -140,7 +161,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
         }
       };
       this.onClick = function (e) {
-        const t = e.target;
+        const t = e.composedPath ? e.composedPath()[0] : e.target;
         if (!(t instanceof Element)) return;
         const ctl = t.closest('button, input[type="submit"], input[type="image"]');
         if (!ctl || ctl.form !== self.form) return;
@@ -152,12 +173,18 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       };
       window.addEventListener('submit', this.onSubmit, true);
       window.addEventListener('click', this.onClick, true);
+      // submit is not composed: a form inside a shadow root only dispatches it within that root.
+      const formRoot = form && form.getRootNode ? form.getRootNode() : document;
+      this.formRoot = formRoot !== document ? formRoot : null;
+      if (this.formRoot) this.formRoot.addEventListener('submit', this.onSubmit, true);
       return true;
     },
     stop() {
       if (this.observer) this.observer.disconnect();
       this.observer = null;
       if (this.onSubmit) window.removeEventListener('submit', this.onSubmit, true);
+      if (this.onSubmit && this.formRoot) this.formRoot.removeEventListener('submit', this.onSubmit, true);
+      this.formRoot = null;
       if (this.onClick) window.removeEventListener('click', this.onClick, true);
       this.onSubmit = null;
       this.onClick = null;
@@ -176,7 +203,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       return true;
     },
     markStage() {
-      document.querySelectorAll(ITEM_SELECTOR).forEach(function (el) {
+      deepAll(document, ITEM_SELECTOR).forEach(function (el) {
         if (isVisible(el)) el.setAttribute(BASE_ATTR, '1');
       });
       return this.seq;
@@ -198,7 +225,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       const expandedAttr = combo.getAttribute('aria-expanded') || field.getAttribute('aria-expanded');
       const adId = field.getAttribute('aria-activedescendant') || combo.getAttribute('aria-activedescendant');
       const value = String(field.value || '');
-      const surfaces = Array.from(document.querySelectorAll('[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"]')).filter(isVisible);
+      const surfaces = deepAll(document, '[role="alert"], [role="status"], [aria-live="assertive"], [aria-live="polite"]').filter(isVisible);
       let surfaceTextLength = 0;
       let noResults = false;
       surfaces.forEach(function (s) {
@@ -212,9 +239,9 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       return {
         fieldValueRetained: typed === null ? null : norm(value).replace(/\s+/g, '') === norm(typed).replace(/\s+/g, ''),
         fieldNonEmpty: value.trim().length > 0,
-        focusInField: document.activeElement === field,
+        focusInField: (field.getRootNode().activeElement || document.activeElement) === field,
         fieldAriaExpanded: expandedAttr === null ? null : expandedAttr === 'true',
-        fieldActiveDescendantPresent: Boolean(adId && document.getElementById(adId)),
+        fieldActiveDescendantPresent: Boolean(adId && byIdIn(field, adId)),
         scopeTextLength: scopeText.length,
         surfaceCount: surfaces.length,
         surfaceTextLength: surfaceTextLength,
@@ -235,12 +262,12 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       [field, combo].forEach(function (el) {
         ['aria-controls', 'aria-owns'].forEach(function (attr) {
           String(el.getAttribute(attr) || '').split(/\s+/).filter(Boolean).forEach(function (id) {
-            const target = document.getElementById(id);
+            const target = byIdIn(el, id);
             if (target) linkedRoots.push(target);
           });
         });
         const adId = el.getAttribute('aria-activedescendant');
-        const active = adId ? document.getElementById(adId) : null;
+        const active = adId ? byIdIn(el, adId) : null;
         if (active) linkedRoots.push(active.closest('[role="listbox"]') || active.parentElement || active);
       });
       const roots = [];

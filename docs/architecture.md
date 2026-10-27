@@ -135,27 +135,18 @@ evidence than the reasoning layer's own observation.
 
 One level of generic, same-origin child-frame scanning is now in scope (see "Frame-aware
 observation" below) — a real production run showed a blocker's live control living inside an
-`<iframe>`. Shadow DOM *traversal* remains out of scope: `document.querySelectorAll` cannot see
-into any shadow root, open or closed, and nothing in this repo's fixtures, examples, or
-confirmed production behaviour has yet *proven* a target site's configurator/lead-form controls
-live inside one, so adding that traversal now would still be speculative complexity without
-confirmed evidence backing it. Nested iframes (a frame within a frame) are likewise still out of
-scope for the same reason.
+`<iframe>`. Nested iframes (a frame within a frame) are still out of scope.
 
-What **is** now in scope, precisely to let a future investigation supply that missing evidence
-rather than guess at it: `Observation.elementDiscoveryDiagnostics` (response `schemaVersion`
-`"1.6.0"`, `src/observation/observationBuilder.ts`) — bounded, generic counts about the
-interactive-element scan itself (raw candidate count before filtering, button-like/link-like/
-other-role counts, per-reason excluded counts, and `shadowHostCount`, the number of elements in
-the document with a non-null *open* shadow root). A production run reporting zero interactive
-elements while a manual inspection of the same URL immediately afterwards showed a visible,
-clickable control is the exact symptom a shadow-DOM-encapsulated control would produce
-(`rawElementCount: 0` alongside `shadowHostCount > 0`) — `tests/unit/
-elementDiscoveryDiagnostics.test.ts` proves this mechanism in a controlled fixture. `shadowHostCount`
-only ever detects an *open* shadow root; a closed one is fundamentally undetectable from outside
-the component that created it, so `shadowHostCount: 0` does not itself rule out closed-shadow-DOM
-containment. If a future run's own `elementDiscoveryDiagnostics` confirms `shadowHostCount > 0`
-against `rawElementCount: 0`, that is the concrete evidence to revisit full shadow-DOM traversal.
+Open shadow DOM is scanned too (see "Lead-form filling: open shadow DOM" below): live lead-form
+runs showed the whole form, Submit included, rendered inside one open shadow root, with an almost
+empty light DOM. The scan walks every open shadow root (bounded by `MAX_OPEN_SHADOW_ROOTS` in
+`src/observation/openShadowDom.ts`) with the same `INTERACTIVE_SELECTOR`, and hit-tests each
+element in its own tree, since the document retargets a hit inside a shadow root to its host.
+`Observation.elementDiscoveryDiagnostics` (response `schemaVersion` `"1.6.0"`) keeps its meaning:
+`rawElementCount` now includes open-shadow controls, and `shadowHostCount` is still the number of
+elements in the document with a non-null *open* shadow root. A closed shadow root cannot be
+reached from outside the component that created it and stays out of scope, so a page whose
+controls live only in closed roots still scans as `rawElementCount: 0`.
 
 Element `id`s are assigned once via a `data-nav-engine-id` DOM attribute the first time an
 element is scanned, and reused on every later scan of the same node -- so an id stays stable
@@ -264,10 +255,9 @@ instead: it contributes no candidates, is reported only as an origin on
 `Observation.inaccessibleFrameOrigins` (bounded, capped small), and a click that later targets it
 (a frame-scoped id whose frame no longer resolves) is classified `frame_unavailable` -- the same
 staleTarget-recoverable category as any other race. This stays deliberately shallow (one level,
-not recursive into nested frames, and no shadow-DOM traversal) -- see the "Observation evidence"
-note above on why iframe/shadow-DOM support otherwise stays out of scope until a concrete site
-shows it's needed; a real production run has now shown exactly that need for one level of
-same-origin iframe support.
+not recursive into nested frames) -- see the "Observation evidence" note above; a real production
+run showed the need for one level of same-origin iframe support. Open shadow roots inside each
+scanned document are walked (see "Lead-form filling: open shadow DOM").
 
 ### Diagnostics for blocker recovery
 
@@ -4298,3 +4288,62 @@ It then classifies the page. The probe runs:
 
 With `FORM_VISUAL_EVIDENCE=1`, `no_form_found` also adds the `form_not_found` and
 `form_not_found_after_late_watch` screenshots.
+
+### Lead-form filling: open shadow DOM (no contract change; request 1.51.0 and response 1.53.0 unchanged)
+
+Live runs showed lead forms rendered by a web component: one open shadow root held the whole
+form, Submit included, and the light DOM held only page chrome. Playwright CSS locators (the
+`<form>` discovery, the `data-nav-engine-*` marks, `fill`, `check`, `selectOption`, `click`) already
+pierce open shadow roots, so those were left unchanged. Page-side code that used
+`document.querySelector*`, `document.getElementById`, `document.elementFromPoint`,
+`document.activeElement`, `document.body.innerText`, a document-level `MutationObserver` or a
+window-level listener for `submit` did not. The observation, CAPTCHA, confirmation-text,
+consent hit-test, post-submit observer, cancellation probe and dealer probe changes were each found
+failing on a shadow-root copy of an existing fixture before they were changed; the remaining
+diagnostic look-ups were moved to the same helpers so their evidence covers the same elements.
+
+`src/observation/openShadowDom.ts` holds the shared in-page helpers (string source, bounded by
+`MAX_OPEN_SHADOW_ROOTS`): open roots under a scope, a query across them, an id lookup that resolves
+in the referencing node's own tree first, and rendered text including open roots. What now reaches
+into open shadow roots:
+
+- observation: the interactive-element scan, element revalidation before a click, and the click
+  side-effect snapshot. Hit-testing for `covered` uses the element's own tree, because the
+  document retargets a hit inside a shadow root to its host.
+- `fill_form`: CAPTCHA detection, confirmation-text success detection, the post-submit observer
+  (its region and mutation observer include the form's shadow root), checkbox label clean-up,
+  consent-group hit-testing and `aria-labelledby` text, custom-select option discovery,
+  location-gate discovery, field validation and form-state `aria-describedby` lookups.
+- dealer lookup: the in-page probe observes every open root for result mutations, blocks an
+  implicit submit dispatched inside the form's shadow root (`submit` is not composed and never
+  reaches `window` from there), reads the click's real target through `composedPath()`, and
+  resolves `aria-controls`/`aria-activedescendant` in the field's own tree.
+- Submit diagnostics: the cancellation probe also listens on the form's shadow root for `submit`,
+  `invalid`, `reset` and `formdata`, and the listener inventory adds that root as a target.
+- diagnostics: the form debug capture indexes forms through the same piercing locator as discovery,
+  and the dealer trace finds its tagged elements in open roots.
+
+One generic resolution fix came out of the same fixture: a results container (for example
+`role="radiogroup"`) can become a new visible candidate in the same poll in which its ARIA results
+are inserted. The container is no longer selected; the result inside it is.
+
+A second generic race, also present in light DOM, made about one run in fifteen take over three
+minutes: when a site removes the form and then renders its confirmation, the post-submit observer's
+last form snapshot can come from just before the removal, so the form was reported as still present
+and six post-submit reads each waited out Playwright's 30 s default on the removed form. A
+`succeeded` attempt whose form no longer resolves now skips those reads, as one reported gone already
+did.
+
+Tests: `tests/integration/shadowDomLeadForm.test.ts` runs a generic shadow-root lead form
+(`tests/fixtures/shadow-dom-lead-form.html`, also renderable in light DOM with `dom=light`) through
+observation, the reasoning layer choosing `fill_form` via `runTask`, discovery, filling, dealer
+lookup, consent, Submit and success, plus a site-validator rejection and a CAPTCHA.
+`tests/integration/shadowDomFixtureParity.test.ts` re-serves existing light-DOM fixtures inside an
+open shadow root (`tests/helpers/openShadowFixture.ts`, test-only) and requires the same
+`fill_form` outcome. Setting `FIXTURE_DOM_MODE=open-shadow` serves every transformable lead-form
+fixture that way for any test file.
+
+Not covered: closed shadow roots (unreachable by design), forms split across several shadow roots
+(form-associated controls cannot cross a shadow boundary), `activeDialog`, headings and other
+observation text inside shadow roots, and the semantic page match used for run success criteria,
+which still read the light DOM only.

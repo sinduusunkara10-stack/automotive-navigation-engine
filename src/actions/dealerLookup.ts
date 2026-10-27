@@ -670,6 +670,14 @@ async function findResultOnce(ctx: DiscoveryContext): Promise<FoundResult | null
   }
   const candidate = await firstNewCandidate(ctx.scope);
   if (candidate) {
+    // A results container (e.g. role="radiogroup") becomes a new visible candidate at the same
+    // moment its ARIA/native results are inserted; when the authoritative check above ran just
+    // before that insertion, the result inside it is still what gets selected, never the container.
+    const nested = candidate.locator.locator(`:is(${DEALER_RESULT_SELECTOR}):not([${DEALER_ALREADY_ACTIVATED_ATTR}])`).first();
+    if (await nested.isVisible().catch(() => false)) {
+      const nestedHandle = await freeze(nested);
+      if (nestedHandle) return { handle: nestedHandle, authoritative: true, foundOutsideScope: false, foundInFrame: false, wasPreExistingHiddenElement: false };
+    }
     const handle = await freeze(candidate.locator);
     // An ARIA/native result inserted between the authoritative check above and this one must still
     // be reported as authoritative -- otherwise the outcome depends on poll timing.

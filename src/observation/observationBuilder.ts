@@ -1,4 +1,5 @@
 import type { Page } from "playwright";
+import { MAX_OPEN_SHADOW_ROOTS } from "./openShadowDom.js";
 import type { ElementDiscoveryDiagnostics, InteractiveElement, Observation } from "../types/task-response.js";
 import {
   frameScopedElementId,
@@ -99,22 +100,23 @@ interface FrameScanResult {
  * ElementDiscoveryDiagnostics/Observation.elementDiscoveryDiagnostics in
  * types/task-response.ts) -- computed from the same single pass over `elements`, never a
  * second DOM query, so this is not a meaningfully more expensive scan than before.
- * `document.querySelectorAll` (both here and for shadowHostCount below) only ever searches
- * light-DOM descendants of the document it's called against -- it cannot see into any
- * shadow root, open or closed, which is exactly the gap shadowHostCount exists to surface:
- * a page whose actual controls live inside a shadow-DOM-encapsulated component will scan
- * as rawElementCount: 0 here while shadowHostCount is greater than 0.
+ * Controls inside open shadow roots are scanned like light-DOM ones. A closed shadow root
+ * cannot be reached from outside the component that created it, so a page whose controls live
+ * only in closed roots still scans as rawElementCount: 0; shadowHostCount counts the open
+ * roots found.
  */
 function scanInteractiveElements({
   attr,
   selector,
   headingSelector,
   maxHeadingAncestorHops,
+  maxOpenShadowRoots,
 }: {
   attr: string;
   selector: string;
   headingSelector: string;
   maxHeadingAncestorHops: number;
+  maxOpenShadowRoots: number;
 }): FrameScanResult {
   // Bounded, generic ancestor walk: finds the nearest enclosing container that itself
   // contains a heading (h1-h4), and returns that heading's own text -- a cheap,
@@ -126,7 +128,23 @@ function scanInteractiveElements({
   // first ancestor level with a match (the *closest* enclosing heading), and gives up after
   // maxHeadingAncestorHops levels so an element with no nearby heading never triggers an
   // unbounded walk up a large page.
+  // Open shadow roots are walked too (bounded): a web-component form app renders its whole form,
+  // Submit included, inside one, and the click/fill locators acting on these ids already pierce
+  // open roots. Inlined rather than shared (see openShadowDom.ts) for the __name reason below.
   const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
+  const openShadowRoots: ShadowRoot[] = [];
+  const pendingShadowRoots = Array.from(document.querySelectorAll<HTMLElement>("*"))
+    .map((n) => n.shadowRoot)
+    .filter((r): r is ShadowRoot => r !== null);
+  const shadowHostCount = pendingShadowRoots.length;
+  while (pendingShadowRoots.length > 0 && openShadowRoots.length < maxOpenShadowRoots) {
+    const root = pendingShadowRoots.shift()!;
+    openShadowRoots.push(root);
+    elements.push(...Array.from(root.querySelectorAll<HTMLElement>(selector)));
+    for (const n of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+      if (n.shadowRoot) pendingShadowRoots.push(n.shadowRoot);
+    }
+  }
   let buttonLikeCount = 0;
   let linkLikeCount = 0;
   let otherRoleCount = 0;
@@ -191,7 +209,10 @@ function scanInteractiveElements({
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
       if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
-        const topEl = document.elementFromPoint(cx, cy);
+        // The element's own tree answers the hit-test: the document would retarget any hit inside
+        // a shadow root to its host, which never "contains" the shadow element.
+        const hitRoot = el.getRootNode() as Document | ShadowRoot;
+        const topEl = typeof hitRoot.elementFromPoint === "function" ? hitRoot.elementFromPoint(cx, cy) : document.elementFromPoint(cx, cy);
         covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
       }
     }
@@ -247,9 +268,6 @@ function scanInteractiveElements({
   // outside the component that created it; the DOM API gives no way to ask. See the
   // Observation.elementDiscoveryDiagnostics doc comment for what this does and doesn't tell
   // a caller.
-  const shadowHostCount = Array.from(document.querySelectorAll<HTMLElement>("*")).filter(
-    (el) => el.shadowRoot !== null,
-  ).length;
 
   return {
     elements: visibleScanned,
@@ -273,6 +291,7 @@ async function scanFrame(target: FrameActionTarget): Promise<FrameScanResult> {
     selector: INTERACTIVE_SELECTOR,
     headingSelector: HEADING_SELECTOR,
     maxHeadingAncestorHops: MAX_HEADING_ANCESTOR_HOPS,
+    maxOpenShadowRoots: MAX_OPEN_SHADOW_ROOTS,
   });
 }
 
@@ -443,8 +462,20 @@ export interface ElementState {
 }
 
 async function readElementStateFrom(target: FrameActionTarget, selector: string): Promise<Omit<ElementState, "actionable" | "frameUnavailable">> {
-  return target.evaluate((sel) => {
-    const el = document.querySelector<HTMLElement>(sel);
+  return target.evaluate(({ sel, maxOpenShadowRoots }) => {
+    let el = document.querySelector<HTMLElement>(sel);
+    const pendingShadowRoots = el
+      ? []
+      : Array.from(document.querySelectorAll<HTMLElement>("*"))
+          .map((n) => n.shadowRoot)
+          .filter((r): r is ShadowRoot => r !== null);
+    for (let visited = 0; !el && pendingShadowRoots.length > 0 && visited < maxOpenShadowRoots; visited += 1) {
+      const root = pendingShadowRoots.shift()!;
+      el = root.querySelector<HTMLElement>(sel);
+      for (const n of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+        if (n.shadowRoot) pendingShadowRoots.push(n.shadowRoot);
+      }
+    }
     if (!el) {
       return { attached: false, visible: false, disabled: false, covered: false };
     }
@@ -463,7 +494,8 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
       // viewport -- elementFromPoint outside it always returns null, which would
       // otherwise be misread as "covered".
       if (cx >= 0 && cy >= 0 && cx < window.innerWidth && cy < window.innerHeight) {
-        const topEl = document.elementFromPoint(cx, cy);
+        const hitRoot = el.getRootNode() as Document | ShadowRoot;
+        const topEl = typeof hitRoot.elementFromPoint === "function" ? hitRoot.elementFromPoint(cx, cy) : document.elementFromPoint(cx, cy);
         covered = topEl !== null && !el.contains(topEl) && !topEl.contains(el);
         if (covered && topEl) {
           const topElRole = topEl.getAttribute("role") ?? topEl.tagName.toLowerCase();
@@ -494,7 +526,7 @@ async function readElementStateFrom(target: FrameActionTarget, selector: string)
       accessibleName,
       ...(destinationUrl ? { destinationUrl } : {}),
     };
-  }, selector);
+  }, { sel: selector, maxOpenShadowRoots: MAX_OPEN_SHADOW_ROOTS });
 }
 
 /**
@@ -581,6 +613,7 @@ function scanInteractionSnapshot(args: {
   panelMinCoverage: number;
   panelMaxDepth: number;
   panelMaxNodes: number;
+  maxOpenShadowRoots: number;
 }): InteractionSnapshot {
   const dialogEls = Array.from(document.querySelectorAll<HTMLElement>(args.dialogSelector)).filter((el) => {
     const rect = el.getBoundingClientRect();
@@ -599,7 +632,20 @@ function scanInteractionSnapshot(args: {
         .join("~")
     : undefined;
 
-  const interactiveEls = Array.from(document.querySelectorAll<HTMLElement>(args.interactiveSelector)).filter((el) => {
+  // Same open-shadow-root walk as scanInteractiveElements, so a control revealed inside a web
+  // component counts as the in-page change it is.
+  const interactiveCandidates = Array.from(document.querySelectorAll<HTMLElement>(args.interactiveSelector));
+  const shadowRootQueue = Array.from(document.querySelectorAll<HTMLElement>("*"))
+    .map((n) => n.shadowRoot)
+    .filter((r): r is ShadowRoot => r !== null);
+  for (let visited = 0; shadowRootQueue.length > 0 && visited < args.maxOpenShadowRoots; visited += 1) {
+    const root = shadowRootQueue.shift()!;
+    interactiveCandidates.push(...Array.from(root.querySelectorAll<HTMLElement>(args.interactiveSelector)));
+    for (const n of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+      if (n.shadowRoot) shadowRootQueue.push(n.shadowRoot);
+    }
+  }
+  const interactiveEls = interactiveCandidates.filter((el) => {
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
@@ -683,6 +729,7 @@ export async function captureInteractionSnapshot(page: Page): Promise<Interactio
     panelMinCoverage: MIN_PANEL_VIEWPORT_COVERAGE,
     panelMaxDepth: MAX_PANEL_SCAN_DEPTH,
     panelMaxNodes: MAX_PANEL_SCAN_NODES,
+    maxOpenShadowRoots: MAX_OPEN_SHADOW_ROOTS,
   });
 }
 

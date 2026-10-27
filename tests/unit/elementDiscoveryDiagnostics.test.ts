@@ -96,13 +96,11 @@ test("excluded elements are bucketed by reason: zero-size, display:none, visibil
 });
 
 // ---------------------------------------------------------------------------------------
-// shadowHostCount: the concrete, generic mechanism this run's investigation flagged as a
-// plausible root cause -- document.querySelectorAll cannot see into any shadow root, open
-// or closed, so a page whose real controls live inside one scans as if they don't exist at
-// all, with no prior signal distinguishing that from a genuinely empty page.
+// shadowHostCount: open shadow roots are now scanned like light DOM (a web-component form app
+// renders its controls inside one); a closed root stays unreachable by design.
 // ---------------------------------------------------------------------------------------
 
-test("a CTA inside an OPEN shadow root is invisible to interactiveElements, but shadowHostCount proves the page is not actually empty", async () => {
+test("a CTA inside an OPEN shadow root is scanned like a light-DOM one, and shadowHostCount still counts its host", async () => {
   const html = `<!doctype html><html><body>
     <div id="host"></div>
     <script>
@@ -117,11 +115,10 @@ test("a CTA inside an OPEN shadow root is invisible to interactiveElements, but 
     const observation = await buildObservation(page);
     const diagnostics = observation.elementDiscoveryDiagnostics;
     assert.ok(diagnostics);
-    // The exact bug reported in production: zero candidates from the normal scan...
-    assert.equal(diagnostics?.rawElementCount, 0);
-    assert.equal(observation.interactiveElements.length, 0);
-    // ...but shadowHostCount is the generic tell that the page is not actually empty --
-    // something this scan cannot see is hosting a shadow root.
+    assert.equal(diagnostics?.rawElementCount, 1);
+    assert.equal(observation.interactiveElements.length, 1);
+    assert.equal(observation.interactiveElements[0]?.accessibleName, "Weiter & Extras");
+    assert.equal(observation.interactiveElements[0]?.covered, undefined);
     assert.equal(diagnostics?.shadowHostCount, 1);
   });
 });
@@ -149,7 +146,7 @@ test("a CLOSED shadow root cannot be detected at all -- shadowHostCount stays 0,
   });
 });
 
-test("a page with ordinary interactive elements alongside an unrelated shadow-hosting element reports both correctly", async () => {
+test("a page with ordinary interactive elements alongside a shadow-hosting element reports both, light DOM first", async () => {
   const html = `<!doctype html><html><body>
     <button>Ordinary button</button>
     <div id="host"></div>
@@ -161,9 +158,11 @@ test("a page with ordinary interactive elements alongside an unrelated shadow-ho
     const observation = await buildObservation(page);
     const diagnostics = observation.elementDiscoveryDiagnostics;
     assert.ok(diagnostics);
-    assert.equal(diagnostics?.rawElementCount, 1);
-    assert.equal(observation.interactiveElements.length, 1);
-    assert.equal(observation.interactiveElements[0]?.accessibleName, "Ordinary button");
+    assert.equal(diagnostics?.rawElementCount, 2);
+    assert.deepEqual(
+      observation.interactiveElements.map((el) => el.accessibleName),
+      ["Ordinary button", "Encapsulated"],
+    );
     assert.equal(diagnostics?.shadowHostCount, 1);
   });
 });

@@ -2,6 +2,7 @@ import type { Page } from "playwright";
 import { waitForAdaptiveSettle } from "../core/robustNavigation.js";
 import type { SupportedLanguage } from "../forms/testData.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
+import { MAX_OPEN_SHADOW_ROOTS } from "../observation/openShadowDom.js";
 
 /**
  * A generic "location gate": a blocking panel some sites show before letting a visitor reach
@@ -94,14 +95,22 @@ async function snapshotGate(page: Page, language: SupportedLanguage): Promise<Ga
     // wraps a nested named binding in a __name(...) call that doesn't exist once Playwright
     // serializes the function's source to run in the browser (same constraint as fillForm.ts's
     // tagAndReadFields). Everything stays inline, even at the cost of some repetition.
-    (params: { attr: string; locationKeywords: string[]; continueKeywords: string[]; radiusKeywords: string[] }) => {
+    (params: { attr: string; locationKeywords: string[]; continueKeywords: string[]; radiusKeywords: string[]; maxOpenShadowRoots: number }) => {
       let inputIndex: string | null = null;
       let inputVisible = false;
-      const allInputs = Array.from(document.querySelectorAll('input[type="text"], input[type="search"], input:not([type])')) as HTMLInputElement[];
+      // The document plus every open shadow root under it, so a gate rendered by a web component
+      // is found exactly like a light-DOM one.
+      const scopes: (Document | ShadowRoot)[] = [document];
+      for (let i = 0; i < scopes.length && scopes.length <= params.maxOpenShadowRoots; i += 1) {
+        for (const n of Array.from(scopes[i]!.querySelectorAll("*"))) {
+          if (n.shadowRoot) scopes.push(n.shadowRoot);
+        }
+      }
+      const allInputs = scopes.flatMap((sc) => Array.from(sc.querySelectorAll('input[type="text"], input[type="search"], input:not([type])'))) as HTMLInputElement[];
       for (const input of allInputs) {
         if (input.closest("form")) continue;
         const id = input.getAttribute("id");
-        const byFor = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const byFor = id ? (input.getRootNode() as Document | ShadowRoot).querySelector(`label[for="${CSS.escape(id)}"]`) : null;
         const closestLabel = input.closest("label");
         const text =
           (byFor ?? closestLabel)?.textContent?.trim() ||
@@ -134,8 +143,8 @@ async function snapshotGate(page: Page, language: SupportedLanguage): Promise<Ga
 
       let continueIndex: string | null = null;
       if (inputIndex) {
-        const inputEl = document.querySelector(`[${params.attr}="gate-input"]`);
-        const buttons = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], input[type="button"], input[type="submit"]')).filter(
+        const inputEl = scopes.map((sc) => sc.querySelector(`[${params.attr}="gate-input"]`)).find((n) => n !== null) ?? null;
+        const buttons = scopes.flatMap((sc) => Array.from(sc.querySelectorAll<HTMLElement>('button, [role="button"], input[type="button"], input[type="submit"]'))).filter(
           (el) => {
             if (el.closest("form")) return false;
             const rect = el.getBoundingClientRect();
@@ -175,7 +184,7 @@ async function snapshotGate(page: Page, language: SupportedLanguage): Promise<Ga
 
       let radiusIndex: string | null = null;
       let radiusOptions: { value: string; label: string; disabled?: boolean }[] = [];
-      const selects = Array.from(document.querySelectorAll("select")).filter((s) => {
+      const selects = scopes.flatMap((sc) => Array.from(sc.querySelectorAll("select"))).filter((s) => {
         if (s.closest("form")) return false;
         const rect = s.getBoundingClientRect();
         const style = window.getComputedStyle(s);
@@ -183,7 +192,7 @@ async function snapshotGate(page: Page, language: SupportedLanguage): Promise<Ga
       });
       for (const select of selects) {
         const id = select.getAttribute("id");
-        const byFor = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const byFor = id ? (select.getRootNode() as Document | ShadowRoot).querySelector(`label[for="${CSS.escape(id)}"]`) : null;
         const closestLabel = select.closest("label");
         const text = (byFor ?? closestLabel)?.textContent?.trim() || select.getAttribute("aria-label") || select.getAttribute("name") || "";
         const normalizedText = text
@@ -210,6 +219,7 @@ async function snapshotGate(page: Page, language: SupportedLanguage): Promise<Ga
     },
     {
       attr: FIELD_INDEX_ATTR,
+      maxOpenShadowRoots: MAX_OPEN_SHADOW_ROOTS,
       locationKeywords: LOCATION_INPUT_KEYWORDS[language] ?? LOCATION_INPUT_KEYWORDS.en,
       continueKeywords: CONTINUE_CONTROL_KEYWORDS[language] ?? CONTINUE_CONTROL_KEYWORDS.en,
       radiusKeywords: RADIUS_KEYWORDS[language] ?? RADIUS_KEYWORDS.en,

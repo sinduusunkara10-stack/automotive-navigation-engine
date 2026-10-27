@@ -96,6 +96,7 @@ import { isFormVisualEvidenceEnabled, startVisualEvidenceRecorder, type VisualEv
 import { observeLateFormRender, probeFormPresence } from "../diagnostics/formPresenceProbe.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 import { isPhoneFieldKey, phoneValueForField } from "../forms/phoneFormat.js";
+import { DEEP_QUERY_ALL_SOURCE, DEEP_VISIBLE_TEXT_SOURCE } from "../observation/openShadowDom.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
 
@@ -801,7 +802,7 @@ async function tickCheckbox(page: Page, field: Locator): Promise<"native_check" 
   if (native && (await field.isChecked().catch(() => false))) return "native_check";
   const labelTagged = await field
     .evaluate((el: Element, attr: string) => {
-      document.querySelectorAll(`[${attr}]`).forEach((n) => n.removeAttribute(attr));
+      (el.getRootNode() as Document | ShadowRoot).querySelectorAll(`[${attr}]`).forEach((n) => n.removeAttribute(attr));
       const label = Array.from((el as HTMLInputElement).labels ?? []).find((l) => {
         const r = l.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
@@ -992,11 +993,11 @@ async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVer
 }
 
 async function detectCaptchaOnPage(page: Page): Promise<boolean> {
-  const iframeSrcs = await page.evaluate(() => Array.from(document.querySelectorAll("iframe")).map((f) => f.getAttribute("src") ?? ""));
-  const elementAttributes = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("[class],[data-sitekey]")).map((el) => `${el.className ?? ""} ${el.getAttribute("data-sitekey") ?? ""}`),
+  const iframeSrcs = await page.evaluate<string[]>(`(${DEEP_QUERY_ALL_SOURCE})(document, "iframe").map((f) => f.getAttribute("src") || "")`);
+  const elementAttributes = await page.evaluate<string[]>(
+    `(${DEEP_QUERY_ALL_SOURCE})(document, "[class],[data-sitekey]").map((el) => String(el.className || "") + " " + (el.getAttribute("data-sitekey") || ""))`,
   );
-  const visibleText = await page.evaluate(() => document.body.innerText).catch(() => "");
+  const visibleText = await page.evaluate<string>(`(${DEEP_VISIBLE_TEXT_SOURCE})()`).catch(() => "");
   return detectCaptcha({ iframeSrcs, elementAttributes, visibleText });
 }
 
@@ -1020,7 +1021,7 @@ async function countConfirmationMarkers(page: Page): Promise<number> {
   });
   for (const frame of frames) {
     const text = await frame
-      .evaluate(() => document.body?.innerText ?? "")
+      .evaluate<string>(`(${DEEP_VISIBLE_TEXT_SOURCE})()`)
       .then((t) => t.toLowerCase())
       .catch(() => "");
     SUCCESS_TEXT_MARKERS.forEach((marker) => {
@@ -1871,7 +1872,10 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
           unresolvedDependentControlIds: [],
           validationCauseObserved: true,
         }
-      : observation.terminalState === "succeeded" && !observation.formStillPresentAtEnd
+      : // The observer's last form snapshot can precede the confirmation check in the same poll, so a
+        // site that removes the form and then renders its confirmation reports the form as still
+        // present; reading a removed form would wait out the default action timeout on every read.
+        observation.terminalState === "succeeded" && (!observation.formStillPresentAtEnd || (await form.count().catch(() => 0)) === 0)
         ? EMPTY_POST_SUBMIT_DIAGNOSTICS
         : await collectPostSubmitDiagnostics(form, dealerLookupOutcome?.dealerValueVerified ?? false, preSubmitHiddenSnapshot);
     // Confirmation counts only when it newly appeared after the click -- marker text already on the

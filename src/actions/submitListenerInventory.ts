@@ -1,4 +1,5 @@
 import type { CDPSession, Page } from "playwright";
+import { DEEP_QUERY_ALL_SOURCE } from "../observation/openShadowDom.js";
 import { categoriseScript, PROBE_FORM_ATTR, PROBE_SUBMIT_ATTR, type ScriptCategory, type ScriptLibrary } from "./submitCancellationProbe.js";
 
 /**
@@ -53,11 +54,13 @@ interface CdpEventListener {
   handler?: { objectId?: string };
 }
 
+const DEEP_FORM = `(${DEEP_QUERY_ALL_SOURCE})(document, "form[${PROBE_FORM_ATTR}]")[0]`;
 const TARGET_EXPRESSIONS: [ListenerTarget, string][] = [
-  ["form", `document.querySelector("form[${PROBE_FORM_ATTR}]")`],
-  ["submit_control", `document.querySelector("[${PROBE_SUBMIT_ATTR}]")`],
-  ["form_ancestor", `(() => { const f = document.querySelector("form[${PROBE_FORM_ATTR}]"); return f && f.parentElement !== document.body ? f.parentElement : null; })()`],
-  ["form_ancestor", `(() => { const f = document.querySelector("form[${PROBE_FORM_ATTR}]"); const a = f && f.parentElement; return a && a.parentElement && a.parentElement !== document.body && a !== document.body ? a.parentElement : null; })()`],
+  ["form", `(${DEEP_FORM} || null)`],
+  ["submit_control", `((${DEEP_QUERY_ALL_SOURCE})(document, "[${PROBE_SUBMIT_ATTR}]")[0] || null)`],
+  ["form_ancestor", `(() => { const f = ${DEEP_FORM}; return f && f.parentElement && f.parentElement !== document.body ? f.parentElement : null; })()`],
+  ["form_ancestor", `(() => { const f = ${DEEP_FORM}; const a = f && f.parentElement; return a && a.parentElement && a.parentElement !== document.body && a !== document.body ? a.parentElement : null; })()`],
+  ["form_ancestor", `(() => { const f = ${DEEP_FORM}; const r = f && f.getRootNode(); return r && r !== document ? r : null; })()`],
   ["body", "document.body"],
   ["document", "document"],
   ["window", "window"],
