@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande d'essai | Example Motors</title>
+  </head>
+  <body>
+    <header><nav><a href="#models">Modèles</a> <a href="#dealers">Trouvez un point de vente</a></nav></header>
+    <main>
+      <lead-widget-app></lead-widget-app>
+    </main>
+    <script>
+      // A form-platform style lead widget, shaped like the one in the 2026-10-27 live run evidence:
+      // 58 hidden inputs; a model select and a dependent engine select; required status
+      // carried only by a "*" in labels; a disabled, collapsed title select and company section; a
+      // private/business radio pair; a dealer finder (visually hidden mode radios, an unlabelled
+      // location input, a "Recherchez" button and an icon-only button) committing hidden dealer
+      // values; three optional Oui/Non consent groups; one final Submit. Rendered inside an open
+      // shadow root unless dom=light.
+      //   model=preselected  the page arrives with a model already chosen; its engine options
+      //                      arrive 800 ms later, so the engine select is still empty at discovery
+      //   model=empty        nothing chosen yet (default)
+      const params = new URLSearchParams(location.search);
+      window.__leadPosts = [];
+      window.__searches = 0;
+      const preselected = params.get("model") === "preselected";
+      const hidden = Array.from({ length: 56 }, (_, i) => `<input type="hidden" name="backing${i}" value="" />`);
+      const ENGINES = { m1: ["Moteur électrique", "Moteur hybride"], m2: ["Moteur essence"] };
+      const consent = (key, question) => `
+        <div class="row" role="radiogroup" aria-labelledby="q-${key}">
+          <p id="q-${key}">${question}</p>
+          <input type="radio" id="c-${key}-1" name="consent_${key}" value="1" /><label for="c-${key}-1">Oui</label>
+          <input type="radio" id="c-${key}-2" name="consent_${key}" value="0" /><label for="c-${key}-2">Non</label>
+        </div>`;
+      const HTML = `
+        <style>
+          .sr-radio { display: none; }
+          .collapsed { display: none; }
+          .row { margin: 8px 0; }
+        </style>
+        <form id="lead-app" class="widget-form" novalidate>
+          <h2>Vos coordonnées</h2>
+          <div class="row"><label for="w-model">Sélectionnez le modèle souhaité: *</label>
+            <select id="w-model" name="model">
+              <option value="">Sélectionnez</option>
+              <option value="m1" ${preselected ? "selected" : ""}>Modèle Un</option>
+              <option value="m2">Modèle Deux</option>
+            </select></div>
+          <div class="row"><label for="w-engine">Sélectionnez une motorisation: *</label>
+            <select id="w-engine" name="engine"></select></div>
+          ${hidden.slice(0, 28).join("")}
+          <div class="collapsed"><label for="w-title">Civilité*</label><select id="w-title" name="title" disabled><option value="">-</option><option value="mme">Madame</option><option value="m">Monsieur</option></select></div>
+          <div class="row"><label for="w-first">Prénom*</label><input id="w-first" name="firstName" type="text" /></div>
+          <div class="row"><label for="w-last">Nom*</label><input id="w-last" name="lastName" type="text" /></div>
+          <div class="row"><label for="w-email">E-mail*</label><input id="w-email" name="email" type="email" /></div>
+          <div class="row"><label for="w-phone">Téléphone*</label><input id="w-phone" name="phone" type="text" /></div>
+          <fieldset class="row" id="w-customer">
+            <legend>Vous êtes</legend>
+            <input type="radio" id="w-customer-1" name="customerType" value="private" /><label for="w-customer-1">Un particulier</label>
+            <input type="radio" id="w-customer-2" name="customerType" value="business" /><label for="w-customer-2">Un professionnel</label>
+          </fieldset>
+          <div class="collapsed" id="w-company">
+            <label for="w-company-name">Nom de l'entreprise*</label><input id="w-company-name" name="companyName" disabled />
+            <label for="w-sector">Secteur d'activité*</label><select id="w-sector" name="sector" disabled><option value="">-</option></select>
+            <label for="w-fleet">Taille du parc automobile*</label><select id="w-fleet" name="fleet" disabled><option value="">-</option></select>
+          </div>
+          <fieldset class="row" id="w-dealer">
+            <legend>Choisissez votre point de vente</legend>
+            <input class="sr-radio" type="radio" id="w-mode-zip" name="dealerMode" value="zip" checked /><label for="w-mode-zip">Code postal</label>
+            <input class="sr-radio" type="radio" id="w-mode-city" name="dealerMode" value="city" /><label for="w-mode-city">Ville</label>
+            <div><input id="w-search" name="searchText" type="text" /><button type="button" id="w-search-go">Recherchez</button><button type="button" id="w-geo"><svg width="12" height="12"></svg></button></div>
+            <div id="w-dealer-results"></div>
+            <input type="hidden" name="dealerId" id="w-dealer-id" value="" />
+            <input type="hidden" name="dealerCity" value="" />
+          </fieldset>
+          ${hidden.slice(28).join("")}
+          ${consent("promo", "Je souhaite recevoir des offres commerciales et promotionnelles par e-mail.")}
+          ${consent("profile", "J'accepte que mes données soient analysées pour des offres personnalisées (profilage).")}
+          ${consent("partners", "J'accepte que mes données soient partagées avec des partenaires sélectionnés.")}
+          <p class="row">Consultez notre <a href="#privacy">politique de confidentialité</a>.</p>
+          <p role="alert" id="w-error"></p>
+          <button type="submit" id="w-send">VALIDEZ VOTRE DEMANDE</button>
+        </form>
+        <p role="status" id="w-done"></p>`;
+
+      customElements.define(
+        "lead-widget-app",
+        class extends HTMLElement {
+          connectedCallback() {
+            const root = params.get("dom") === "light" ? this : this.attachShadow({ mode: "open" });
+            root.innerHTML = HTML;
+            const $ = (id) => root.querySelector("#" + id);
+            const form = $("lead-app");
+            const fillEngines = () => {
+              const options = ENGINES[$("w-model").value] || [];
+              $("w-engine").innerHTML = options.length ? `<option value="">Sélectionnez</option>` + options.map((o, i) => `<option value="e${i + 1}">${o}</option>`).join("") : "";
+            };
+            $("w-model").addEventListener("change", fillEngines);
+            if (preselected) setTimeout(fillEngines, 800);
+            root.querySelectorAll('input[name="customerType"]').forEach((radio) =>
+              radio.addEventListener("change", () => {
+                const business = radio.value === "business" && radio.checked;
+                $("w-company").classList.toggle("collapsed", !business);
+                $("w-company").querySelectorAll("input, select").forEach((el) => (el.disabled = !business));
+              }),
+            );
+            $("w-search-go").addEventListener("click", () => {
+              window.__searches += 1;
+              if (!$("w-search").value.trim()) return;
+              $("w-dealer-results").innerHTML = `
+                <div role="radiogroup" aria-label="Points de vente">
+                  <label><input type="radio" name="dealerChoice" value="d1" /> Garage Exemple Centre</label>
+                  <label><input type="radio" name="dealerChoice" value="d2" /> Garage Exemple Nord</label>
+                </div>`;
+              root.querySelectorAll('input[name="dealerChoice"]').forEach((radio) =>
+                radio.addEventListener("change", () => {
+                  $("w-dealer-id").value = radio.value;
+                  root.querySelector('input[name="dealerCity"]').value = "Exempleville";
+                }),
+              );
+            });
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const checked = (name) => root.querySelector(`input[name="${name}"]:checked`);
+              const missing = ["w-model", "w-engine", "w-first", "w-last", "w-email", "w-phone", "w-dealer-id"].filter((id) => !$(id).value);
+              if (!checked("customerType")) missing.push("customerType");
+              if (missing.length > 0) {
+                $("w-error").textContent = "Veuillez compléter les champs obligatoires";
+                return;
+              }
+              const body = Object.fromEntries(new FormData(form).entries());
+              window.__leadPosts.push(body);
+              const response = await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+              if (response.ok) {
+                form.remove();
+                $("w-done").textContent = "Merci, votre demande a bien été envoyée.";
+              }
+            });
+          }
+        },
+      );
+    </script>
+  </body>
+</html>

@@ -4388,3 +4388,29 @@ The threshold, the weights, the purpose vocabulary and the local-only negative v
 unchanged. A newsletter form is still vetoed, and still loses to a lead form on the same page.
 `tests/integration/formScoringParity.test.ts` covers each case in both DOMs, plus direct-start and
 CTA-navigated end-to-end runs.
+
+### Lead-form filling: field actionability counted the way the fill works (no contract change beyond an additive diagnostic; request 1.51.0 and response 1.53.0)
+
+The next live run of the same open-shadow form scored 15 user-actionable controls, 5 plannable,
+journey 0 and visibility 1: 0.5 × 0 + 0.35 × 1 + 0.15 × 5/15, which is 0.39999999999999997 in
+binary floating point, so it was rejected at "0.40 < 0.4". A fixture shaped like that form
+(`tests/fixtures/lead-form-widget-app.html`) reproduces exactly those numbers in both DOMs. Two
+generic defects:
+
+- **The score was not rounded.** An exact-threshold sum fell just under the threshold. The total
+  is now rounded to 1e-9 before the comparison. The threshold stays at 0.4.
+- **Actionability counted only per-field plan actions.** Of the 15 controls, 8 were radios in
+  four groups (private/business and three optional consents). The per-field plan skips every
+  optional radio, but `resolveConsentGroups` answers each of those groups, and it does so after
+  the form is adopted. A required select the page had already filled also counted as not
+  plannable, although the readiness gate treats it as done. Actionability now counts each radio
+  group once. A group counts as plannable when the group resolver would answer it or finds it
+  already answered (`consentGroupWillResolve`, the same decision `resolveOneGroup` acts on). A
+  required field with a real value counts as already filled.
+
+`scoringEvidence.controls` lists each user-actionable control with whether it is plannable, how
+(`fill_plan`, `already_filled`, `radio_group`) and, when it is not, why. The fixture test runs the
+whole fill in both DOMs. Name, e-mail and phone are filled; the preselected model is kept and the
+engine select is filled after its options arrive; the dealer is looked up and selected; the
+private-customer option is chosen; three optional consents are declined; and the final Submit
+posts the lead once.
