@@ -4414,3 +4414,30 @@ whole fill in both DOMs. Name, e-mail and phone are filled; the preselected mode
 engine select is filled after its options arrive; the dealer is looked up and selected; the
 private-customer option is chosen; three optional consents are declined; and the final Submit
 posts the lead once.
+
+### Dealer lookup: a widget that swaps out its own search view (no contract change; request 1.51.0 and response 1.53.0 unchanged)
+
+A live open-shadow run typed a postcode, got no locality suggestion, pressed Enter, and the dealer
+endpoint answered with 9 records that rendered at once. The lookup clicked the first rendered
+result. From then on every step took Playwright's 30 s default wait and reported the field's value
+as unknown: the widget had replaced its search view, the field included, and the probe reached the
+page only through the field's mark attribute. The dealer stage was blind, nothing was committed,
+readiness held Submit back, and the run ended unresolved. The same failure reproduces in light DOM.
+
+- `src/actions/dealerLookupProbe.ts`: the probe keeps the field, its ancestors and the scope as
+  references and is reached through the form. Once the field is detached, its nearest connected
+  ancestor anchors result discovery, and field-only facts are reported as unknown. Every probe call
+  is bounded (`PROBE_CALL_TIMEOUT_MS`).
+- `src/actions/dealerLookup.ts`:
+  - A stage's own results are baselined before its click, not after it. Results the click renders,
+    generic or ARIA, now belong to the next stage. Before this, a generic dealer list rendered by a
+    locality click was baselined away.
+  - A native radio or checkbox whose own box is visually hidden is pressed through its rendered
+    label, as a visitor would. Before this, the pointer click timed out.
+  - A result node the widget replaced before the click landed is looked up again and clicked once
+    (`STALE_RESULT_REFINDS`). A click that landed is never repeated.
+
+Commit evidence is unchanged: a checked or ARIA-selected state, or a hidden identifier written by
+the widget. A dealer only shown as selected stays `dealer_dependency_unresolved`, and Submit is never
+pressed. `tests/integration/dealerLocatorParity.test.ts` runs every scenario in light and open
+shadow DOM against `tests/fixtures/dealer-locator-widget.html`.

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Demande de devis | Example Motors</title>
+  </head>
+  <body>
+    <main>
+      <dealer-lead-app></dealer-lead-app>
+    </main>
+    <script>
+      // A lead form with a dealer locator, rendered inside an open shadow root unless dom=light.
+      // Typing asks a locality endpoint for suggestions; choosing one (or pressing Enter, or the
+      // "Recherchez" button) asks a dealer endpoint, whose records are then rendered. Only a
+      // committed dealer (hidden inputs written by the widget) lets the lead be sent.
+      //   locality=list|empty      the locality endpoint's suggestions are rendered, or it has none
+      //   dealers=radios|cards|none
+      //     radios  visually hidden native radios inside visible label cards (off-screen inputs)
+      //     cards   plain clickable cards; a click swaps the whole search view (input included)
+      //             for a detail view whose "Choisir" button commits the dealer
+      //     none    the records arrive but only a count is rendered, nothing selectable
+      //   commit=no                the final dealer choice is only shown as selected, never written
+      //   dealerDelay=ms           the dealer request is sent this long after the locality choice
+      //   renderDelay=ms           the dealer records are rendered this long after they arrived
+      //   rerender=1               the suggestion list and the dealer list each re-render once, with
+      //                            new nodes, when the pointer first moves over them
+      const params = new URLSearchParams(location.search);
+      const localityMode = params.get("locality") || "list";
+      const dealerMode = params.get("dealers") || "radios";
+      const commits = params.get("commit") !== "no";
+      const dealerDelay = Number(params.get("dealerDelay") || 0);
+      const renderDelay = Number(params.get("renderDelay") || 0);
+      const rerender = params.get("rerender") === "1";
+      Object.assign(window, { __leadPosts: [], __submitEvents: 0, __localityRequests: 0, __dealerRequests: 0, __dealerCommits: 0, __dealerChoices: 0, __localityChoices: 0 });
+
+      const HTML = `
+        <style>
+          .row { margin: 8px 0; }
+          .sr { position: absolute; left: -9999px; width: 20px; height: 20px; }
+          .card { display: block; padding: 8px; margin: 4px 0; border: 1px solid #999; cursor: pointer; }
+          .card.is-selected { border-color: #000; background: #eee; }
+          #dl-suggest li { padding: 4px; cursor: pointer; list-style: none; }
+        </style>
+        <form id="lead" novalidate>
+          <h2>Vos coordonnées</h2>
+          <div class="row"><label for="f-first">Prénom*</label><input id="f-first" name="firstName" type="text" required /></div>
+          <div class="row"><label for="f-last">Nom*</label><input id="f-last" name="lastName" type="text" required /></div>
+          <div class="row"><label for="f-email">E-mail*</label><input id="f-email" name="email" type="email" required /></div>
+          <fieldset class="row" id="dl">
+            <legend>Choisissez votre point de vente</legend>
+            <div id="dl-view"></div>
+            <input type="hidden" name="dealer.id" id="dl-id" value="" />
+            <input type="hidden" name="dealer.name" id="dl-name" value="" />
+          </fieldset>
+          <p role="alert" id="f-error"></p>
+          <button type="submit" id="f-send">Envoyer ma demande</button>
+        </form>
+        <p role="status" id="f-done"></p>`;
+
+      const SEARCH_VIEW = `
+        <div id="dl-search">
+          <input id="dl-q" name="searchText" type="text" autocomplete="off" placeholder="Code postal ou ville" />
+          <button type="button" id="dl-go">Recherchez</button>
+          <ul id="dl-suggest" hidden></ul>
+        </div>
+        <div id="dl-results"></div>`;
+
+      customElements.define(
+        "dealer-lead-app",
+        class extends HTMLElement {
+          connectedCallback() {
+            const root = params.get("dom") === "light" ? this : this.attachShadow({ mode: "open" });
+            root.innerHTML = HTML;
+            const $ = (id) => root.querySelector("#" + id);
+            let records = [];
+            let localities = [];
+            const rerenderOnFirstHover = (container, render) => {
+              if (!rerender) return;
+              container.addEventListener("mouseover", () => render(), { once: true });
+            };
+
+            const commit = (record) => {
+              window.__dealerChoices += 1;
+              if (!commits) return;
+              $("dl-id").value = record.id;
+              $("dl-name").value = record.name;
+              window.__dealerCommits += 1;
+            };
+
+            const renderSuggestions = () => {
+              const list = $("dl-suggest");
+              if (!list) return;
+              list.innerHTML = localities.map((l, i) => `<li data-i="${i}">${l.label}</li>`).join("");
+              list.hidden = localities.length === 0;
+              list.querySelectorAll("li").forEach((li) =>
+                li.addEventListener("click", () => {
+                  window.__localityChoices += 1;
+                  $("dl-q").value = localities[Number(li.dataset.i)].label;
+                  localities = [];
+                  list.hidden = true;
+                  list.innerHTML = "";
+                  setTimeout(searchDealers, dealerDelay);
+                }),
+              );
+            };
+
+            const renderDealers = () => {
+              const results = $("dl-results");
+              if (dealerMode === "none") {
+                results.innerHTML = `<p>${records.length} points de vente trouvés à proximité.</p><div class="map" style="height:120px"></div>`;
+                return;
+              }
+              if (dealerMode === "radios") {
+                results.innerHTML =
+                  `<div role="radiogroup" aria-label="Points de vente">` +
+                  records.map((r, i) => `<label class="card" for="dc-${i}"><input class="sr" type="radio" id="dc-${i}" name="dealerChoice" value="${r.id}" />${r.name}<br /><small>${r.city}</small></label>`).join("") +
+                  `</div>`;
+                results.querySelectorAll('input[name="dealerChoice"]').forEach((radio, i) => radio.addEventListener("change", () => commit(records[i])));
+                return;
+              }
+              results.innerHTML = `<ul class="list">` + records.map((r, i) => `<li class="card" data-i="${i}">${r.name}<br /><small>${r.city}</small></li>`).join("") + `</ul>`;
+              results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => showDetail(records[Number(card.dataset.i)])));
+            };
+
+            const showDetail = (record) => {
+              $("dl-view").innerHTML = `
+                <div class="detail">
+                  <p>${record.name}</p>
+                  <p><small>${record.city}</small></p>
+                  <button type="button" id="dl-choose">Choisir ce point de vente</button>
+                  <button type="button" id="dl-back">Modifier la recherche</button>
+                </div>`;
+              $("dl-choose").addEventListener("click", () => {
+                commit(record);
+                $("dl-choose").closest(".detail").classList.add("is-selected");
+                $("dl-choose").textContent = "Point de vente sélectionné";
+              });
+              $("dl-back").addEventListener("click", showSearch);
+            };
+
+            const searchDealers = async () => {
+              const q = $("dl-q") ? $("dl-q").value.trim() : "";
+              if (!q) return;
+              window.__dealerRequests += 1;
+              const response = await fetch("/api/dealers?q=" + encodeURIComponent(q));
+              const body = await response.json();
+              records = body.dealers || [];
+              setTimeout(() => {
+                renderDealers();
+                rerenderOnFirstHover($("dl-results"), renderDealers);
+              }, renderDelay);
+            };
+
+            const lookupLocalities = async () => {
+              const q = $("dl-q").value.trim();
+              if (q.length < 3) return;
+              window.__localityRequests += 1;
+              const response = await fetch("/api/localities?q=" + encodeURIComponent(q));
+              const body = await response.json();
+              localities = localityMode === "empty" ? [] : body.localities || [];
+              renderSuggestions();
+              if (localities.length > 0) rerenderOnFirstHover($("dl-suggest"), renderSuggestions);
+            };
+
+            const showSearch = () => {
+              $("dl-view").innerHTML = SEARCH_VIEW;
+              let debounce = 0;
+              $("dl-q").addEventListener("input", () => {
+                clearTimeout(debounce);
+                debounce = setTimeout(lookupLocalities, 250);
+              });
+              $("dl-q").addEventListener("keydown", (event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                searchDealers();
+              });
+              $("dl-go").addEventListener("click", searchDealers);
+            };
+            showSearch();
+
+            const form = $("lead");
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              window.__submitEvents += 1;
+              const missing = ["f-first", "f-last", "f-email", "dl-id"].filter((id) => !$(id).value);
+              if (missing.length > 0) {
+                $("f-error").textContent = "Veuillez compléter les champs obligatoires";
+                return;
+              }
+              const body = Object.fromEntries(new FormData(form).entries());
+              window.__leadPosts.push(body);
+              const response = await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+              if (response.ok) {
+                form.remove();
+                $("f-done").textContent = "Merci, votre demande a bien été envoyée.";
+              }
+            });
+          }
+        },
+      );
+    </script>
+  </body>
+</html>

@@ -27,7 +27,7 @@ import { DEEP_QUERY_ALL_SOURCE, OPEN_SHADOW_ROOTS_SOURCE, TREE_ELEMENT_BY_ID_SOU
  */
 const DEALER_PROBE_SOURCE = String.raw`(() => {
   const w = window;
-  if (w.__navEngineDealerProbe && w.__navEngineDealerProbe.version === 3) return true;
+  if (w.__navEngineDealerProbe && w.__navEngineDealerProbe.version === 4) return true;
   const openShadowRoots = ${OPEN_SHADOW_ROOTS_SOURCE};
   const deepAll = ${DEEP_QUERY_ALL_SOURCE};
   const byIdIn = ${TREE_ELEMENT_BY_ID_SOURCE};
@@ -88,7 +88,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
   }
 
   const probe = {
-    version: 3,
+    version: 4,
     seq: 0,
     hiddenSeq: 0,
     mutationCount: 0,
@@ -98,6 +98,9 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
     blockedSubmitClicks: 0,
     observer: null,
     form: null,
+    field: null,
+    fieldChain: [],
+    scope: null,
     formRoot: null,
     allowed: null,
     onSubmit: null,
@@ -107,9 +110,13 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       this.records.push({ el: el, added: added, seq: this.seq });
       if (this.records.length > 400) this.records.shift();
     },
-    start(form) {
+    start(form, field, scope) {
       this.stop();
       this.form = form;
+      this.field = field || null;
+      this.scope = scope || null;
+      this.fieldChain = [];
+      for (let n = field ? field.parentElement : null; n; n = n.parentElement) this.fieldChain.push(n);
       this.mutationCount = 0;
       this.records = [];
       this.seq = 0;
@@ -220,7 +227,20 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
         return { key: key, nonEmpty: String(el.value || '').trim().length > 0, purpose: hiddenPurpose(el) };
       });
     },
-    snapshot(field, scope, typed) {
+    // A widget can swap its search view (the field included) for a results or detail view. From
+    // then on the nearest still-connected ancestor of the original field anchors discovery, and
+    // field-only facts are reported as unknown rather than read from a detached node.
+    anchor(current) {
+      if (this.field && this.field.isConnected) return this.field;
+      for (const n of this.fieldChain) {
+        if (n.isConnected) return current && !current.contains(n) && n.contains(current) ? current : n;
+      }
+      return current;
+    },
+    snapshot(current, typed) {
+      const attached = Boolean(this.field && this.field.isConnected);
+      const field = attached ? this.field : this.anchor(current);
+      const scope = this.scope && this.scope.isConnected ? this.scope : this.anchor(current);
       const combo = comboOf(field);
       const expandedAttr = combo.getAttribute('aria-expanded') || field.getAttribute('aria-expanded');
       const adId = field.getAttribute('aria-activedescendant') || combo.getAttribute('aria-activedescendant');
@@ -237,7 +257,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       if (NO_RESULT_WORDS.some(function (word) { return scopeText.indexOf(word) !== -1; })) noResults = true;
       const busy = combo.getAttribute('aria-busy') === 'true' || field.getAttribute('aria-busy') === 'true' || Boolean(scope && Array.from(scope.querySelectorAll('[aria-busy="true"], [role="progressbar"]')).some(isVisible));
       return {
-        fieldValueRetained: typed === null ? null : norm(value).replace(/\s+/g, '') === norm(typed).replace(/\s+/g, ''),
+        fieldValueRetained: typed === null || !attached ? null : norm(value).replace(/\s+/g, '') === norm(typed).replace(/\s+/g, ''),
         fieldNonEmpty: value.trim().length > 0,
         focusInField: (field.getRootNode().activeElement || document.activeElement) === field,
         fieldAriaExpanded: expandedAttr === null ? null : expandedAttr === 'true',
@@ -255,9 +275,11 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
         fieldHasNativeValidationMessage: String(field.validationMessage || '').length > 0,
       };
     },
-    findResult(field, sinceSeq) {
-      const fieldRect = field.getBoundingClientRect();
-      const combo = comboOf(field);
+    findResult(current, sinceSeq) {
+      const field = this.field;
+      const anchorEl = this.anchor(current);
+      const fieldRect = anchorEl.getBoundingClientRect();
+      const combo = comboOf(anchorEl);
       const linkedRoots = [];
       [field, combo].forEach(function (el) {
         ['aria-controls', 'aria-owns'].forEach(function (attr) {
@@ -288,7 +310,7 @@ const DEALER_PROBE_SOURCE = String.raw`(() => {
       const considered = new Set();
       for (const root of roots) {
         const el = root.el;
-        if (!el.isConnected || el === field || el.contains(field)) continue;
+        if (!el.isConnected || el === field || (el !== anchorEl && el.contains(anchorEl))) continue;
         if (el.closest('[role="alert"], [role="status"]')) continue;
         const items = [el].concat(Array.from(el.querySelectorAll(ITEM_SELECTOR + ', div, span')).slice(0, 200));
         for (const item of items) {
@@ -377,20 +399,15 @@ const EMPTY_SNAPSHOT: ProbeSnapshot = {
   fieldHasNativeValidationMessage: false,
 };
 
-interface ProbeSnapshotArgs {
-  scope: Element | null;
-  typed: string | null;
-}
-
 type ProbeWindow = Window & {
   __navEngineDealerProbe?: {
-    start(form: Element): boolean;
+    start(form: Element, field: Element | null, scope: Element | null): boolean;
     stop(): boolean;
     allow(el: Element | null): boolean;
     markStage(): number;
     hiddenState(form: Element): HiddenFieldState[];
-    snapshot(field: Element, scope: Element | null, typed: string | null): ProbeSnapshot;
-    findResult(field: Element, sinceSeq: number): Element | null;
+    snapshot(current: Element, typed: string | null): ProbeSnapshot;
+    findResult(current: Element, sinceSeq: number): Element | null;
   };
 };
 
@@ -409,47 +426,61 @@ export interface DealerLookupProbe {
   stop(): Promise<void>;
 }
 
+// A probe call that cannot resolve its form must fail soft promptly; Playwright's 30 s default
+// actionability wait would otherwise stall every later stage of the lookup.
+const PROBE_CALL_TIMEOUT_MS = 2000;
+
 export async function startDealerLookupProbe(form: Locator, field: Locator, scope: Locator): Promise<DealerLookupProbe> {
   const formHandle = await form.elementHandle({ timeout: 1000 }).catch(() => null);
   const frame: Frame | null = formHandle ? await formHandle.ownerFrame().catch(() => null) : null;
   const installed = frame ? await frame.evaluate(DEALER_PROBE_SOURCE).then(() => true).catch(() => false) : false;
-  const started = installed ? await form.evaluate((el: Element) => (window as ProbeWindow).__navEngineDealerProbe?.start(el) ?? false).catch(() => false) : false;
+  const fieldHandle = await field.elementHandle({ timeout: 500 }).catch(() => null);
   const scopeHandle = await scope.elementHandle({ timeout: 500 }).catch(() => null);
+  type StartArgs = { field: Element | null; scope: Element | null };
+  const starter = form as unknown as { evaluate(fn: (el: Element, a: StartArgs) => boolean, arg: StartArgs): Promise<boolean> };
+  const started = installed
+    ? await starter
+        .evaluate((el: Element, a: StartArgs) => (window as ProbeWindow).__navEngineDealerProbe?.start(el, a.field, a.scope) ?? false, { field: fieldHandle, scope: scopeHandle } as unknown as StartArgs)
+        .catch(() => false)
+    : false;
+  const timeout = PROBE_CALL_TIMEOUT_MS;
 
   return {
     available: started,
     async markStage() {
       if (!started) return 0;
-      return form.evaluate(() => (window as ProbeWindow).__navEngineDealerProbe?.markStage() ?? 0).catch(() => 0);
+      return form.evaluate(() => (window as ProbeWindow).__navEngineDealerProbe?.markStage() ?? 0, undefined, { timeout }).catch(() => 0);
     },
     async hiddenState() {
       if (!started) {
         return form
-          .evaluate((el: Element) =>
-            Array.from(el.querySelectorAll('input[type="hidden"]')).map((input, i) => ({
-              key: `p${i}`,
-              nonEmpty: (input as HTMLInputElement).value.trim().length > 0,
-              purpose: "unclassified" as const,
-            })),
+          .evaluate(
+            (el: Element) =>
+              Array.from(el.querySelectorAll('input[type="hidden"]')).map((input, i) => ({
+                key: `p${i}`,
+                nonEmpty: (input as HTMLInputElement).value.trim().length > 0,
+                purpose: "unclassified" as const,
+              })),
+            undefined,
+            { timeout },
           )
           .catch(() => []);
       }
-      return form.evaluate((el: Element) => (window as ProbeWindow).__navEngineDealerProbe?.hiddenState(el) ?? []).catch(() => []);
+      return form.evaluate((el: Element) => (window as ProbeWindow).__navEngineDealerProbe?.hiddenState(el) ?? [], undefined, { timeout }).catch(() => []);
     },
     async snapshot(typed: string | null) {
       if (!started) return { ...EMPTY_SNAPSHOT };
-      const args = { scope: scopeHandle, typed } as unknown as ProbeSnapshotArgs;
-      const evaluator = field as unknown as { evaluate(fn: (el: Element, a: ProbeSnapshotArgs) => ProbeSnapshot | null, arg: ProbeSnapshotArgs): Promise<ProbeSnapshot | null> };
-      const result = (await evaluator
-        .evaluate((el: Element, a: ProbeSnapshotArgs) => (window as ProbeWindow).__navEngineDealerProbe?.snapshot(el, a.scope, a.typed) ?? null, args)
-        .catch(() => null)) as ProbeSnapshot | null;
+      const result = await form
+        .evaluate((el: Element, t: string | null) => (window as ProbeWindow).__navEngineDealerProbe?.snapshot(el, t) ?? null, typed, { timeout })
+        .catch(() => null);
       return result ?? { ...EMPTY_SNAPSHOT };
     },
     async findResult(sinceSeq: number) {
       if (!started) return null;
-      const handle = await field
-        .evaluateHandle((el: Element, seq: number) => (window as ProbeWindow).__navEngineDealerProbe?.findResult(el, seq) ?? null, sinceSeq)
-        .catch(() => null);
+      const formElement = await form.elementHandle({ timeout }).catch(() => null);
+      const handle = formElement
+        ? await formElement.evaluateHandle((el: Element, seq: number) => (window as ProbeWindow).__navEngineDealerProbe?.findResult(el, seq) ?? null, sinceSeq).catch(() => null)
+        : null;
       const element = handle?.asElement() ?? null;
       return element as ElementHandle<HTMLElement | SVGElement> | null;
     },
@@ -458,12 +489,12 @@ export async function startDealerLookupProbe(form: Locator, field: Locator, scop
       if (handle) {
         await handle.evaluate((target: Element) => void (window as ProbeWindow).__navEngineDealerProbe?.allow(target)).catch(() => {});
       } else {
-        await form.evaluate(() => void (window as ProbeWindow).__navEngineDealerProbe?.allow(null)).catch(() => {});
+        await form.evaluate(() => void (window as ProbeWindow).__navEngineDealerProbe?.allow(null), undefined, { timeout }).catch(() => {});
       }
     },
     async stop() {
       if (!started) return;
-      await form.evaluate(() => (window as ProbeWindow).__navEngineDealerProbe?.stop()).catch(() => {});
+      await form.evaluate(() => (window as ProbeWindow).__navEngineDealerProbe?.stop(), undefined, { timeout }).catch(() => {});
     },
   };
 }
