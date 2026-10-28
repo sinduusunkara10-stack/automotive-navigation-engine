@@ -316,6 +316,174 @@
         "startedAtMs": {
           "type": "number",
           "description": "Step start on the same clock as the network evidence's startedAtMs. Optional (additive in 1.53.0)."
+        },
+        "clickedElement": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "description": "What a selection click pressed -- structure and lengths only, never text -- and its selection state before and after. Optional (additive in 1.53.0).",
+          "required": [
+            "tag",
+            "role",
+            "inputType",
+            "pressedVia",
+            "insideLabel",
+            "containsRadioOrCheckbox",
+            "interactiveDescendantCount",
+            "sameTagSiblingCount",
+            "textLength",
+            "inShadowRoot",
+            "controlsAnotherElement",
+            "before",
+            "after"
+          ],
+          "properties": {
+            "tag": {
+              "type": "string"
+            },
+            "role": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "inputType": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pressedVia": {
+              "enum": [
+                "self",
+                "label"
+              ]
+            },
+            "insideLabel": {
+              "type": "boolean"
+            },
+            "containsRadioOrCheckbox": {
+              "type": "boolean"
+            },
+            "interactiveDescendantCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sameTagSiblingCount": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "textLength": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inShadowRoot": {
+              "type": "boolean"
+            },
+            "controlsAnotherElement": {
+              "type": "boolean"
+            },
+            "before": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "connected",
+                "ariaExpanded",
+                "ariaSelected",
+                "ariaChecked",
+                "ariaPressed",
+                "checked"
+              ],
+              "properties": {
+                "connected": {
+                  "type": "boolean"
+                },
+                "ariaExpanded": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaSelected": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaChecked": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaPressed": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "checked": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            },
+            "after": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "connected",
+                "ariaExpanded",
+                "ariaSelected",
+                "ariaChecked",
+                "ariaPressed",
+                "checked"
+              ],
+              "properties": {
+                "connected": {
+                  "type": "boolean"
+                },
+                "ariaExpanded": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaSelected": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaChecked": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ariaPressed": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "checked": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "revertedPreviousStep": {
+          "type": "boolean",
+          "description": "This step's scope-text change exactly undid the previous non-zero change (e.g. a toggle pressed open, then shut). Optional (additive in 1.53.0)."
         }
       }
     },
@@ -727,6 +895,189 @@
                 }
               },
               "description": "Every candidate form other than the selected one, with its own total score and why it was not chosen."
+            },
+            "phoneValidationDiagnostics": {
+              "type": "array",
+              "description": "1.53.0 additive amendment: one record per filled phone field -- the site's own verdict after blur (native validity, aria-invalid, site validator error class/icon/message) and whether the market's other test-number format was tried after a visible rejection. Value shape only, never the value.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fieldId",
+                  "purpose",
+                  "initialShape",
+                  "initialVerdict",
+                  "retriedWithAlternateFormat",
+                  "finalShape",
+                  "finalVerdict",
+                  "finalState"
+                ],
+                "properties": {
+                  "fieldId": {
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "initialShape": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "format",
+                      "digitCount",
+                      "separatorCount",
+                      "domValueMatchesTyped",
+                      "normalisedBeforeFill"
+                    ],
+                    "properties": {
+                      "format": {
+                        "enum": [
+                          "international",
+                          "national"
+                        ]
+                      },
+                      "digitCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "separatorCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "domValueMatchesTyped": {
+                        "type": "boolean"
+                      },
+                      "normalisedBeforeFill": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "initialVerdict": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "rejected",
+                      "evidence",
+                      "nativeValid",
+                      "validationMessageLength",
+                      "ariaInvalid",
+                      "siteErrorMessageLength"
+                    ],
+                    "properties": {
+                      "rejected": {
+                        "type": "boolean"
+                      },
+                      "evidence": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "nativeValid": {
+                        "type": "boolean"
+                      },
+                      "validationMessageLength": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "ariaInvalid": {
+                        "enum": [
+                          "true",
+                          "false",
+                          "absent"
+                        ]
+                      },
+                      "siteErrorMessageLength": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "retriedWithAlternateFormat": {
+                    "type": "boolean"
+                  },
+                  "finalShape": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "format",
+                      "digitCount",
+                      "separatorCount",
+                      "domValueMatchesTyped",
+                      "normalisedBeforeFill"
+                    ],
+                    "properties": {
+                      "format": {
+                        "enum": [
+                          "international",
+                          "national"
+                        ]
+                      },
+                      "digitCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "separatorCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "domValueMatchesTyped": {
+                        "type": "boolean"
+                      },
+                      "normalisedBeforeFill": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "finalVerdict": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "rejected",
+                      "evidence",
+                      "nativeValid",
+                      "validationMessageLength",
+                      "ariaInvalid",
+                      "siteErrorMessageLength"
+                    ],
+                    "properties": {
+                      "rejected": {
+                        "type": "boolean"
+                      },
+                      "evidence": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "nativeValid": {
+                        "type": "boolean"
+                      },
+                      "validationMessageLength": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "ariaInvalid": {
+                        "enum": [
+                          "true",
+                          "false",
+                          "absent"
+                        ]
+                      },
+                      "siteErrorMessageLength": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "finalState": {
+                    "enum": [
+                      "rejected",
+                      "no_rejection_observed"
+                    ]
+                  }
+                }
+              }
             },
             "proxiedSelectDiagnostics": {
               "type": "array",
@@ -4485,7 +4836,19 @@
                       "submit_before_click",
                       "submit_outcome",
                       "form_not_found",
-                      "form_not_found_after_late_watch"
+                      "form_not_found_after_late_watch",
+                      "form_discovered",
+                      "required_fields_filled",
+                      "phone_after_fill",
+                      "phone_after_blur",
+                      "phone_after_alternate_format",
+                      "dealer_results_rendered",
+                      "dealer_before_click",
+                      "dealer_after_click",
+                      "dealer_after_follow_up",
+                      "before_readiness",
+                      "validation_errors_visible",
+                      "final_state"
                     ]
                   },
                   "submitAttempt": {
@@ -4514,6 +4877,13 @@
                       "number",
                       "null"
                     ]
+                  },
+                  "area": {
+                    "enum": [
+                      "viewport",
+                      "region"
+                    ],
+                    "description": "\"region\" when clipped to the control or widget the checkpoint is about. Optional (additive in 1.53.0)."
                   },
                   "byteLength": {
                     "type": "number"

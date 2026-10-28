@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveMarket, marketDataFor, phoneValueFor, titleFor, FIXED_FIELDS } from "../../src/forms/testData.js";
+import { alternatePhoneFormatFor, resolveMarket, marketDataFor, phoneValueFor, titleFor, FIXED_FIELDS } from "../../src/forms/testData.js";
 
 test("market data selection: an explicit market hint always wins over the language default", () => {
   assert.equal(resolveMarket("fr", "BE"), "BE");
@@ -50,4 +50,16 @@ test("fixed free-text fields match the approved values exactly", () => {
   assert.equal(FIXED_FIELDS.lastName, "Test");
   assert.equal(FIXED_FIELDS.email, "test@test.com");
   assert.equal(FIXED_FIELDS.genericRequiredText, "Test");
+});
+
+test("alternatePhoneFormatFor: every configured phone value maps to the same number in the market's other format", () => {
+  assert.equal(alternatePhoneFormatFor("+33 6 39 98 12 34"), "06 39 98 12 34");
+  assert.equal(alternatePhoneFormatFor("06 39 98 12 34"), "+33 6 39 98 12 34");
+  assert.equal(alternatePhoneFormatFor("+44 20 7946 0123"), phoneValueFor("UK", "landline", true));
+  assert.equal(alternatePhoneFormatFor("not a configured number"), undefined);
+  for (const market of ["UK", "FR", "DE", "AT", "BE", "LU", "IT", "NL", "PL", "PT", "ES"] as const) {
+    for (const kind of ["landline", "mobile"] as const) {
+      assert.equal(alternatePhoneFormatFor(phoneValueFor(market, kind, false)), phoneValueFor(market, kind, true), `${market} ${kind}`);
+    }
+  }
 });
