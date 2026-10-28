@@ -572,7 +572,8 @@ async function firstNewCandidate(scope: Locator): Promise<NewCandidateResult | n
             }
           }
           const containsEditable = el.querySelector('input:not([type="radio"]):not([type="hidden"]), select, textarea') !== null || el.matches("input, select, textarea");
-          return { eligible: !isDismiss && !navigational && !containsEditable, existed: el.hasAttribute(args.existedAttr) };
+          const statusSurface = el.closest('[role="status"], [role="alert"], [role="progressbar"], [aria-busy="true"], [aria-live]') !== null;
+          return { eligible: !isDismiss && !navigational && !containsEditable && !statusSurface, existed: el.hasAttribute(args.existedAttr) };
         },
         { existedAttr: DEALER_BASELINE_EXISTED_ATTR, markers: NON_RESULT_CONTROL_MARKERS },
       )
@@ -910,11 +911,81 @@ async function waitForSelectionCommit(
   }
 }
 
+type GuardedClickOutcome = "clicked" | "detached" | "failed";
+
+/** How many times a result that the widget re-rendered before it could be clicked is looked up
+ * again, and how long each new lookup may wait. */
+const STALE_RESULT_REFINDS = 3;
+const STALE_RESULT_REFIND_WAIT_MS = 1500;
+
+/** Further dealer selections allowed after the first one when it rendered, but did not commit, a
+ * next step (e.g. a dealer card opening a detail view with its own choose control). */
+const DEALER_FOLLOW_UP_SELECTIONS = 1;
+
+/**
+ * Clicks a stage's result exactly once. A result whose node the widget replaced before the click
+ * landed (an autocomplete or result list re-rendering itself) was never activated, so the stage is
+ * looked up again and its fresh node clicked instead; a click that did land is never repeated.
+ */
+async function clickStageResult(
+  ctx: DiscoveryContext,
+  first: FoundResult,
+  beforeClick: (found: FoundResult) => Promise<void>,
+): Promise<{ found: FoundResult; outcome: GuardedClickOutcome }> {
+  let found = first;
+  for (let attempt = 0; ; attempt += 1) {
+    const attached = await found.handle.evaluate((el) => el.isConnected).catch(() => false);
+    let outcome: GuardedClickOutcome = "detached";
+    if (attached) {
+      await beforeClick(found);
+      outcome = await guardedClick(ctx.probe, found.handle);
+    }
+    if (outcome !== "detached" || attempt >= STALE_RESULT_REFINDS) return { found, outcome };
+    const again = await pollForStageResult(ctx, STALE_RESULT_REFIND_WAIT_MS, 0, STALE_RESULT_REFIND_WAIT_MS);
+    if (!again.result) return { found, outcome };
+    found = again.result;
+  }
+}
+
+/**
+ * What a visitor would actually press for this result: the element itself, or, for a native
+ * radio/checkbox whose own box is visually hidden (moved off-screen, collapsed or transparent),
+ * its first rendered label. Null when the element is no longer attached.
+ */
+async function pointerTarget(handle: ElementHandle<SVGElement | HTMLElement>): Promise<ElementHandle<SVGElement | HTMLElement> | null> {
+  const target = await handle
+    .evaluateHandle((el: Element) => {
+      if (!el.isConnected) return null;
+      if (!el.matches('input[type="radio"], input[type="checkbox"]')) return el;
+      const candidates: Element[] = [el, ...Array.from((el as HTMLInputElement).labels ?? [])];
+      const wrapping = el.closest("label");
+      if (wrapping && !candidates.includes(wrapping)) candidates.push(wrapping);
+      for (const node of candidates) {
+        const r = node.getBoundingClientRect();
+        const s = getComputedStyle(node);
+        const rendered = r.width > 1 && r.height > 1 && s.visibility !== "hidden" && s.display !== "none" && Number(s.opacity) !== 0;
+        if (rendered && r.right > 0 && r.bottom + window.scrollY > 0) return node;
+      }
+      return el;
+    })
+    .catch(() => null);
+  const element = (target?.asElement() ?? null) as ElementHandle<SVGElement | HTMLElement> | null;
+  if (element) return element;
+  return (await handle.evaluate((el) => el.isConnected).catch(() => false)) ? handle : null;
+}
+
 /** Clicks a frozen element with the implicit-submit guard told to let exactly this element through. */
-async function guardedClick(probe: DealerLookupProbe, handle: ElementHandle<SVGElement | HTMLElement>): Promise<void> {
+async function guardedClick(probe: DealerLookupProbe, handle: ElementHandle<SVGElement | HTMLElement>): Promise<GuardedClickOutcome> {
+  const target = await pointerTarget(handle);
+  if (!target) return "detached";
   await probe.allow(handle);
-  await handle.click({ timeout: 5000 }).catch(() => {});
+  const clicked = await target
+    .click({ timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
   await probe.allow(null);
+  if (clicked) return "clicked";
+  return (await handle.evaluate((el) => el.isConnected).catch(() => false)) ? "failed" : "detached";
 }
 
 /**
@@ -1636,23 +1707,25 @@ async function resolveDealerLookupCore(
 
   // Stage 1: select the location/postcode suggestion. Mark before clicking (see the trigger click
   // above), and snapshot hidden state right before the click so only this click's commit counts.
-  const stage1Found = stage1.result;
+  // Baseline this stage's own elements (the selection's siblings) before the click, never after:
+  // a result the click itself renders, generic or ARIA, belongs to the next stage.
   const stage1HiddenBefore = await probe.hiddenState();
-  await markAlreadyActivated(stage1Found.handle);
-  await retireVisibleStageResults(page);
   const stage1StartMs = network.now();
   network.setStep("click_location_suggestion");
   const stage1ClickStarted = Date.now();
-  await guardedClick(probe, stage1Found.handle);
+  const baselineStageBeforeClick = async (found: FoundResult): Promise<void> => {
+    await markAlreadyActivated(found.handle);
+    await retireVisibleStageResults(page);
+    await markBaselineCandidates(scope);
+    ctx.stageSeq = await probe.markStage();
+  };
+  const stage1Click = await clickStageResult(ctx, stage1.result, baselineStageBeforeClick);
+  const stage1Found = stage1Click.found;
   eventsDispatched.push("click_location_suggestion");
   const stage1Commit = await waitForSelectionCommit(page, stage1Found.handle, probe, stage1HiddenBefore);
   await recordStep("click_location_suggestion", stage1ClickStarted, stage1StartMs, true, false);
   const stage1Verified = stage1Commit.selectedState || stage1Commit.hiddenCommit;
   const afterStage1Hidden = await probe.hiddenState();
-
-  // Re-baseline so this stage's own elements never register as "new" in the next stage.
-  await markBaselineCandidates(scope);
-  ctx.stageSeq = await probe.markStage();
 
   // Stage 2 (Pattern C): a distinct confirm/OK/search control, not yet clicked, only if a
   // dealer-results widget hasn't already appeared on its own.
@@ -1697,15 +1770,24 @@ async function resolveDealerLookupCore(
   });
 
   if (stage3.result) {
-    const dealerFound = stage3.result;
-    const dealerHiddenBefore = await probe.hiddenState();
-    const dealerStartMs = network.now();
-    network.setStep("click_dealer_result");
-    const dealerClickStarted = Date.now();
-    await guardedClick(probe, dealerFound.handle);
-    eventsDispatched.push("click_dealer_result");
-    const dealerCommit = await waitForSelectionCommit(page, dealerFound.handle, probe, dealerHiddenBefore);
-    await recordStep("click_dealer_result", dealerClickStarted, dealerStartMs, true, false);
+    // A dealer choice can take one more selection than the stages above: a dealer card that opens
+    // its own detail view, whose control is what commits. Each further stage only ever considers
+    // what the previous click rendered, and stops at the first verified commit.
+    let next: FoundResult | null = stage3.result;
+    let dealerFound: FoundResult = stage3.result;
+    let dealerCommit: SelectionCommitEvidence = { selectedState: false, hiddenCommit: false, hiddenPurposes: [] };
+    for (let selection = 0; next && selection <= DEALER_FOLLOW_UP_SELECTIONS; selection += 1) {
+      const dealerHiddenBefore = await probe.hiddenState();
+      const dealerStartMs = network.now();
+      network.setStep("click_dealer_result");
+      const dealerClickStarted = Date.now();
+      dealerFound = (await clickStageResult(ctx, next, baselineStageBeforeClick)).found;
+      eventsDispatched.push("click_dealer_result");
+      dealerCommit = await waitForSelectionCommit(page, dealerFound.handle, probe, dealerHiddenBefore);
+      await recordStep("click_dealer_result", dealerClickStarted, dealerStartMs, true, false);
+      if (dealerCommit.selectedState || dealerCommit.hiddenCommit || selection === DEALER_FOLLOW_UP_SELECTIONS) break;
+      next = (await fullStageWait("await_dealer_follow_up")).result;
+    }
     const dealerVerified = dealerCommit.selectedState || dealerCommit.hiddenCommit;
     const dealerWasGeneric = !dealerFound.authoritative;
 
