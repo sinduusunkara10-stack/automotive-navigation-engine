@@ -67,6 +67,23 @@ export interface SemanticPanelEvidence {
   causingControlLabel?: string;
 }
 
+/**
+ * Structurally identical to (but decoupled from) core/verifiedSubmission.ts's VerifiedFormSubmission:
+ * the engine's own record that one form was filled, passed readiness, was submitted once and was
+ * followed by on-page completion evidence. Never derived from analytics.
+ */
+export interface SemanticVerifiedFormSubmission {
+  stepIndex: number;
+  requiredFieldsDetected: number;
+  requiredFieldsFilled: number;
+  preSubmitReadinessPassed: true;
+  submitAttempts: number;
+  confirmationSignals: string[];
+  formStillPresentAfterSubmit: boolean;
+  businessRequestObserved: boolean;
+  analyticsCorroboration: boolean;
+}
+
 export interface SemanticVerificationInput {
   /** The task's objective text, verbatim -- may be written in any language. */
   objective: string;
@@ -91,6 +108,8 @@ export interface SemanticVerificationInput {
    * content-only cache-key behaviour.
    */
   runStateMarker?: { surfaceGeneration: number; stepIndex: number };
+  /** Present only once the run holds a verified form submission -- see SemanticVerifiedFormSubmission. */
+  verifiedFormSubmission?: SemanticVerifiedFormSubmission;
 }
 
 export interface SemanticVerificationOutcome {
@@ -151,9 +170,22 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "whether that panel/surface appeared -- it never disqualifies a different criterion (e.g. " +
     "that a specific control was clicked) whose own completion \"lastActionEvidence\" alone " +
     "already genuinely supports, regardless of what relevanceTier says about an unrelated " +
-    "panel that happens to be open. Never output an action, URL, selector, or code. Give an honest " +
+    "panel that happens to be open. When \"verifiedFormSubmission\" is present, the engine itself (never " +
+    "you) observed earlier in this run that one form had every required field filled " +
+    "(requiredFieldsFilled equals requiredFieldsDetected), passed its pre-submit readiness checks, was " +
+    "submitted, and was followed by completion evidence on the page itself (confirmationSignals: a URL " +
+    "change, an on-screen confirmation, a success status surface, or the form being replaced after an " +
+    "accepted response). Analytics and tracking events are never part of it; \"analyticsCorroboration\" " +
+    "is supporting context only and never decides anything. Use it for exactly three kinds of criterion: " +
+    "one asking that a form's details or fields be filled in; one asking that the form be submitted or " +
+    "sent; and one that only instructs the run to stop, return or finish and describes no page state of " +
+    "its own (criteria are checked strictly in order, so you are only asked about it once every earlier " +
+    "one is satisfied). Each of those is satisfied by it, and the post-submission page no longer " +
+    "showing the form is expected, not contradictory. It never satisfies any other criterion (reaching " +
+    "another page, choosing an option, any further navigation): judge those on the page evidence alone. " +
+    "Never output an action, URL, selector, or code. Give an honest " +
     "confidence for how sure you are, and always cite the specific page evidence (a short " +
-    "quote) that supports your verdict, even when the verdict is that the page does not match.";
+    "quote, or the verifiedFormSubmission fields you relied on) that supports your verdict, even when the verdict is that the page does not match.";
 
   const payload = {
     objective: input.objective,
@@ -167,6 +199,7 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     },
     ...(input.lastActionEvidence ? { lastActionEvidence: input.lastActionEvidence } : {}),
     ...(input.panelEvidence ? { panelEvidence: input.panelEvidence } : {}),
+    ...(input.verifiedFormSubmission ? { verifiedFormSubmission: input.verifiedFormSubmission } : {}),
   };
 
   return { system, user: JSON.stringify(payload) };
@@ -202,6 +235,7 @@ function buildCacheKey(input: SemanticVerificationInput): string {
     lastActionEvidence: input.lastActionEvidence,
     panelEvidence: input.panelEvidence,
     runStateMarker: input.runStateMarker,
+    verifiedFormSubmission: input.verifiedFormSubmission,
   });
 }
 

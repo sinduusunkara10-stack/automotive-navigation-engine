@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Book a Test Drive</title>
+  </head>
+  <body>
+    <header>
+      <nav><a href="#models">Models</a> <a href="#offers">Offers</a></nav>
+    </header>
+    <main>
+      <journey-lead-app></journey-lead-app>
+    </main>
+    <script>
+      // A lead form whose confirmation offers a "Modify my details" control that reopens the form,
+      // as the 2026-10-30 live run did. dom=light|shadow renders the same app in the light DOM or in
+      // one open shadow root. scenario: ok | reject | unconfirmed | analytics_only.
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get("scenario") || "ok";
+      window.__leadPosts = [];
+      window.__submitEvents = 0;
+      window.dataLayer = window.dataLayer || [];
+
+      const FORM = `
+        <h2>Request a test drive</h2>
+        <form id="lead" novalidate>
+          <p><label for="first-name">First name*</label><input id="first-name" name="firstName" required /></p>
+          <p><label for="last-name">Last name*</label><input id="last-name" name="lastName" required /></p>
+          <p><label for="email">Email*</label><input id="email" name="email" type="email" required aria-describedby="email-error" /><span id="email-error"></span></p>
+          <p><label for="phone">Mobile*</label><input id="phone" name="phone" type="tel" required /></p>
+          <p><input type="checkbox" id="privacy" name="privacyAccepted" required /><label for="privacy">I have read and accept the privacy policy*</label></p>
+          <p id="form-error" role="alert"></p>
+          <button type="submit" id="send">Send request</button>
+        </form>
+        <div id="done" role="status" hidden>
+          <p>Thank you, your request has been received. A dealer will contact you shortly.</p>
+          <button type="button" id="modify">Modify my details</button>
+        </div>
+      `;
+
+      customElements.define(
+        "journey-lead-app",
+        class extends HTMLElement {
+          connectedCallback() {
+            if (this.shadowRoot || this.childElementCount > 0) return;
+            const root = params.get("dom") === "shadow" ? this.attachShadow({ mode: "open" }) : this;
+            root.innerHTML = FORM;
+            const $ = (id) => root.querySelector("#" + id);
+            const form = $("lead");
+            $("modify").addEventListener("click", () => {
+              $("done").hidden = true;
+              form.hidden = false;
+            });
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              window.__submitEvents += 1;
+              $("email-error").textContent = "";
+              $("email").removeAttribute("aria-invalid");
+              if (scenario === "reject") {
+                $("email").setAttribute("aria-invalid", "true");
+                $("email-error").textContent = "Please enter a valid email address";
+                $("form-error").textContent = "Please correct the highlighted fields";
+                return;
+              }
+              const body = Object.fromEntries(new FormData(form).entries());
+              window.__leadPosts.push(body);
+              const response = await fetch("/api/lead", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+              if (!response.ok) return;
+              if (scenario === "unconfirmed") return;
+              if (scenario === "analytics_only") {
+                window.dataLayer.push({ event: "lead_success", virtualPagePath: "/request/confirmation" });
+                return;
+              }
+              form.hidden = true;
+              $("done").hidden = false;
+            });
+          }
+        },
+      );
+    </script>
+  </body>
+</html>

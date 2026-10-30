@@ -53,6 +53,7 @@ import { detectClosedAdoptedSurfaces, returnToParentSurface } from "./surfaceRet
 import { shouldEnterInDocumentSurface, shouldLeaveInDocumentSurface } from "./inDocumentSurface.js";
 import { gatherPanelEvidence, looksLikeGenericDismissControl, type PanelEvidence } from "./panelEvidence.js";
 import { tokenize } from "../discovery/relevance.js";
+import { deriveVerifiedFormSubmission, isFormInteractionTarget } from "./verifiedSubmission.js";
 import {
   DEFAULT_MAX_BRANCH_DEPTH,
   MAX_CANDIDATE_BUDGET_PER_DECISION_POINT,
@@ -437,6 +438,7 @@ export async function runStep(params: {
       undefined,
       panelContextPreAction,
       { surfaceGeneration: state.surfaceGeneration, stepIndex },
+      state.verifiedFormSubmission,
     )
   ).forEach((id) => {
     state.satisfiedCriteriaIds.add(id);
@@ -1254,7 +1256,7 @@ export async function runStep(params: {
   // it to the target a real decision selected or the effective action that actually
   // failed, never to an arbitrary DOM-order guess.
 
-  let { decision, safetyResult, effectiveAction } = await obtainDecision({ task, state, observation, reasoning });
+  let { decision, safetyResult, effectiveAction } = await obtainDecision({ page, task, state, observation, reasoning });
 
   // PR 1C: Low-confidence recovery (see docs/architecture.md "Low-confidence recovery").
   // A stop_blocked decision caused specifically by the reasoning layer's own confidence
@@ -1279,7 +1281,7 @@ export async function runStep(params: {
       state.lowConfidenceRetriedFingerprints.add(lowConfidenceFingerprint);
       await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
       const freshObservation = withActiveSurface(await buildObservation(page), state);
-      const lowConfidenceRetry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
+      const lowConfidenceRetry = await obtainDecision({ page, task, state, observation: freshObservation, reasoning });
       observation = freshObservation;
       decision = lowConfidenceRetry.decision;
       safetyResult = lowConfidenceRetry.safetyResult;
@@ -1393,7 +1395,7 @@ export async function runStep(params: {
     ]);
     const proposedCandidate = computeCandidateIdentity(decision.action, observation);
     if (proposedCandidate && exhaustedIds.has(proposedCandidate.id)) {
-      const exhaustedRetry = await obtainDecision({ task, state, observation, reasoning });
+      const exhaustedRetry = await obtainDecision({ page, task, state, observation, reasoning });
       decision = exhaustedRetry.decision;
       safetyResult = exhaustedRetry.safetyResult;
       effectiveAction = exhaustedRetry.effectiveAction;
@@ -1475,7 +1477,7 @@ export async function runStep(params: {
     recoveryAttempts += 1;
     const freshObservation = withActiveSurface(await buildObservation(page), state);
     rememberDestinationUrls(freshObservation);
-    const retry = await obtainDecision({ task, state, observation: freshObservation, reasoning });
+    const retry = await obtainDecision({ page, task, state, observation: freshObservation, reasoning });
     observation = freshObservation;
     decision = retry.decision;
     safetyResult = retry.safetyResult;
@@ -1531,18 +1533,18 @@ export async function runStep(params: {
       pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
       state.archiveActiveBranch();
       state.markAnchorRecovered(branch.decisionPointId, stepIndex);
-      const zeroHopRetry = await obtainDecision({ task, state, observation, reasoning });
+      const zeroHopRetry = await obtainDecision({ page, task, state, observation, reasoning });
       decision = zeroHopRetry.decision;
       safetyResult = zeroHopRetry.safetyResult;
       effectiveAction = zeroHopRetry.effectiveAction;
-    } else if (task.safety.allowedActions.includes("go_back")) {
+    } else if (!state.verifiedFormSubmission && task.safety.allowedActions.includes("go_back")) {
       branch.returnHopsBudget = branch.depth + 1;
       branch.returnHopsAttempted += 1;
       effectiveAction = { type: "go_back" };
       branchReturnAttempted = true;
     } else {
-      // go_back is not an allowed action at all -- there is no way to even attempt a
-      // return, so the branch is closed unrestored and the existing stop_blocked handling
+      // go_back is not an allowed action at all, or a verified submission already exists and
+      // retreating through history after a sent lead is never safe -- the branch is closed unrestored and the existing stop_blocked handling
       // below runs unmodified (effectiveAction is still stop_blocked).
       branch.returnStatus = "restore_failed";
       pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
@@ -1575,6 +1577,7 @@ export async function runStep(params: {
   // such a call itself, making a blind go_back from about:blank impossible regardless of
   // which of these two layers would otherwise have let it through.
   const journeyReplanningEligible =
+    !state.verifiedFormSubmission &&
     !branchActiveAndExploring &&
     !branchReturnAttempted &&
     effectiveAction.type === "stop_blocked" &&
@@ -1699,7 +1702,7 @@ export async function runStep(params: {
         hopsBudget: 0,
         restored: true,
       });
-      const anchorRetry = await obtainDecision({ task, state, observation, reasoning });
+      const anchorRetry = await obtainDecision({ page, task, state, observation, reasoning });
       decision = anchorRetry.decision;
       safetyResult = anchorRetry.safetyResult;
       effectiveAction = anchorRetry.effectiveAction;
@@ -2004,6 +2007,10 @@ export async function runStep(params: {
           activeSurfaceInfo: effectiveAction.type === "fill_form" ? observation.activeSurface : undefined,
           optionalConsentOptInFallbackForTest: effectiveAction.type === "fill_form" ? task.safety.allowOptionalConsentOptInFallbackForTest === true : undefined,
         });
+
+  if (effectiveAction.type === "fill_form" && !state.verifiedFormSubmission) {
+    state.verifiedFormSubmission = deriveVerifiedFormSubmission(actionResult, stepIndex);
+  }
 
   // Segment attribution (analytics-capture reliability fix, URL-gate correction): captured
   // the instant actionResult resolves -- the boundary between "during physical dispatch"
@@ -2561,6 +2568,7 @@ export async function runStep(params: {
       actionResult.surfaceChangeDetected === true,
       panelContextPostAction,
       { surfaceGeneration: state.surfaceGeneration, stepIndex },
+      state.verifiedFormSubmission,
     );
     if (chainResult.length === 0) {
       break;
@@ -2874,6 +2882,18 @@ export async function runStep(params: {
     };
   }
 
+  // A verified submission with every required milestone satisfied is the objective's end: stopping
+  // here, without another reasoning call, is what keeps a confirmation page's own controls (an
+  // edit/modify button, a reopened form, its Submit) from ever being clicked into a second lead.
+  if (
+    state.verifiedFormSubmission &&
+    actionResult.success &&
+    !["stop_success", "stop_blocked", "stop_failure"].includes(effectiveAction.type) &&
+    getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length === 0
+  ) {
+    return { stepLog, terminal: "success", finishReason: "objective_complete_after_verified_submission" };
+  }
+
   if (effectiveAction.type === "stop_success") {
     if (!stopSuccessRejected) {
       return { stepLog, terminal: "success", finishReason: "stop_success_action" };
@@ -3129,12 +3149,22 @@ function recordJourneyPathEntry(captures: Captures, captureModules: CaptureModul
  * -- when the first decision's click target turns out to be stale (see runStep above).
  */
 async function obtainDecision(params: {
+  page: Page;
   task: ResolvedTaskRequest;
   state: RunState;
   observation: Observation;
   reasoning: ReasoningProvider;
 }): Promise<{ decision: Decision; safetyResult: SafetyCheckResult; effectiveAction: SelectedAction }> {
-  const { task, state, observation, reasoning } = params;
+  const { page, task, state, observation, reasoning } = params;
+  if (state.verifiedFormSubmission && getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds).length === 0) {
+    const decision: Decision = {
+      action: { type: "stop_success" },
+      rationale:
+        `Every required milestone is satisfied and the form submitted at step ${state.verifiedFormSubmission.stepIndex} was ` +
+        `confirmed on the page (${state.verifiedFormSubmission.confirmationSignals.join(", ")}); the engine stops without a further decision.`,
+    };
+    return { decision, safetyResult: { allowed: true, flags: [] }, effectiveAction: decision.action };
+  }
   // Surface adoption: see runStep's own local of the same name -- keeps the reasoning
   // layer's own declared allowedDomains, and the safety layer's navigate-target check
   // below, consistent with what actions/navigate.ts and actions/click.ts's destinationUrl
@@ -3325,6 +3355,15 @@ async function obtainDecision(params: {
     },
     consentControlIntent: decision.consentControlIntent,
   });
+
+  if (
+    state.verifiedFormSubmission &&
+    (decision.action.type === "fill_form" ||
+      (decision.action.type === "click" && decision.action.target !== undefined && (await isFormInteractionTarget(page, decision.action.target))))
+  ) {
+    safetyResult.allowed = false;
+    safetyResult.flags.push("duplicate_submission_prevented");
+  }
 
   const effectiveAction: SelectedAction = safetyResult.allowed ? decision.action : { type: "stop_blocked" };
   return { decision, safetyResult, effectiveAction };

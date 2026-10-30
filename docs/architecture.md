@@ -4553,3 +4553,41 @@ characters, below the about-12 000-character cut a downstream extractor applies.
 crop is re-shot at lower JPEG quality, then with tighter padding. If it still does not fit, it is
 reported in `omittedStages`. `dealer-locator-widget.html` adds `consent=named|text|ambiguous|late`
 and `consentError=outside`, in light DOM and open shadow DOM.
+
+### Milestones after a verified form submission (no contract change; request 1.51.0 and response 1.53.0 unchanged)
+
+A live run's `fill_form` filled 6/6 required fields, passed readiness, pressed Submit once and saw
+an on-screen confirmation with the form gone. The objective's later milestones ("fill out the
+details of the form", "submit the form", "stop and return") were still never satisfied:
+- The semantic verifier saw only the page's light-DOM chrome (a menu). Nothing of the `fill_form`
+  result ever reached it.
+- The run therefore kept exploring. It clicked the confirmation's own "modify" control, which
+  reopened the form, then pressed its Submit again. A second lead id followed.
+
+`src/core/verifiedSubmission.ts` closes both gaps:
+- `deriveVerifiedFormSubmission` turns one `fill_form` result into a run fact (`RunState.
+  verifiedFormSubmission`) only when all of these hold:
+  - `formFillOutcome` is `submitted` and `submissionOutcome` is `succeeded`;
+  - pre-submit readiness passed, and every detected required field was filled with none unmapped;
+  - the observer's terminal state is `succeeded` with at least one on-page signal: a URL change,
+    an on-screen confirmation, a success status surface, or the form replaced after an accepted
+    response.
+  A Submit click alone, a validation failure, an unconfirmed or cancelled outcome, and an analytics
+  event alone (`virtual_page_success_event`) never qualify. Analytics is kept only as
+  `analyticsCorroboration`. A business request is reported as observed or not; it is never inferred.
+- `evaluateSuccessCriteria` forwards the fact to the semantic verifier for every later
+  `semantic_page_match` check. The verifier prompt allows it to satisfy exactly three kinds of
+  criterion: filling in a form, submitting it, and a pure stop/return instruction. Any other
+  criterion is still judged on page evidence alone. The ordered milestone gate is unchanged, and
+  the fact is part of the verifier's cache key.
+- Termination. Once the fact exists and no required milestone is missing, the step ends the run
+  as `success` with `finishReason` `objective_complete_after_verified_submission`. A later step
+  in that state gets an engine-issued `stop_success` with no reasoning call.
+- Duplicate-submit guard. After the fact exists, a `fill_form` decision is refused, and so is a
+  click on a submit control or anything inside a form (light DOM or open shadow root;
+  `isFormInteractionTarget`). The safety flag is `duplicate_submission_prevented`. Journey
+  replanning and branch-return `go_back` are not attempted, so the run stops blocked.
+
+`tests/fixtures/post-submit-journey.html` is a lead form whose confirmation offers a "Modify my
+details" control. It runs in light DOM and in an open shadow root, with
+`scenario=ok|reject|unconfirmed|analytics_only`.
