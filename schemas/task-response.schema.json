@@ -4788,6 +4788,127 @@
                   ]
                 }
               }
+            },
+            "siteRejectedConsentRecovery": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "groups",
+                "rejectedFieldIdsOutsideConsentGroups",
+                "allRejectedGroupsAnswered",
+                "readinessFailuresAfterRecovery"
+              ],
+              "description": "1.53.0 additive amendment. Present only when a Submit was cancelled and the site's own validator rejected fields: the radio groups it rejected, each classified again and declined only when proven an optional commercial purpose, plus the readiness re-check before the one recovery Submit. Never a label, value or page text.",
+              "properties": {
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "groupId",
+                      "memberFieldIds",
+                      "rejectionLinks",
+                      "purpose",
+                      "purposeEvidence",
+                      "checkedBefore",
+                      "checkedAfter",
+                      "action",
+                      "checkedStateVerified",
+                      "reason"
+                    ],
+                    "properties": {
+                      "groupId": {
+                        "type": "string"
+                      },
+                      "memberFieldIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "rejectionLinks": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "member_validator_invalid",
+                            "group_error_surface"
+                          ]
+                        }
+                      },
+                      "purpose": {
+                        "type": "string",
+                        "enum": [
+                          "required_privacy_processing",
+                          "terms_and_conditions",
+                          "optional_marketing",
+                          "optional_profiling",
+                          "optional_third_party",
+                          "customer_qualification",
+                          "journey_intent",
+                          "ambiguous"
+                        ]
+                      },
+                      "purposeEvidence": {
+                        "type": "string"
+                      },
+                      "checkedBefore": {
+                        "type": "string",
+                        "enum": [
+                          "positive",
+                          "negative",
+                          "unknown",
+                          "none"
+                        ]
+                      },
+                      "checkedAfter": {
+                        "type": "string",
+                        "enum": [
+                          "positive",
+                          "negative",
+                          "unknown",
+                          "none"
+                        ]
+                      },
+                      "action": {
+                        "type": "string",
+                        "enum": [
+                          "declined_optional_commercial",
+                          "decline_not_verified",
+                          "left_unanswered_purpose_not_proven",
+                          "not_actionable",
+                          "already_answered"
+                        ]
+                      },
+                      "checkedStateVerified": {
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "rejectedFieldIdsOutsideConsentGroups": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "allRejectedGroupsAnswered": {
+                  "type": "boolean"
+                },
+                "readinessFailuresAfterRecovery": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         },
@@ -4848,6 +4969,8 @@
                       "dealer_after_follow_up",
                       "before_readiness",
                       "validation_errors_visible",
+                      "consent_validation_rejected",
+                      "consent_after_recovery",
                       "final_state"
                     ]
                   },

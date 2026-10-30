@@ -505,6 +505,10 @@ const RESCAN_SETTLE_MS = 100;
 // bounded rescans before it is reported as non-actionable.
 const NON_ACTIONABLE_RESCAN_WAIT_MS = 400;
 
+// A site's post-Submit validation can re-render a group's container (an error inside it becomes its
+// "question"), so a recovery classifies on the question seen before Submit as well as the live one.
+const preSubmitQuestionText = new WeakMap<Page, Map<string, string>>();
+
 const OPTIONAL_COMMERCIAL_PURPOSES = new Set<ConsentPurpose>(["optional_marketing", "optional_profiling", "optional_third_party"]);
 const REQUIRED_PURPOSES = new Set<ConsentPurpose>(["required_privacy_processing", "terms_and_conditions"]);
 
@@ -830,6 +834,7 @@ export async function resolveConsentGroups(
   const finalGroups = await discoverConsentGroups(form, { scroll: true });
   finalGroups.forEach((g) => lastSeen.set(g.groupId, g));
   const allGroups = [...lastSeen.values()];
+  preSubmitQuestionText.set(page, new Map(allGroups.map((g) => [g.groupId, g.questionText])));
   const unresolvedRequired = finalGroups.filter((g) => g.actionable && g.checkedMemberFieldId === null && g.requiredEvidence !== "none");
 
   const diagnostics: ConsentGroupDiagnostic[] = [];
@@ -1142,4 +1147,150 @@ export async function applyOptionalConsentOptInForTest(
     });
   }
   return { groups: results, rediscoveryCount: 1, allVerified: results.length > 0 && results.every((r) => r.verified) };
+}
+
+export type SiteRejectionLink = "member_validator_invalid" | "group_error_surface";
+
+export type SiteRejectedConsentAction =
+  | "declined_optional_commercial"
+  | "decline_not_verified"
+  | "left_unanswered_purpose_not_proven"
+  | "not_actionable"
+  | "already_answered";
+
+export interface SiteRejectedConsentGroup {
+  groupId: string;
+  memberFieldIds: string[];
+  /** How the site's rejection was tied to this group: its own members' validator state, or an error surface the validator found around or right after them. */
+  rejectionLinks: SiteRejectionLink[];
+  purpose: ConsentPurpose;
+  /** Which dictionary term or name token decided `purpose` -- never page text. */
+  purposeEvidence: string;
+  checkedBefore: OptionPolarity | "none";
+  checkedAfter: OptionPolarity | "none";
+  action: SiteRejectedConsentAction;
+  /** True when the decline read back as selected; null when nothing was clicked. */
+  checkedStateVerified: boolean | null;
+  reason: string;
+}
+
+export interface SiteRejectedConsentRecoveryResult {
+  groups: SiteRejectedConsentGroup[];
+  /** Rejected fields that belong to no radio group -- a consent answer can never fix those. */
+  rejectedFieldIdsOutsideConsentGroups: string[];
+  /** Every rejected group now carries a verified answer, and nothing else was rejected. */
+  allRejectedGroupsAnswered: boolean;
+}
+
+export interface SiteRejection {
+  /** Fields the site's validator showed as invalid after the cancellation (class, icon, message or aria-invalid). */
+  memberInvalidFieldIds: string[];
+  /** Fields inside, or immediately before, an error surface the validator could not attribute to one field. */
+  groupErrorFieldIds: string[];
+}
+
+/**
+ * After a cancelled Submit, the radio groups the site's own validator rejected are classified again
+ * -- on the question seen before Submit plus whatever the page shows now -- and only a group then
+ * proven to be an optional commercial purpose gets the same decline the pre-submit pass gives it,
+ * read back. Anything else is reported and left unanswered: a site requiring an answer never makes
+ * a guess, an acceptance, or a required-purpose acknowledgement safe.
+ */
+export async function recoverSiteRejectedConsentGroups(
+  page: Page,
+  form: Locator,
+  language: SupportedLanguage,
+  fieldByIndex: (form: Locator, index: string) => Promise<Locator>,
+  rejection: SiteRejection,
+  onRejectedGroup?: (group: ConsentGroupDescriptor, phase: "rejected" | "after_recovery") => Promise<void>,
+): Promise<SiteRejectedConsentRecoveryResult> {
+  const groups = await discoverConsentGroups(form, { scroll: true });
+  const memberInvalid = new Set(rejection.memberInvalidFieldIds);
+  const groupError = new Set(rejection.groupErrorFieldIds);
+  const priorQuestions = preSubmitQuestionText.get(page) ?? new Map<string, string>();
+  const results: SiteRejectedConsentGroup[] = [];
+  for (const group of groups) {
+    const links: SiteRejectionLink[] = [];
+    if (group.memberFieldIds.some((id) => memberInvalid.has(id))) links.push("member_validator_invalid");
+    if (group.checkedMemberFieldId === null && group.memberFieldIds.some((id) => groupError.has(id))) links.push("group_error_surface");
+    if (links.length === 0) continue;
+    const prior = priorQuestions.get(group.groupId) ?? "";
+    const questionText = prior && prior !== group.questionText ? `${prior} ${group.questionText}` : group.questionText;
+    const reclassified: ConsentGroupDescriptor = { ...group, questionText };
+    const classified = classifyGroup(reclassified, language);
+    const record = (action: SiteRejectedConsentAction, reason: string, checkedStateVerified: boolean | null = null, checkedAfter = checkedPolarity(group)): SiteRejectedConsentGroup => ({
+      groupId: group.groupId,
+      memberFieldIds: group.memberFieldIds,
+      rejectionLinks: links,
+      purpose: classified.purpose,
+      purposeEvidence: classified.evidence,
+      checkedBefore: checkedPolarity(group),
+      checkedAfter,
+      action,
+      checkedStateVerified,
+      reason,
+    });
+    await onRejectedGroup?.(group, "rejected");
+    if (group.checkedMemberFieldId !== null) {
+      results.push(record("already_answered", "the site rejected a group that already carries an answer; nothing to change"));
+      continue;
+    }
+    if (!group.actionable) {
+      results.push(record("not_actionable", `no option can be activated (${group.rejection?.reason ?? "not actionable"})`));
+      continue;
+    }
+    if (!OPTIONAL_COMMERCIAL_PURPOSES.has(classified.purpose)) {
+      results.push(record("left_unanswered_purpose_not_proven", `the site requires an answer, but the purpose is ${classified.purpose}; only a proven optional commercial purpose is declined`));
+      continue;
+    }
+    const outcome = await resolveOneGroup(form, reclassified, language, fieldByIndex, {});
+    const reread = (await discoverConsentGroups(form)).find((g) => g.groupId === group.groupId);
+    const checkedAfter = reread ? checkedPolarity(reread) : "none";
+    const verified = outcome.checkedStateVerified === true && checkedAfter === "negative";
+    await onRejectedGroup?.(reread ?? group, "after_recovery");
+    results.push(
+      verified
+        ? record("declined_optional_commercial", `${classified.purpose}: declined after the site required an answer`, true, checkedAfter)
+        : record("decline_not_verified", outcome.unresolvedReason ?? "the decline did not read back as selected", outcome.checkedStateVerified, checkedAfter),
+    );
+  }
+  const inGroups = new Set(groups.flatMap((g) => g.memberFieldIds));
+  const outside = [...memberInvalid].filter((id) => !inGroups.has(id));
+  return {
+    groups: results,
+    rejectedFieldIdsOutsideConsentGroups: outside,
+    allRejectedGroupsAnswered: results.length > 0 && outside.length === 0 && results.every((r) => r.action === "declined_optional_commercial"),
+  };
+}
+
+const CONSENT_REGION_ATTR = "data-nav-engine-consent-region";
+const CONSENT_REGION_MAX_HEIGHT_PX = 320;
+
+const MARK_REGION_SOURCE = `(formEl, arg) => {
+  formEl.querySelectorAll("[" + arg.regionAttr + "]").forEach((e) => e.removeAttribute(arg.regionAttr));
+  const members = arg.ids.map((id) => formEl.querySelector("[" + arg.fieldAttr + '="' + id + '"]')).filter(Boolean);
+  if (members.length === 0) return false;
+  const name = members[0].getAttribute("name");
+  const onlyThisGroup = (el) => Array.from(el.querySelectorAll('input[type="radio"]')).every((r) => r.getAttribute("name") === name);
+  let node = members[0].parentElement;
+  while (node && node !== formEl && !members.every((m) => node.contains(m))) node = node.parentElement;
+  if (!node || node === formEl) return false;
+  for (let i = 0; i < 3; i += 1) {
+    const parent = node.parentElement;
+    if (!parent || parent === formEl || !onlyThisGroup(parent) || parent.getBoundingClientRect().height > arg.maxHeight) break;
+    node = parent;
+  }
+  node.setAttribute(arg.regionAttr, "");
+  return true;
+}`;
+
+/** The smallest block holding the group's options, widened to its question and inline error while it holds no other group; null when none can be marked. */
+export async function consentGroupRegion(form: Locator, group: ConsentGroupDescriptor): Promise<Locator | null> {
+  const marked = await callInPageFunction<boolean>(form, "__navEngineMarkConsentRegion", MARK_REGION_SOURCE, {
+    ids: group.memberFieldIds,
+    fieldAttr: FIELD_INDEX_ATTR,
+    regionAttr: CONSENT_REGION_ATTR,
+    maxHeight: CONSENT_REGION_MAX_HEIGHT_PX,
+  }).catch(() => false);
+  return marked ? form.locator(`[${CONSENT_REGION_ATTR}]`).first() : null;
 }

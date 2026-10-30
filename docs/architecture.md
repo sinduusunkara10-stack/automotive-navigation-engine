@@ -4498,3 +4498,58 @@ view that still offers a choose control does not qualify, and neither does a lis
 place. Once a stage-1 click is confirmed this way, the lookup stops: anything else the click
 rendered would only undo the choice if pressed. The verification evidence is
 `selected_result_shown_in_separate_selected_section`.
+
+### Lead-form filling: consent the site requires only at Submit (additive to response 1.53.0; request 1.51.0 unchanged)
+
+A live run after the selected-section fix had a valid phone, a committed dealer and a passed
+readiness gate. Its single Submit was cancelled before any business request. Both options of one
+Yes/No consent group were unchecked. Neither carried a required marker, `aria-invalid` or native
+invalidity. After Submit, the site's validator gave both an error class and one inline "required"
+message.
+
+Two gaps let this through:
+- **Classification.** The pre-submit pass called the group `ambiguous` and left it alone. The
+  group's name split into `opt`/`in`/`mkg`, so the vocabulary's `optin` and its marketing
+  abbreviations never matched. The question's inflected "promotional" word also missed the one
+  English spelling in the vocabulary.
+- **Recovery.** The retry gate read only `postSubmit.invalidFieldIds`, which holds native and
+  `aria-invalid` invalidity. It never read the site-validator capture that already showed the
+  rejection, so it reported nothing to correct.
+
+Fixes in `src/forms/radioGroupClassifier.ts`:
+- `identifierTokens` also joins each adjacent pair of words, so `optIn` meets `optin`.
+- The marketing name tokens gain the generic abbreviations `mkg` and `mktng`.
+- The text vocabulary uses language-neutral stems (`promot`, `promoc`, `promoz`) in place of one
+  spelling. These match from a word start only.
+- A required acknowledgement bundled with any of these is still ambiguous.
+
+Recovery is `recoverSiteRejectedConsentGroups` in `src/forms/consentGroups.ts`, run from the
+`fillForm.ts` retry loop. A group counts as site-rejected when either:
+- the site's validator shows one of its members invalid; or
+- the validator found an error surface around the group, or right after it, that it could not tie
+  to one field.
+
+Each rejected group is classified again on the question seen before Submit plus the live page,
+which includes any newly rendered inline error. Only a proven optional commercial purpose
+(marketing, profiling, third-party sharing) gets the usual decline, read back. Anything else is
+reported and left unanswered: ambiguous, required processing or terms. Those groups are never
+accepted and never guessed.
+
+Submit is pressed once more only when:
+- every rejected group reads back declined;
+- nothing outside a radio group was rejected; and
+- the live readiness re-check passes (dealer, required consent groups, phone verdicts).
+
+That second press is the last: the existing two-click ceiling and the duplicate-lead guard still
+apply. `formPostSubmitDiagnostics.siteRejectedConsentRecovery` records each group's link to the
+rejection, its purpose, the action taken, the read-back and the readiness re-check. It never
+records a label, value or page text.
+
+With `FORM_VISUAL_EVIDENCE=1`, recovery adds two crops of the group's own block (options,
+question and inline error): `consent_validation_rejected` and `consent_after_recovery`.
+`submit_before_click` and `submit_outcome` are now cropped to the Submit control. A full viewport
+remains the fallback when the control is gone. A region crop is kept within 11 500 base64
+characters, below the about-12 000-character cut a downstream extractor applies. If needed the
+crop is re-shot at lower JPEG quality, then with tighter padding. If it still does not fit, it is
+reported in `omittedStages`. `dealer-locator-widget.html` adds `consent=named|text|ambiguous|late`
+and `consentError=outside`, in light DOM and open shadow DOM.

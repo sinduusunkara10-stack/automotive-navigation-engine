@@ -33,12 +33,16 @@ import { resolveLocationGate, type LocationGateOutcome } from "./locationGate.js
 import type { UnmappedFieldResolver } from "../forms/unmappedFieldResolver.js";
 import {
   applyOptionalConsentOptInForTest,
+  consentGroupRegion,
   consentGroupWillResolve,
   discoverConsentGroups,
+  recoverSiteRejectedConsentGroups,
   rediscoverOptionalConsentGroups,
   resolveConsentGroups,
   type ConsentGroupDescriptor,
   type ConsentGroupRejection,
+  type SiteRejectedConsentRecoveryResult,
+  type SiteRejection,
   type OptionalConsentOptInResult,
   type OptionalConsentRediscovery,
 } from "../forms/consentGroups.js";
@@ -97,7 +101,12 @@ import {
 import { gatherSemanticPageSignals } from "../core/semanticPageMatch.js";
 import { captureFieldValidationState, compareDomAndValidatorState, siteRejectedFields, type FormValidationStateCapture } from "./fieldValidationState.js";
 import { inventorySubmitListeners } from "./submitListenerInventory.js";
-import { isFormVisualEvidenceEnabled, startVisualEvidenceRecorder, type VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
+import {
+  isFormVisualEvidenceEnabled,
+  startVisualEvidenceRecorder,
+  VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS,
+  type VisualEvidenceRecorder,
+} from "../diagnostics/visualEvidence.js";
 import { observeLateFormRender, probeFormPresence } from "../diagnostics/formPresenceProbe.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
 import { isPhoneFieldKey } from "../forms/phoneFormat.js";
@@ -1063,6 +1072,13 @@ async function collectPostSubmitDiagnostics(form: Locator, dealerValueAlreadyVer
   };
 }
 
+function describeConsentRejection(recovery: SiteRejectedConsentRecoveryResult): string {
+  const groups = recovery.groups.map((g) => `${g.groupId} (${g.purpose}: ${g.action})`);
+  const outside = recovery.rejectedFieldIdsOutsideConsentGroups.length > 0 ? [`fields ${recovery.rejectedFieldIdsOutsideConsentGroups.join(", ")} outside any radio group`] : [];
+  const all = [...groups, ...outside];
+  return all.length > 0 ? all.join("; ") : "fields that belong to no detectable radio group";
+}
+
 async function detectCaptchaOnPage(page: Page): Promise<boolean> {
   const iframeSrcs = await page.evaluate<string[]>(`(${DEEP_QUERY_ALL_SOURCE})(document, "iframe").map((f) => f.getAttribute("src") || "")`);
   const elementAttributes = await page.evaluate<string[]>(
@@ -1802,10 +1818,14 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   if (consentResult.unresolvedRequiredConsentGroups.length > 0) {
     preSubmitReadinessFailures.push(`unresolved_required_consent_groups:${consentResult.unresolvedRequiredConsentGroups.join(",")}`);
   }
-  const phonesRejectedBySite: string[] = [];
-  for (const id of phoneValidations.keys()) {
-    if ((await phoneVerdict(form, await fieldByIndex(form, id), FIELD_INDEX_ATTR, id)).verdict.rejected) phonesRejectedBySite.push(id);
+  async function phonesRejectedBySiteNow(): Promise<string[]> {
+    const rejected: string[] = [];
+    for (const id of phoneValidations.keys()) {
+      if ((await phoneVerdict(form, await fieldByIndex(form, id), FIELD_INDEX_ATTR, id)).verdict.rejected) rejected.push(id);
+    }
+    return rejected;
   }
+  const phonesRejectedBySite = await phonesRejectedBySiteNow();
   if (phonesRejectedBySite.length > 0) {
     preSubmitReadinessFailures.push(`phone_rejected_by_site:${phonesRejectedBySite.join(",")}`);
   }
@@ -1971,6 +1991,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     submitBlockedBeforeClick: boolean;
     confirmationAppeared: boolean;
     observation: PostSubmitObservation | null;
+    siteRejection: SiteRejection;
   }> {
     const attemptNumber = attemptRecords.length + 1;
     const refresh = attemptNumber > 1 ? await refreshStateBeforeAttempt() : null;
@@ -2019,6 +2040,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
         submitBlockedBeforeClick: true,
         confirmationAppeared: false,
         observation: null,
+        siteRejection: { memberInvalidFieldIds: [], groupErrorFieldIds: [] },
       };
     }
     const confirmationBefore = await countConfirmationMarkers(page);
@@ -2040,7 +2062,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     // window", never by URL/brand. Never a request/response body, never a typed or submitted value.
     const capture = startDealerLookupNetworkCapture(page, { includeDocumentRequests: true });
     capture.setStep("submit_click");
-    await visualEvidenceByPage.get(page)?.capture("submit_before_click", attemptNumber);
+    await visualEvidenceByPage.get(page)?.capture("submit_before_click", attemptNumber, submit, { maxBase64Chars: VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS });
     await submit.click({ timeout: 10_000 }).catch(() => {});
     const { observation, urlChanged, confirmationAppeared: observedConfirmation } = await observeSubmissionOutcome({
       page,
@@ -2053,7 +2075,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       detectChallenge: detectCaptchaOnPage,
       config,
     });
-    await visualEvidenceByPage.get(page)?.capture("submit_outcome", attemptNumber);
+    await visualEvidenceByPage.get(page)?.capture("submit_outcome", attemptNumber, submit, { maxBase64Chars: VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS });
     const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
     capture.detachBodyFinishListener();
@@ -2107,7 +2129,17 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
             }
           : undefined,
     });
-    return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation };
+    const siteRejection: SiteRejection = {
+      memberInvalidFieldIds: [
+        ...new Set([...(record.validationAfter ? siteRejectedFields(null, record.validationAfter, new Map()).map((f) => f.fieldId) : []), ...postSubmit.invalidFieldIds, ...postSubmit.ariaInvalidFieldIds]),
+      ],
+      groupErrorFieldIds: [
+        ...new Set(
+          (record.validationAfter?.unattributedErrorSurfaces ?? []).flatMap((surface) => [...surface.containsFieldIds, ...(surface.nearestPrecedingFieldId ? [surface.nearestPrecedingFieldId] : [])]),
+        ),
+      ],
+    };
+    return { postSubmit, succeeded, afterUrl, networkRequests, businessRequests, submitControlEnabled, submitBlockedBeforeClick: false, confirmationAppeared, observation, siteRejection };
   }
 
   let attempt = await attemptSubmit(firstAttemptConfig);
@@ -2117,6 +2149,18 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   await captureAnalyticsPhase(page, captures, stepIndex, captureModules);
 
   let retryDecision = "not needed: the first submit succeeded";
+  let consentRecovery: (SiteRejectedConsentRecoveryResult & { readinessFailuresAfterRecovery: string[] }) | null = null;
+
+  /** The readiness conditions an answered consent group could have changed, re-read live before the one recovery Submit. */
+  async function readinessFailuresAfterRecovery(): Promise<string[]> {
+    const failures: string[] = [];
+    if (dealerLookupOutcome !== undefined && dealerLookupOutcome.dealerLookupTriggered && !dealerLookupOutcome.dealerValueVerified) failures.push("dealer_dependency_unresolved");
+    const unresolvedRequired = (await discoverConsentGroups(form)).filter((g) => g.actionable && g.checkedMemberFieldId === null && g.requiredEvidence !== "none");
+    if (unresolvedRequired.length > 0) failures.push(`unresolved_required_consent_groups:${unresolvedRequired.map((g) => g.groupId).join(",")}`);
+    const phones = await phonesRejectedBySiteNow();
+    if (phones.length > 0) failures.push(`phone_rejected_by_site:${phones.join(",")}`);
+    return failures;
+  }
 
   // Never treat requiredFieldsFilled/initial fill success as proof a dynamic widget's
   // dependent selection (e.g. a dealer-results list) is complete -- only a verified,
@@ -2130,7 +2174,12 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       dealerLookupOutcome.dealerLookupTriggered &&
       !dealerLookupOutcome.dealerValueVerified &&
       dealerLookupOutcome.executionTrace.retryRecommendation !== "none";
-    const correctiveActionAvailable = !attempt.submitBlockedBeforeClick && (dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0);
+    // The site's own validator (an error class, icon or inline message) can reject a radio group
+    // that carries no native invalidity and no aria-invalid at all; postSubmit.invalidFieldIds never
+    // sees that, so the consent recovery reads the validator capture instead.
+    const siteRejectionSeen = attempt.siteRejection.memberInvalidFieldIds.length + attempt.siteRejection.groupErrorFieldIds.length > 0;
+    const consentRecoveryPossible = !attempt.submitBlockedBeforeClick && !dealerUncommitted && consentRecovery === null && siteRejectionSeen;
+    const correctiveActionAvailable = !attempt.submitBlockedBeforeClick && (dealerUncommitted || attempt.postSubmit.invalidFieldIds.length > 0 || consentRecoveryPossible);
     // A business request the site accepted, or that was still pending, may already have created
     // the lead: resubmitting could duplicate it, so no retry is ever attempted after one.
     const businessRequestMayHaveLanded =
@@ -2152,6 +2201,37 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     if (submitClicks >= MAX_SUBMIT_ATTEMPTS) {
       retryDecision = `not retried: the ceiling of ${MAX_SUBMIT_ATTEMPTS} Submit clicks per form was reached`;
       break;
+    }
+
+    if (consentRecoveryPossible) {
+      const recovery = await recoverSiteRejectedConsentGroups(page, form, language, fieldByIndex, attempt.siteRejection, async (group, phase) => {
+        const region = await consentGroupRegion(form, group);
+        await visualEvidenceByPage.get(page)?.capture(phase === "rejected" ? "consent_validation_rejected" : "consent_after_recovery", submitClicks, region ?? undefined, {
+          maxBase64Chars: VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS,
+        });
+      });
+      consentRecovery = { ...recovery, readinessFailuresAfterRecovery: [] };
+      // A rejection that also names fields outside any radio group keeps the existing re-fill path,
+      // which re-reads and re-fills those fields before its own one Submit.
+      const consentOnly = recovery.groups.length > 0 && recovery.rejectedFieldIdsOutsideConsentGroups.length === 0;
+      if (consentOnly || attempt.postSubmit.invalidFieldIds.length === 0) {
+        if (!recovery.allRejectedGroupsAnswered) {
+          retryDecision = `not retried: the site rejected ${describeConsentRejection(recovery)}, and no proven optional commercial decline answers all of it`;
+          break;
+        }
+        const readinessFailures = await readinessFailuresAfterRecovery();
+        consentRecovery.readinessFailuresAfterRecovery = readinessFailures;
+        if (readinessFailures.length > 0) {
+          retryDecision = `not retried: after declining ${recovery.groups.map((g) => g.groupId).join(", ")} the readiness gate failed (${readinessFailures.join("; ")})`;
+          break;
+        }
+        retries += 1;
+        correctiveRetriesAfterSubmit += 1;
+        retryDecision = `retried ${retries}/${MAX_RETRIES}: declined ${recovery.groups.map((g) => g.groupId).join(", ")} after the site's validator required an answer, read it back, and re-ran readiness`;
+        attempt = await attemptSubmit(observationConfig);
+        if (!attempt.submitBlockedBeforeClick) submitClicks += 1;
+        break;
+      }
     }
 
     retries += 1;
@@ -2401,6 +2481,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     postSubmitObservation: attempt.observation,
     submitAttemptSummary,
     submitCancellationDiagnostics: buildSubmitCancellationDiagnostics(),
+    ...(consentRecovery ? { siteRejectedConsentRecovery: consentRecovery } : {}),
   };
 
   if (!attempt.succeeded) {

@@ -48,8 +48,10 @@ type ConsentPurposeVocabulary = { text: string[]; nameTokens: string[] };
 
 /**
  * Language-neutral by design: every language's phrases are matched regardless of the detected page
- * language, so a mislabelled or mixed-language page still classifies. Name tokens are generic
- * identifier stems and abbreviations, never a site's own field names.
+ * language, so a mislabelled or mixed-language page still classifies. A phrase longer than four
+ * characters matches from a word start, so a stem ("promot") covers every inflection that shares
+ * it in any language. Name tokens are generic identifier stems and abbreviations, never a site's
+ * own field names.
  */
 const CONSENT_PURPOSE_VOCABULARY: Record<"terms_and_conditions" | "optional_third_party" | "optional_profiling" | "optional_marketing" | "required_privacy_processing", ConsentPurposeVocabulary> = {
   terms_and_conditions: {
@@ -76,11 +78,11 @@ const CONSENT_PURPOSE_VOCABULARY: Record<"terms_and_conditions" | "optional_thir
   },
   optional_marketing: {
     text: [
-      "marketing", "newsletter", "promotional", "special offers", "receive offers", "receive communications", "commercial communications", "stay in touch", "news and offers",
+      "marketing", "newsletter", "promot", "promoc", "promoz", "special offers", "receive offers", "receive communications", "commercial communications", "stay in touch", "news and offers",
       "offres", "communications commerciales", "prospection", "actualites", "werbung", "angebote", "werbliche", "aanbiedingen", "nieuwsbrief",
       "offerte commerciali", "comunicazioni commerciali", "ofertas", "comunicaciones comerciales", "oferty", "informacje handlowe", "comunicacoes comerciais",
     ],
-    nameTokens: ["marketing", "mkt", "mrkt", "mktg", "newsletter", "promo", "promotional", "commercial", "offers", "optin", "advertising", "prospection"],
+    nameTokens: ["marketing", "mkg", "mkt", "mrkt", "mktg", "mktng", "newsletter", "promo", "promotional", "commercial", "offers", "optin", "advertising", "prospection"],
   },
   required_privacy_processing: {
     text: [
@@ -96,13 +98,20 @@ const CONSENT_PURPOSE_VOCABULARY: Record<"terms_and_conditions" | "optional_thir
   },
 };
 
-function identifierTokens(raw: string | undefined): string[] {
+/**
+ * camelCase, snake_case and dotted identifiers split into lowercase words, plus each adjacent
+ * pair joined, so a compound a site writes as two words ("optIn", "third_party") still meets the
+ * vocabulary's one-word form ("optin", "thirdparty").
+ */
+export function identifierTokens(raw: string | undefined): string[] {
   if (!raw) return [];
-  return raw
+  const words = raw
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
+  const pairs = words.slice(1).map((word, i) => words[i] + word);
+  return [...new Set([...words, ...pairs])];
 }
 
 function matchPurposeText(text: string, purpose: keyof typeof CONSENT_PURPOSE_VOCABULARY): string | undefined {
