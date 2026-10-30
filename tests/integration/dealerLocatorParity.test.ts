@@ -291,3 +291,32 @@ test("visual evidence stays off unless its flag is set", async () => {
   const run = await runLocator("dom=shadow&locality=empty&dealers=radios&phone=national");
   assert.equal(run.result.formVisualEvidence, undefined);
 });
+
+// The live 2026-10-28 dealer widget, as the owner's screenshots show it: a plain dealer card whose
+// click collapses the list under a "change" link and repeats the chosen dealer in its own selected
+// box with a checkmark, with no checked/ARIA state and no hidden field written until the form is
+// sent. Before this was recognised the engine kept clicking what the first click had rendered
+// (the "change" link, then the reopened list) and the run ended unresolved with no Submit.
+for (const dom of DOMS) {
+  test(`dealer locator (${dom} DOM): a dealer card shown again in its own selected section counts as committed -- clicked once, nothing after it, Submit once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    assert.equal(run.result.formDealerSearchDiagnostics?.dealerVerificationEvidence, "selected_result_shown_in_separate_selected_section");
+    const events = run.result.dealerLookupTrace!.execution!.eventsDispatched;
+    assert.equal(events.filter((e) => e.startsWith("click_") && e !== "click_trigger").length, 1, JSON.stringify(events));
+    assertNoStalledStep(run, dom);
+  });
+
+  test(`dealer locator (${dom} DOM): a dealer card that is only highlighted, with no selected section, stays blocked`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked&commit=no`);
+    assertBlockedWithoutSubmit(run, dom);
+    assert.equal(run.counters.dealerChoices, 1, "the card is pressed once, never repeated");
+  });
+
+  test(`dealer locator (${dom} DOM): the selected-section dealer and a phone the site accepts only in national format -- both verified, Submit exactly once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked&phone=national`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    assert.equal(phoneRecord(run).finalState, "no_rejection_observed");
+    assert.equal(run.counters.leadPosts[0]!.phone, "0639981234");
+  });
+}

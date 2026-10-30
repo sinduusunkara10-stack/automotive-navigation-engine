@@ -4474,3 +4474,27 @@ selection click pressed.
   readiness or with validation errors visible, and the final state. The cap rises to 20 shots.
   Control-level checkpoints are clipped to the control or widget when it is on screen, which keeps
   them small. A full viewport JPEG can exceed a downstream field-size limit.
+
+### Dealer lookup: a choice confirmed only by a separate selected section (no contract change)
+
+The owner's screenshots of the live dealer locator show how it confirms a choice. Clicking a
+dealer card repeats that dealer in its own bordered box, with a checkmark, under a "change" link.
+The run's trace shows the clicked card gained no checked or ARIA state, and no hidden dealer field
+was written at any step. The engine did not count that box as a commit, so it pressed what the
+click had rendered: first the change link, then a card in the reopened list. The run ended
+unresolved with no Submit. `dealers=picked` in `tests/fixtures/dealer-locator-widget.html`
+reproduces the live event sequence exactly on the unfixed code, in light DOM and in open shadow
+DOM.
+
+`src/actions/dealerSelectedSection.ts` adds a third kind of commit evidence. It requires a new,
+visible element that:
+- holds the clicked result's full text;
+- contains no control;
+- is not one of several similar siblings.
+
+Every element that existed before the click is marked first, so text written into an existing
+element never counts (a "selected: ..." line, or the field's value). A detail
+view that still offers a choose control does not qualify, and neither does a list re-rendered in
+place. Once a stage-1 click is confirmed this way, the lookup stops: anything else the click
+rendered would only undo the choice if pressed. The verification evidence is
+`selected_result_shown_in_separate_selected_section`.

@@ -26,6 +26,11 @@
       //                            new nodes, when the pointer first moves over them
       //   dealers=section          plain cards; a click moves the chosen dealer into a separate
       //                            "selected dealer" section and writes the hidden dealer fields
+      //   dealers=picked           plain cards; a click re-renders the widget (the search field
+      //                            included) with the list collapsed under a "Modifiez" link and
+      //                            the chosen dealer repeated in its own selected box with a
+      //                            checkmark; the choice lives in app state and is written to the
+      //                            hidden dealer fields only when the form is sent
       //   phone=national|never|any a required phone field validated on blur, with an inline error:
       //                            national accepts only a 10-digit number starting with 0, never
       //                            accepts nothing, any accepts every value
@@ -128,11 +133,39 @@
                 return;
               }
               results.innerHTML = `<ul class="list">` + records.map((r, i) => `<li class="card" data-i="${i}">${r.name}<br /><small>${r.city}</small></li>`).join("") + `</ul>`;
+              if (dealerMode === "picked") {
+                results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => pick(card, records[Number(card.dataset.i)])));
+                return;
+              }
               if (dealerMode === "section") {
                 results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => moveToSelectedSection(card, records[Number(card.dataset.i)])));
                 return;
               }
               results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => showDetail(records[Number(card.dataset.i)])));
+            };
+
+            let chosen = null;
+            const pick = (card, record) => {
+              window.__dealerChoices += 1;
+              if (!commits) {
+                card.classList.add("is-selected");
+                return;
+              }
+              chosen = record;
+              window.__dealerCommits += 1;
+              const q = $("dl-q").value;
+              showSearch();
+              $("dl-q").value = q;
+              const list = records.map((r, i) => `<li class="card" data-i="${i}">${r.name}<br /><small>${r.city}</small></li>`).join("");
+              $("dl-results").innerHTML = `
+                <a href="#" id="dl-change">Modifiez</a>
+                <div class="picked"><p>${record.name}</p><p><small>${record.city}</small></p><svg aria-hidden="true" width="12" height="12"><path d="M1 6l4 4 6-8" stroke="#000" fill="none" /></svg></div>
+                <ul class="list" hidden>${list}</ul>`;
+              $("dl-change").addEventListener("click", (event) => {
+                event.preventDefault();
+                $("dl-results").querySelector("ul.list").hidden = false;
+              });
+              $("dl-results").querySelectorAll("li.card").forEach((c) => c.addEventListener("click", () => pick(c, records[Number(c.dataset.i)])));
             };
 
             const moveToSelectedSection = (card, record) => {
@@ -225,6 +258,10 @@
             form.addEventListener("submit", async (event) => {
               event.preventDefault();
               window.__submitEvents += 1;
+              if (chosen) {
+                $("dl-id").value = chosen.id;
+                $("dl-name").value = chosen.name;
+              }
               const missing = ["f-first", "f-last", "f-email", "dl-id"].filter((id) => !$(id).value);
               if (phoneMode && !validatePhone()) missing.push("f-phone");
               if (missing.length > 0) {
