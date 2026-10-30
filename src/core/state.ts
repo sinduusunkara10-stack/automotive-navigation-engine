@@ -11,6 +11,7 @@ import type {
   SurfaceAdoptionAttemptDiagnostic,
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
+import type { VerifiedFormSubmission } from "./verifiedSubmission.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 import {
   isEquivalentCheckpoint,
@@ -135,6 +136,9 @@ export class RunState {
    * repeated-action safety guard eventually trips several steps later.
    */
   lastRejectedStopSuccessFingerprint: string | undefined;
+
+  /** Set once by core/verifiedSubmission.ts's deriveVerifiedFormSubmission; never cleared. */
+  verifiedFormSubmission: VerifiedFormSubmission | undefined;
 
   /**
    * Consecutive count of steps that ended in a staleTarget-classified action failure (see

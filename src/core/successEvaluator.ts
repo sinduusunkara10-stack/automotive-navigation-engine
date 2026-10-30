@@ -1,6 +1,6 @@
 import type { Page } from "playwright";
 import type { SuccessCriterion } from "../types/task-request.js";
-import type { LastActionEvidence, SemanticCriterionVerifier } from "../reasoning/semanticCriterionVerifier.js";
+import type { LastActionEvidence, SemanticCriterionVerifier, SemanticVerifiedFormSubmission } from "../reasoning/semanticCriterionVerifier.js";
 import type { MilestoneRollup } from "../types/branch.js";
 import type { MilestoneEvidenceRecord } from "../types/task-response.js";
 import { readDataLayerSnapshot } from "../capture-modules/dataLayerDelta.js";
@@ -142,6 +142,11 @@ const DEFAULT_SEMANTIC_MIN_SCORE = 0.4;
  * covered over. Never affects any other criterion type, and never changes behaviour when
  * omitted (every pre-existing caller).
  *
+ * `verifiedFormSubmission` is optional and off by default: once core/loop.ts holds a verified form
+ * submission (core/verifiedSubmission.ts), it is forwarded only to a semantic_page_match criterion
+ * that still needs semanticVerifier, as the engine's own structured fill/submit/confirmation record.
+ * The ordered gate below still decides which criterion is asked about.
+ *
  * Ordered-milestone gate (docs/n8n-integration.md §9f, the fix for the reported false-
  * success regression): every distinct criterion **group** with `required !== false` on any
  * member is one required milestone, milestones are read off `criteria` in declaration order
@@ -172,6 +177,7 @@ export async function evaluateSuccessCriteria(
   surfaceScoped?: boolean,
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
+  verifiedFormSubmission?: SemanticVerifiedFormSubmission,
 ): Promise<string[]> {
   const satisfiedAtCallStart = alreadySatisfiedCriteriaIds ?? new Set<string>();
   const eligibleCriteriaIds = computeEligibleCriteriaIds(criteria, satisfiedAtCallStart);
@@ -194,6 +200,7 @@ export async function evaluateSuccessCriteria(
       surfaceScoped,
       panelContext,
       runStateMarker,
+      verifiedFormSubmission,
     );
     if (result.satisfied) {
       satisfied.push(criterion.id);
@@ -480,6 +487,7 @@ async function evaluateSingle(
   surfaceScoped?: boolean,
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
+  verifiedFormSubmission?: SemanticVerifiedFormSubmission,
 ): Promise<SingleCriterionResult> {
   switch (criterion.type) {
     case "url_pattern": {
@@ -524,6 +532,7 @@ async function evaluateSingle(
         surfaceScoped,
         panelContext,
         runStateMarker,
+        verifiedFormSubmission,
       );
     }
     case "data_layer_event": {
@@ -666,6 +675,7 @@ async function evaluateSemanticPageMatch(
   surfaceScoped?: boolean,
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
+  verifiedFormSubmission?: SemanticVerifiedFormSubmission,
 ): Promise<SingleCriterionResult> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
@@ -779,14 +789,18 @@ async function evaluateSemanticPageMatch(
         }
       : {}),
     ...(runStateMarker ? { runStateMarker } : {}),
+    ...(verifiedFormSubmission ? { verifiedFormSubmission } : {}),
   });
+  const submissionNote = verifiedFormSubmission
+    ? ` [verified form submission from step ${verifiedFormSubmission.stepIndex} was forwarded: ${verifiedFormSubmission.requiredFieldsFilled}/${verifiedFormSubmission.requiredFieldsDetected} required fields, ${verifiedFormSubmission.submitAttempts} Submit, ${verifiedFormSubmission.confirmationSignals.join("+")}]`
+    : "";
   return {
     satisfied: verification.satisfied,
     evidenceSource: "semantic_page_match:verifier",
     score: verification.confidence,
     reason: verification.satisfied
-      ? `semanticVerifier confirmed a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}`
-      : `semanticVerifier did not confirm a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}`,
+      ? `semanticVerifier confirmed a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}${submissionNote}`
+      : `semanticVerifier did not confirm a match (confidence ${verification.confidence.toFixed(2)}): ${verification.evidence}${submissionNote}`,
   };
 }
 
