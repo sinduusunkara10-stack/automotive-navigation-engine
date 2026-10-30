@@ -24,6 +24,16 @@
       //   renderDelay=ms           the dealer records are rendered this long after they arrived
       //   rerender=1               the suggestion list and the dealer list each re-render once, with
       //                            new nodes, when the pointer first moves over them
+      //   dealers=section          plain cards; a click moves the chosen dealer into a separate
+      //                            "selected dealer" section and writes the hidden dealer fields
+      //   dealers=picked           plain cards; a click re-renders the widget (the search field
+      //                            included) with the list collapsed under a "Modifiez" link and
+      //                            the chosen dealer repeated in its own selected box with a
+      //                            checkmark; the choice lives in app state and is written to the
+      //                            hidden dealer fields only when the form is sent
+      //   phone=national|never|any a required phone field validated on blur, with an inline error:
+      //                            national accepts only a 10-digit number starting with 0, never
+      //                            accepts nothing, any accepts every value
       const params = new URLSearchParams(location.search);
       const localityMode = params.get("locality") || "list";
       const dealerMode = params.get("dealers") || "radios";
@@ -31,7 +41,8 @@
       const dealerDelay = Number(params.get("dealerDelay") || 0);
       const renderDelay = Number(params.get("renderDelay") || 0);
       const rerender = params.get("rerender") === "1";
-      Object.assign(window, { __leadPosts: [], __submitEvents: 0, __localityRequests: 0, __dealerRequests: 0, __dealerCommits: 0, __dealerChoices: 0, __localityChoices: 0 });
+      const phoneMode = params.get("phone");
+      Object.assign(window, { __leadPosts: [], __submitEvents: 0, __localityRequests: 0, __dealerRequests: 0, __dealerCommits: 0, __dealerChoices: 0, __localityChoices: 0, __phoneBlurValidations: 0 });
 
       const HTML = `
         <style>
@@ -39,6 +50,8 @@
           .sr { position: absolute; left: -9999px; width: 20px; height: 20px; }
           .card { display: block; padding: 8px; margin: 4px 0; border: 1px solid #999; cursor: pointer; }
           .card.is-selected { border-color: #000; background: #eee; }
+          .has-error input { border: 2px solid #c00; }
+          .field-error { color: #c00; display: block; }
           #dl-suggest li { padding: 4px; cursor: pointer; list-style: none; }
         </style>
         <form id="lead" novalidate>
@@ -46,6 +59,7 @@
           <div class="row"><label for="f-first">Prénom*</label><input id="f-first" name="firstName" type="text" required /></div>
           <div class="row"><label for="f-last">Nom*</label><input id="f-last" name="lastName" type="text" required /></div>
           <div class="row"><label for="f-email">E-mail*</label><input id="f-email" name="email" type="email" required /></div>
+          ${phoneMode ? `<div class="row" id="f-phone-row"><label for="f-phone">Téléphone*</label><input id="f-phone" name="phone" type="tel" required /><span class="field-error" id="f-phone-error" hidden></span></div>` : ""}
           <fieldset class="row" id="dl">
             <legend>Choisissez votre point de vente</legend>
             <div id="dl-view"></div>
@@ -119,7 +133,50 @@
                 return;
               }
               results.innerHTML = `<ul class="list">` + records.map((r, i) => `<li class="card" data-i="${i}">${r.name}<br /><small>${r.city}</small></li>`).join("") + `</ul>`;
+              if (dealerMode === "picked") {
+                results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => pick(card, records[Number(card.dataset.i)])));
+                return;
+              }
+              if (dealerMode === "section") {
+                results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => moveToSelectedSection(card, records[Number(card.dataset.i)])));
+                return;
+              }
               results.querySelectorAll("li.card").forEach((card) => card.addEventListener("click", () => showDetail(records[Number(card.dataset.i)])));
+            };
+
+            let chosen = null;
+            const pick = (card, record) => {
+              window.__dealerChoices += 1;
+              if (!commits) {
+                card.classList.add("is-selected");
+                return;
+              }
+              chosen = record;
+              window.__dealerCommits += 1;
+              const q = $("dl-q").value;
+              showSearch();
+              $("dl-q").value = q;
+              const list = records.map((r, i) => `<li class="card" data-i="${i}">${r.name}<br /><small>${r.city}</small></li>`).join("");
+              $("dl-results").innerHTML = `
+                <a href="#" id="dl-change">Modifiez</a>
+                <div class="picked"><p>${record.name}</p><p><small>${record.city}</small></p><svg aria-hidden="true" width="12" height="12"><path d="M1 6l4 4 6-8" stroke="#000" fill="none" /></svg></div>
+                <ul class="list" hidden>${list}</ul>`;
+              $("dl-change").addEventListener("click", (event) => {
+                event.preventDefault();
+                $("dl-results").querySelector("ul.list").hidden = false;
+              });
+              $("dl-results").querySelectorAll("li.card").forEach((c) => c.addEventListener("click", () => pick(c, records[Number(c.dataset.i)])));
+            };
+
+            const moveToSelectedSection = (card, record) => {
+              const section = document.createElement("section");
+              section.id = "dl-selected";
+              section.innerHTML = `<h3>Votre point de vente</h3>`;
+              card.classList.add("is-selected");
+              section.appendChild(card);
+              $("dl-results").innerHTML = "";
+              $("dl").insertBefore(section, $("dl-id"));
+              commit(record);
             };
 
             const showDetail = (record) => {
@@ -178,11 +235,35 @@
             };
             showSearch();
 
+            const phoneAccepted = (value) => (phoneMode === "national" ? /^0\d{9}$/.test(value) : phoneMode !== "never");
+            const validatePhone = () => {
+              const value = $("f-phone").value.trim();
+              const ok = value !== "" && phoneAccepted(value);
+              $("f-phone-row").classList.toggle("has-error", !ok);
+              $("f-phone-error").hidden = ok;
+              $("f-phone-error").textContent = ok ? "" : "Le numéro de téléphone doit commencer par un 0 et comporter 10 chiffres";
+              return ok;
+            };
+            if (phoneMode) {
+              $("f-phone").addEventListener("blur", () => {
+                window.__phoneBlurValidations += 1;
+                validatePhone();
+              });
+              $("f-phone").addEventListener("input", () => {
+                if ($("f-phone-row").classList.contains("has-error")) validatePhone();
+              });
+            }
+
             const form = $("lead");
             form.addEventListener("submit", async (event) => {
               event.preventDefault();
               window.__submitEvents += 1;
+              if (chosen) {
+                $("dl-id").value = chosen.id;
+                $("dl-name").value = chosen.name;
+              }
               const missing = ["f-first", "f-last", "f-email", "dl-id"].filter((id) => !$(id).value);
+              if (phoneMode && !validatePhone()) missing.push("f-phone");
               if (missing.length > 0) {
                 $("f-error").textContent = "Veuillez compléter les champs obligatoires";
                 return;

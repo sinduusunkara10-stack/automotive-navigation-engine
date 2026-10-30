@@ -75,3 +75,22 @@ export function phoneValueFor(
   }
   return hasCountryCodeSelector ? data.mobileNational : data.mobileInternational;
 }
+
+const PHONE_FORMAT_PAIRS: ReadonlyArray<readonly [keyof MarketPhoneAndPostcode, keyof MarketPhoneAndPostcode]> = [
+  ["landlineInternational", "landlineNational"],
+  ["mobileInternational", "mobileNational"],
+];
+
+/**
+ * The same configured test number in the market's other format (national for an international
+ * value and vice versa), for a field whose site validator visibly rejected the first one.
+ */
+export function alternatePhoneFormatFor(configured: string): string | undefined {
+  for (const data of Object.values(MARKET_DATA)) {
+    for (const [a, b] of PHONE_FORMAT_PAIRS) {
+      if (data[a] === configured) return data[b];
+      if (data[b] === configured) return data[a];
+    }
+  }
+  return undefined;
+}

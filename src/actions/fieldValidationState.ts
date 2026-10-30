@@ -474,3 +474,12 @@ export function compareDomAndValidatorState(
   }
   return out;
 }
+
+/** The site validator's view of the given fields only, read the same way as captureFieldValidationState. */
+export async function readFieldsValidationState(form: Locator, fieldAttr: string, fieldIds: string[]): Promise<Map<string, FieldValidationState>> {
+  const raw = await callInPageFunction<RawCapture>(form, "__navEngineFieldValidationState", FIELD_VALIDATION_STATE_SOURCE, { fieldAttr }).catch(() => null);
+  const wanted = new Set(fieldIds);
+  const out = new Map<string, FieldValidationState>();
+  for (const f of raw?.fields ?? []) if (wanted.has(f.fieldId)) out.set(f.fieldId, deriveFieldState(f, raw!.form.jqueryValidator));
+  return out;
+}

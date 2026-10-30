@@ -2,6 +2,7 @@ import type { ElementHandle, Frame, Locator, Page } from "playwright";
 import { isLookupLikePurpose, startDealerLookupNetworkCapture, type DealerLookupNetworkCapture, type SanitizedNetworkRequestEvidence } from "./dealerLookupNetwork.js";
 import type { VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
 import { startLookupControlTimeline, type LookupControlTimeline, type LookupControlTimelineRecorder } from "./dealerControlTimeline.js";
+import { baselineSelectedSection, selectedSectionShowsResult } from "./dealerSelectedSection.js";
 import { detectHiddenCommit, startDealerLookupProbe, type DealerLookupProbe, type HiddenFieldPurpose, type HiddenFieldState } from "./dealerLookupProbe.js";
 
 /** Same attribute tagAndReadFields (fillForm.ts) writes on every input/select/textarea it tags. */
@@ -869,6 +870,8 @@ async function findUnclickedConfirmControl(scope: Locator): Promise<ElementHandl
  * writes its hidden identifier only after its own follow-up request returns, well after the click. */
 const SELECTION_COMMIT_WAIT_MS = 1500;
 
+const SELECTED_SECTION_EVIDENCE = "selected_result_shown_in_separate_selected_section";
+
 interface SelectionCommitEvidence {
   /** The clicked element itself carries checked / aria-checked / aria-selected / aria-pressed. */
   selectedState: boolean;
@@ -876,6 +879,8 @@ interface SelectionCommitEvidence {
    * between the snapshot taken right before this click and now. */
   hiddenCommit: boolean;
   hiddenPurposes: HiddenFieldPurpose[];
+  /** A new, standalone, control-free section now repeats the clicked result's text (see dealerSelectedSection.ts). */
+  selectedSection: boolean;
 }
 
 /**
@@ -891,9 +896,10 @@ async function waitForSelectionCommit(
   option: ElementHandle<SVGElement | HTMLElement>,
   probe: DealerLookupProbe,
   hiddenBefore: HiddenFieldState[],
+  resultText: string | null,
 ): Promise<SelectionCommitEvidence> {
   const deadline = Date.now() + SELECTION_COMMIT_WAIT_MS;
-  let evidence: SelectionCommitEvidence = { selectedState: false, hiddenCommit: false, hiddenPurposes: [] };
+  let evidence: SelectionCommitEvidence = { selectedState: false, hiddenCommit: false, hiddenPurposes: [], selectedSection: false };
   while (true) {
     await page.waitForTimeout(150);
     const selectedState = await option
@@ -906,12 +912,45 @@ async function waitForSelectionCommit(
       )
       .catch(() => false);
     const hidden = detectHiddenCommit(hiddenBefore, await probe.hiddenState());
-    evidence = { selectedState, hiddenCommit: hidden.committed, hiddenPurposes: hidden.purposes };
-    if (selectedState || hidden.committed || Date.now() >= deadline) return evidence;
+    const selectedSection = await selectedSectionShowsResult(page, resultText);
+    evidence = { selectedState, hiddenCommit: hidden.committed, hiddenPurposes: hidden.purposes, selectedSection };
+    if (selectedState || hidden.committed || selectedSection || Date.now() >= deadline) return evidence;
   }
 }
 
 type GuardedClickOutcome = "clicked" | "detached" | "failed";
+
+/** Selection state of a clicked element: ARIA attributes as found (null when absent) and native checked. */
+export interface ClickedElementState {
+  connected: boolean;
+  ariaExpanded: string | null;
+  ariaSelected: string | null;
+  ariaChecked: string | null;
+  ariaPressed: string | null;
+  checked: boolean | null;
+}
+
+/**
+ * Structural identity of what a selection click actually pressed -- never its text, only its
+ * length -- and its selection state before and after, so a live trace shows whether the click hit
+ * a dealer card, an inner radio/label, a choose control, or a disclosure that only toggles content.
+ */
+export interface ClickedElementRecord {
+  tag: string;
+  role: string | null;
+  inputType: string | null;
+  /** "label" when an off-screen native radio/checkbox was pressed through its rendered label. */
+  pressedVia: "self" | "label";
+  insideLabel: boolean;
+  containsRadioOrCheckbox: boolean;
+  interactiveDescendantCount: number;
+  sameTagSiblingCount: number;
+  textLength: number;
+  inShadowRoot: boolean;
+  controlsAnotherElement: boolean;
+  before: ClickedElementState;
+  after: ClickedElementState;
+}
 
 /** How many times a result that the widget re-rendered before it could be clicked is looked up
  * again, and how long each new lookup may wait. */
@@ -931,18 +970,23 @@ async function clickStageResult(
   ctx: DiscoveryContext,
   first: FoundResult,
   beforeClick: (found: FoundResult) => Promise<void>,
-): Promise<{ found: FoundResult; outcome: GuardedClickOutcome }> {
+): Promise<{ found: FoundResult; outcome: GuardedClickOutcome; clicked: ClickedElementRecord | null; resultText: string | null }> {
   let found = first;
   for (let attempt = 0; ; attempt += 1) {
     const attached = await found.handle.evaluate((el) => el.isConnected).catch(() => false);
     let outcome: GuardedClickOutcome = "detached";
+    let clicked: ClickedElementRecord | null = null;
+    let resultText: string | null = null;
     if (attached) {
       await beforeClick(found);
-      outcome = await guardedClick(ctx.probe, found.handle);
+      resultText = await baselineSelectedSection(found.handle);
+      outcome = await guardedClick(ctx.probe, found.handle, (record) => {
+        clicked = record;
+      });
     }
-    if (outcome !== "detached" || attempt >= STALE_RESULT_REFINDS) return { found, outcome };
+    if (outcome !== "detached" || attempt >= STALE_RESULT_REFINDS) return { found, outcome, clicked, resultText };
     const again = await pollForStageResult(ctx, STALE_RESULT_REFIND_WAIT_MS, 0, STALE_RESULT_REFIND_WAIT_MS);
-    if (!again.result) return { found, outcome };
+    if (!again.result) return { found, outcome, clicked, resultText };
     found = again.result;
   }
 }
@@ -975,15 +1019,59 @@ async function pointerTarget(handle: ElementHandle<SVGElement | HTMLElement>): P
 }
 
 /** Clicks a frozen element with the implicit-submit guard told to let exactly this element through. */
-async function guardedClick(probe: DealerLookupProbe, handle: ElementHandle<SVGElement | HTMLElement>): Promise<GuardedClickOutcome> {
+async function readClickedState(handle: ElementHandle<SVGElement | HTMLElement>): Promise<ClickedElementState> {
+  return handle
+    .evaluate((el: Element) => ({
+      connected: el.isConnected,
+      ariaExpanded: el.getAttribute("aria-expanded"),
+      ariaSelected: el.getAttribute("aria-selected"),
+      ariaChecked: el.getAttribute("aria-checked"),
+      ariaPressed: el.getAttribute("aria-pressed"),
+      checked: el instanceof HTMLInputElement && (el.type === "radio" || el.type === "checkbox") ? el.checked : null,
+    }))
+    .catch(() => ({ connected: false, ariaExpanded: null, ariaSelected: null, ariaChecked: null, ariaPressed: null, checked: null }));
+}
+
+async function describeClickTarget(handle: ElementHandle<SVGElement | HTMLElement>): Promise<Omit<ClickedElementRecord, "before" | "after" | "pressedVia"> | null> {
+  return handle
+    .evaluate((el: Element) => {
+      const interactive = "a[href], button, input:not([type=hidden]), select, textarea, [role=button], [role=radio], [role=option], [role=checkbox], [tabindex]";
+      const parent = el.parentElement;
+      return {
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute("role"),
+        inputType: el instanceof HTMLInputElement ? el.type : null,
+        insideLabel: el.closest("label") !== null,
+        containsRadioOrCheckbox: el.querySelector('input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]') !== null,
+        interactiveDescendantCount: el.querySelectorAll(interactive).length,
+        sameTagSiblingCount: parent ? Array.from(parent.children).filter((c) => c !== el && c.tagName === el.tagName).length : 0,
+        textLength: (el.textContent ?? "").replace(/\s+/g, " ").trim().length,
+        inShadowRoot: el.getRootNode() instanceof ShadowRoot,
+        controlsAnotherElement: el.hasAttribute("aria-controls") || el.tagName === "SUMMARY",
+      };
+    })
+    .catch(() => null);
+}
+
+async function guardedClick(
+  probe: DealerLookupProbe,
+  handle: ElementHandle<SVGElement | HTMLElement>,
+  onRecord?: (record: ClickedElementRecord) => void,
+): Promise<GuardedClickOutcome> {
   const target = await pointerTarget(handle);
   if (!target) return "detached";
+  const identity = onRecord ? await describeClickTarget(handle) : null;
+  const before = onRecord ? await readClickedState(handle) : null;
+  const viaLabel = onRecord ? await handle.evaluate((el, t) => el !== t, target).catch(() => false) : false;
   await probe.allow(handle);
   const clicked = await target
     .click({ timeout: 5000 })
     .then(() => true)
     .catch(() => false);
   await probe.allow(null);
+  if (onRecord && identity && before) {
+    onRecord({ ...identity, pressedVia: viaLabel ? "label" : "self", before, after: await readClickedState(handle) });
+  }
   if (clicked) return "clicked";
   return (await handle.evaluate((el) => el.isConnected).catch(() => false)) ? "failed" : "detached";
 }
@@ -1032,6 +1120,10 @@ export interface DealerActivationStepRecord {
   geolocationRequested: boolean;
   /** A lookup-like request, a loading/busy state, or the field's own aria-expanded turning true. */
   lookupActivityObserved: boolean;
+  /** What a selection click pressed and its state before/after (selection steps only). */
+  clickedElement?: ClickedElementRecord | null;
+  /** This step's scope-text change exactly undid the previous step's (e.g. a toggle pressed open, then shut). */
+  revertedPreviousStep?: boolean;
 }
 
 export type DealerTriggerClassification = "vocabulary_matched" | "textless_unknown" | "geolocation_control" | "other_text" | "no_trigger";
@@ -1461,7 +1553,19 @@ async function resolveDealerLookupCore(
     return { result, activity };
   }
 
-  async function recordStep(stepName: string, startedAt: number, stepStartMs: number, resultCandidateObserved: boolean, activity: boolean): Promise<void> {
+  function revertsPrevious(delta: number): boolean {
+    const last = [...activationSteps].reverse().find((step) => step.scopeTextLengthDelta !== 0);
+    return last !== undefined && delta !== 0 && last.scopeTextLengthDelta === -delta;
+  }
+
+  async function recordStep(
+    stepName: string,
+    startedAt: number,
+    stepStartMs: number,
+    resultCandidateObserved: boolean,
+    activity: boolean,
+    clickedElement?: ClickedElementRecord | null,
+  ): Promise<void> {
     const now = await probe.snapshot(typed);
     const hidden = await probe.hiddenState();
     const requests = network.activitySince(stepStartMs);
@@ -1489,6 +1593,7 @@ async function resolveDealerLookupCore(
       implicitSubmitBlocked: blocked > 0,
       geolocationRequested: now.geolocationRequests > previous.geolocationRequests,
       lookupActivityObserved,
+      ...(clickedElement !== undefined ? { clickedElement, revertedPreviousStep: revertsPrevious(now.scopeTextLength - previous.scopeTextLength) } : {}),
     });
     previous = now;
     lastHidden = hidden;
@@ -1719,12 +1824,40 @@ async function resolveDealerLookupCore(
     await markBaselineCandidates(scope);
     ctx.stageSeq = await probe.markStage();
   };
+  await options.visualEvidence?.capture("dealer_before_click", null, scope);
   const stage1Click = await clickStageResult(ctx, stage1.result, baselineStageBeforeClick);
   const stage1Found = stage1Click.found;
   eventsDispatched.push("click_location_suggestion");
-  const stage1Commit = await waitForSelectionCommit(page, stage1Found.handle, probe, stage1HiddenBefore);
-  await recordStep("click_location_suggestion", stage1ClickStarted, stage1StartMs, true, false);
-  const stage1Verified = stage1Commit.selectedState || stage1Commit.hiddenCommit;
+  const stage1Commit = await waitForSelectionCommit(page, stage1Found.handle, probe, stage1HiddenBefore, stage1Click.resultText);
+  await recordStep("click_location_suggestion", stage1ClickStarted, stage1StartMs, true, false, stage1Click.clicked);
+  await options.visualEvidence?.capture("dealer_after_click", null, scope);
+  const stage1Verified = stage1Commit.selectedState || stage1Commit.hiddenCommit || stage1Commit.selectedSection;
+  if (stage1Commit.selectedSection && !stage1Commit.selectedState && !stage1Commit.hiddenCommit) {
+    // The widget already shows this result as the chosen one in its own section. Anything the click
+    // rendered beside it (a "change" link, the reopened list) would only undo that choice if pressed.
+    return {
+      dealerLookupTriggered: true,
+      dealerLookupOutcome: stage1Found.authoritative ? "dealer_selected" : "suggestion_selected",
+      locationSuggestionsDetected: true,
+      locationSuggestionSelected: false,
+      dealerResultsDetected: true,
+      dealerAutoPopulated: false,
+      dealerSelected: true,
+      dealerValueVerified: true,
+      dealerVerificationEvidence: SELECTED_SECTION_EVIDENCE,
+      executionTrace: refreshCounters({
+        ...baseTrace(),
+        waitOutcome: "resolved",
+        suggestionsDetected: true,
+        selectedSuggestionIdentity: "result[0]",
+        genericCandidateFallbackUsed: !stage1Found.authoritative,
+        resultFoundOutsideScope: stage1Found.foundOutsideScope,
+        resultFoundInFrame: stage1Found.foundInFrame,
+        wasPreExistingHiddenElement: stage1Found.authoritative ? null : stage1Found.wasPreExistingHiddenElement,
+        hiddenFieldCommitDetected: false,
+      }),
+    };
+  }
   const afterStage1Hidden = await probe.hiddenState();
 
   // Stage 2 (Pattern C): a distinct confirm/OK/search control, not yet clicked, only if a
@@ -1775,20 +1908,25 @@ async function resolveDealerLookupCore(
     // what the previous click rendered, and stops at the first verified commit.
     let next: FoundResult | null = stage3.result;
     let dealerFound: FoundResult = stage3.result;
-    let dealerCommit: SelectionCommitEvidence = { selectedState: false, hiddenCommit: false, hiddenPurposes: [] };
+    let dealerCommit: SelectionCommitEvidence = { selectedState: false, hiddenCommit: false, hiddenPurposes: [], selectedSection: false };
+    await options.visualEvidence?.capture("dealer_results_rendered", null, scope);
     for (let selection = 0; next && selection <= DEALER_FOLLOW_UP_SELECTIONS; selection += 1) {
+      await options.visualEvidence?.capture("dealer_before_click", null, scope);
       const dealerHiddenBefore = await probe.hiddenState();
       const dealerStartMs = network.now();
       network.setStep("click_dealer_result");
       const dealerClickStarted = Date.now();
-      dealerFound = (await clickStageResult(ctx, next, baselineStageBeforeClick)).found;
+      const dealerClick = await clickStageResult(ctx, next, baselineStageBeforeClick);
+      dealerFound = dealerClick.found;
       eventsDispatched.push("click_dealer_result");
-      dealerCommit = await waitForSelectionCommit(page, dealerFound.handle, probe, dealerHiddenBefore);
-      await recordStep("click_dealer_result", dealerClickStarted, dealerStartMs, true, false);
-      if (dealerCommit.selectedState || dealerCommit.hiddenCommit || selection === DEALER_FOLLOW_UP_SELECTIONS) break;
+      dealerCommit = await waitForSelectionCommit(page, dealerFound.handle, probe, dealerHiddenBefore, dealerClick.resultText);
+      await recordStep("click_dealer_result", dealerClickStarted, dealerStartMs, true, false, dealerClick.clicked);
+      await options.visualEvidence?.capture("dealer_after_click", null, scope);
+      if (dealerCommit.selectedState || dealerCommit.hiddenCommit || dealerCommit.selectedSection || selection === DEALER_FOLLOW_UP_SELECTIONS) break;
       next = (await fullStageWait("await_dealer_follow_up")).result;
+      await options.visualEvidence?.capture("dealer_after_follow_up", null, scope);
     }
-    const dealerVerified = dealerCommit.selectedState || dealerCommit.hiddenCommit;
+    const dealerVerified = dealerCommit.selectedState || dealerCommit.hiddenCommit || dealerCommit.selectedSection;
     const dealerWasGeneric = !dealerFound.authoritative;
 
     return {
@@ -1803,7 +1941,9 @@ async function resolveDealerLookupCore(
       dealerVerificationEvidence: dealerVerified
         ? dealerCommit.selectedState
           ? "selected_result_carries_checked_or_aria_checked_or_aria_selected_state"
-          : "hidden_identifier_committed_after_dealer_selection"
+          : dealerCommit.hiddenCommit
+            ? "hidden_identifier_committed_after_dealer_selection"
+            : SELECTED_SECTION_EVIDENCE
         : "no_committed_state_detected_on_selected_result",
       dealerLookupFailureReason: dealerVerified ? undefined : "selectable_result_found_but_commit_state_never_verified",
       executionTrace: refreshCounters({

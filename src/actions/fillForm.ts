@@ -100,7 +100,8 @@ import { inventorySubmitListeners } from "./submitListenerInventory.js";
 import { isFormVisualEvidenceEnabled, startVisualEvidenceRecorder, type VisualEvidenceRecorder } from "../diagnostics/visualEvidence.js";
 import { observeLateFormRender, probeFormPresence } from "../diagnostics/formPresenceProbe.js";
 import { firstSelectableOption } from "../forms/vehicleSelection.js";
-import { isPhoneFieldKey, phoneValueForField } from "../forms/phoneFormat.js";
+import { isPhoneFieldKey } from "../forms/phoneFormat.js";
+import { fillPhoneAndVerify, phoneVerdict, type PhoneValidationOutcome } from "./phoneValidation.js";
 import { DEEP_QUERY_ALL_SOURCE, DEEP_VISIBLE_TEXT_SOURCE } from "../observation/openShadowDom.js";
 
 const FIELD_INDEX_ATTR = "data-nav-engine-field-index";
@@ -775,7 +776,13 @@ async function applyDecision(
   hasCountryCodeSelector: boolean,
   language: SupportedLanguage,
   dealerLookupMode: "full" | "await_pending_lookup" = "full",
-): Promise<{ key?: string; dealerLookup?: DealerLookupOutcome; proxiedSelect?: ProxiedSelectOutcome; checkboxActivation?: "native_check" | "label_click" }> {
+): Promise<{
+  key?: string;
+  dealerLookup?: DealerLookupOutcome;
+  proxiedSelect?: ProxiedSelectOutcome;
+  checkboxActivation?: "native_check" | "label_click";
+  phoneValidation?: PhoneValidationOutcome;
+}> {
   const field = await fieldByIndex(form, plannedField.descriptor.id);
   if (isProxiedRequiredSelect(plannedField.descriptor, plannedField.matchedField)) {
     return applyProxiedSelectDecision(page, form, field, plannedField, language);
@@ -783,13 +790,16 @@ async function applyDecision(
   switch (plannedField.decision.kind) {
     case "fill_text":
       if (isPhoneFieldKey(plannedField.decision.field)) {
-        const constraints = await field
-          .evaluate((el) => {
-            const input = el as HTMLInputElement;
-            return { pattern: input.getAttribute("pattern"), maxLength: input.maxLength, minLength: input.minLength };
-          })
-          .catch(() => ({}));
-        await field.fill(phoneValueForField(plannedField.decision.value, constraints));
+        const phoneValidation = await fillPhoneAndVerify(
+          form,
+          field,
+          FIELD_INDEX_ATTR,
+          plannedField.descriptor.id,
+          plannedField.decision.field,
+          plannedField.decision.value,
+          visualEvidenceByPage.get(page),
+        );
+        return { key: plannedField.decision.field, phoneValidation };
       } else {
         await field.fill(plannedField.decision.value);
       }
@@ -1251,6 +1261,8 @@ export async function executeFillForm(params: ExecuteFillFormParams): Promise<Ac
   visualEvidenceByPage.set(params.page, recorder);
   try {
     const result = await executeFillFormInner(params);
+    const formNotFound = recorder.result()?.shots.some((shot) => shot.stage.startsWith("form_not_found")) ?? false;
+    if (!formNotFound) await recorder.capture("final_state");
     const evidence = recorder.result();
     return evidence ? { ...result, formVisualEvidence: evidence } : result;
   } finally {
@@ -1506,6 +1518,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   const submitProbeMode = resolveSubmitProbeMode();
   const submitProbeInstalled = await installSubmitProbe(page, submitProbeMode);
   const fillStartSnapshot = await snapshotFormState(form, FIELD_INDEX_ATTR, new Map());
+  await visualEvidenceByPage.get(page)?.capture("form_discovered", null, form);
 
   const fieldsFilled = new Set<string>();
   let claudeCallUsed = false;
@@ -1519,6 +1532,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
 
   const proxiedSelectOutcomes = new Map<string, ProxiedSelectOutcome>();
   const checkboxActivations = new Map<string, "native_check" | "label_click">();
+  const phoneValidations = new Map<string, PhoneValidationOutcome>();
 
   async function fillAllRequired(onlyIndices?: Set<string>): Promise<{ plan: PlannedField[]; filledIds: Set<string> }> {
     const shouldCollectDebug = !onlyIndices && !dealerLookupDebugCapture && isFormDiscoveryDiagnosticEnabled();
@@ -1565,6 +1579,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       if (outcome.dealerLookup) dealerLookupOutcome = outcome.dealerLookup;
       if (outcome.proxiedSelect) proxiedSelectOutcomes.set(outcome.proxiedSelect.fieldId, outcome.proxiedSelect);
       if (outcome.checkboxActivation) checkboxActivations.set(plannedField.descriptor.id, outcome.checkboxActivation);
+      if (outcome.phoneValidation) phoneValidations.set(outcome.phoneValidation.fieldId, outcome.phoneValidation);
       if (outcome.key) {
         fieldsFilled.add(outcome.key);
         filledIds.add(plannedField.descriptor.id);
@@ -1574,6 +1589,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   }
 
   let { plan: initialPlan, filledIds: initialFilledIds } = await fillAllRequired();
+  await visualEvidenceByPage.get(page)?.capture("required_fields_filled");
 
   // Generic dependent-control catch-up: selecting one <select> can cause the page's own JS to
   // populate or enable a DEPENDENT <select> (e.g. a narrower choice whose options only exist
@@ -1681,6 +1697,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       filled: finalFilledIds.has(p.descriptor.id),
     })),
     proxiedSelectDiagnostics: [...proxiedSelectOutcomes.values()],
+    phoneValidationDiagnostics: [...phoneValidations.values()],
     ...formSelectionDiagnostics,
   };
 
@@ -1785,7 +1802,15 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
   if (consentResult.unresolvedRequiredConsentGroups.length > 0) {
     preSubmitReadinessFailures.push(`unresolved_required_consent_groups:${consentResult.unresolvedRequiredConsentGroups.join(",")}`);
   }
+  const phonesRejectedBySite: string[] = [];
+  for (const id of phoneValidations.keys()) {
+    if ((await phoneVerdict(form, await fieldByIndex(form, id), FIELD_INDEX_ATTR, id)).verdict.rejected) phonesRejectedBySite.push(id);
+  }
+  if (phonesRejectedBySite.length > 0) {
+    preSubmitReadinessFailures.push(`phone_rejected_by_site:${phonesRejectedBySite.join(",")}`);
+  }
   const preSubmitReadinessPassed = preSubmitReadinessFailures.length === 0;
+  await visualEvidenceByPage.get(page)?.capture(preSubmitReadinessPassed ? "before_readiness" : "validation_errors_visible");
 
   if (!preSubmitReadinessPassed) {
     const dealerLookupTrace = await buildDealerLookupTrace({

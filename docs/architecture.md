@@ -4441,3 +4441,60 @@ Commit evidence is unchanged: a checked or ARIA-selected state, or a hidden iden
 the widget. A dealer only shown as selected stays `dealer_dependency_unresolved`, and Submit is never
 pressed. `tests/integration/dealerLocatorParity.test.ts` runs every scenario in light and open
 shadow DOM against `tests/fixtures/dealer-locator-widget.html`.
+
+### Lead-form filling: phone verified after blur, dealer click identity, visual checkpoints (additive to response 1.53.0; request 1.51.0 unchanged)
+
+The live open-shadow run after the dealer view-swap fix still ended with no Submit. Its screenshot
+at the lookup outcome shows the site rejecting the phone on blur: the field held the compact
+international number, with a red border and an inline error asking for a national number. That
+number came from the configured test data, which chooses the international format whenever the page
+has no country-code selector. The site uses no `aria-invalid`, and the engine never looked at the
+field again after typing into it, so the rejection would have cancelled Submit with no recorded
+cause. The same run also left the dealer unresolved, but its trace does not say which element each
+selection click pressed.
+
+- `src/actions/phoneValidation.ts`: a phone field is blurred after the fill and judged by the
+  site's own verdict: native validity, `aria-invalid`, and the error class, icon or message read by
+  `fieldValidationState.ts`. A visible rejection gets one refill with the same configured test
+  number in the market's other format (`alternatePhoneFormatFor` in `src/forms/testData.ts`), then
+  one more verdict. `formDiscoveryDiagnostics.phoneValidationDiagnostics` records the shape of each
+  value (format, digit and separator counts, whether the DOM kept it) and each verdict, never the
+  number.
+- Readiness re-reads each verified phone field. A field the site still rejects adds
+  `phone_rejected_by_site:<ids>`, and Submit is not pressed.
+- `src/actions/dealerLookup.ts`: each selection step records `clickedElement` (tag, role, input
+  type, whether it was pressed through its label, nested radio or checkbox, sibling count, text
+  length, shadow-root membership, and the ARIA or checked state before and after the click) and
+  `revertedPreviousStep` (the step exactly undid the previous scope-text change, as a disclosure
+  toggled open and then shut would). This is diagnostic only, under `FORM_DISCOVERY_DIAGNOSTIC=1`,
+  and commit evidence is unchanged.
+- `src/diagnostics/visualEvidence.ts` (still only under `FORM_VISUAL_EVIDENCE=1`) adds checkpoints:
+  form discovered, fields filled, phone after fill, after blur and after the alternate format,
+  dealer results rendered, before and after each dealer click, after a follow-up wait, before
+  readiness or with validation errors visible, and the final state. The cap rises to 20 shots.
+  Control-level checkpoints are clipped to the control or widget when it is on screen, which keeps
+  them small. A full viewport JPEG can exceed a downstream field-size limit.
+
+### Dealer lookup: a choice confirmed only by a separate selected section (no contract change)
+
+The owner's screenshots of the live dealer locator show how it confirms a choice. Clicking a
+dealer card repeats that dealer in its own bordered box, with a checkmark, under a "change" link.
+The run's trace shows the clicked card gained no checked or ARIA state, and no hidden dealer field
+was written at any step. The engine did not count that box as a commit, so it pressed what the
+click had rendered: first the change link, then a card in the reopened list. The run ended
+unresolved with no Submit. `dealers=picked` in `tests/fixtures/dealer-locator-widget.html`
+reproduces the live event sequence exactly on the unfixed code, in light DOM and in open shadow
+DOM.
+
+`src/actions/dealerSelectedSection.ts` adds a third kind of commit evidence. It requires a new,
+visible element that:
+- holds the clicked result's full text;
+- contains no control;
+- is not one of several similar siblings.
+
+Every element that existed before the click is marked first, so text written into an existing
+element never counts (a "selected: ..." line, or the field's value). A detail
+view that still offers a choose control does not qualify, and neither does a list re-rendered in
+place. Once a stage-1 click is confirmed this way, the lookup stops: anything else the click
+rendered would only undo the choice if pressed. The verification evidence is
+`selected_result_shown_in_separate_selected_section`.

@@ -4,6 +4,8 @@ import type { ConsentInteractionPolicy } from "./task-request.js";
 import type { JourneyMemoryDiagnostics } from "./journeyMemory.js";
 import type { SubmitCancellationDiagnostics } from "../actions/submitCancellationProbe.js";
 import type { ProxiedSelectOutcome } from "../forms/selectProxy.js";
+import type { PhoneValidationOutcome } from "../actions/phoneValidation.js";
+import type { ClickedElementRecord } from "../actions/dealerLookup.js";
 import type { FormLateRenderObservation, FormPresenceProbe } from "../diagnostics/formPresenceProbe.js";
 import type {
   AlternativeExplorationDiagnostics,
@@ -645,6 +647,8 @@ export interface ActionResult {
     }[];
     /** 1.53.0 additive amendment: one record per required hidden native select committed through its visible custom control (see forms/selectProxy.ts). */
     proxiedSelectDiagnostics?: ProxiedSelectOutcome[];
+    /** 1.53.0 additive amendment: one record per filled phone field -- the site's verdict after blur and whether the market's other format was tried (value shape only, never the value). */
+    phoneValidationDiagnostics?: PhoneValidationOutcome[];
   };
   /**
    * Opt-in, investigation-only evidence for a `fill_form` action -- present only when the
@@ -780,12 +784,26 @@ export interface ActionResult {
         | "submit_before_click"
         | "submit_outcome"
         | "form_not_found"
-        | "form_not_found_after_late_watch";
+        | "form_not_found_after_late_watch"
+        | "form_discovered"
+        | "required_fields_filled"
+        | "phone_after_fill"
+        | "phone_after_blur"
+        | "phone_after_alternate_format"
+        | "dealer_results_rendered"
+        | "dealer_before_click"
+        | "dealer_after_click"
+        | "dealer_after_follow_up"
+        | "before_readiness"
+        | "validation_errors_visible"
+        | "final_state";
       submitAttempt: number | null;
       capturedAt: string;
       mimeType: "image/jpeg";
       viewportWidth: number | null;
       viewportHeight: number | null;
+      /** 1.53.0 additive amendment: "region" when clipped to the control or widget the checkpoint is about. */
+      area?: "viewport" | "region";
       byteLength: number;
       dataBase64: string;
     }[];
@@ -2279,6 +2297,10 @@ export interface DealerActivationStepWire {
   implicitSubmitBlocked: boolean;
   geolocationRequested: boolean;
   lookupActivityObserved: boolean;
+  /** 1.53.0 additive amendment: what a selection click pressed (structure only, never text) and its selection state before and after. */
+  clickedElement?: ClickedElementRecord | null;
+  /** 1.53.0 additive amendment: this step's scope-text change exactly undid the previous change. */
+  revertedPreviousStep?: boolean;
 }
 
 /** The inputs fill_form's form-selection scoring used for one candidate form (see src/forms/formRelevance.ts). Page text is clipped and has echoed values masked. */

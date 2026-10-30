@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 import { executeFillForm } from "../../src/actions/fillForm.js";
-import type { ActionResult } from "../../src/types/task-response.js";
+import type { ActionResult, DealerActivationStepWire } from "../../src/types/task-response.js";
 import { startStaticServer } from "../helpers/staticServer.js";
 
 // tests/fixtures/dealer-locator-widget.html is a dealer locator (locality autocomplete, dealer
@@ -31,6 +31,7 @@ interface Counters {
   localityChoices: number;
   dealerChoices: number;
   dealerCommits: number;
+  phoneBlurValidations: number;
 }
 
 interface Run {
@@ -39,12 +40,14 @@ interface Run {
   durationMs: number;
 }
 
-async function runLocator(query: string, options: { dealerRecords?: unknown[] } = {}): Promise<Run> {
+async function runLocator(query: string, options: { dealerRecords?: unknown[]; visualEvidence?: boolean } = {}): Promise<Run> {
   const { baseUrl, close } = await startStaticServer(fixturesDir);
   const browser = await chromium.launch();
   const page = await browser.newPage();
   const previous = process.env.FORM_DISCOVERY_DIAGNOSTIC;
+  const previousVisual = process.env.FORM_VISUAL_EVIDENCE;
   process.env.FORM_DISCOVERY_DIAGNOSTIC = "1";
+  if (options.visualEvidence) process.env.FORM_VISUAL_EVIDENCE = "1";
   try {
     await page.route("**/api/localities*", (route) =>
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ localities: [{ label: "75001 Paris" }, { label: "75002 Paris" }] }) }),
@@ -65,12 +68,15 @@ async function runLocator(query: string, options: { dealerRecords?: unknown[] } 
         localityChoices: w.__localityChoices as number,
         dealerChoices: w.__dealerChoices as number,
         dealerCommits: w.__dealerCommits as number,
+        phoneBlurValidations: w.__phoneBlurValidations as number,
       };
     });
     return { result, counters, durationMs };
   } finally {
     if (previous === undefined) delete process.env.FORM_DISCOVERY_DIAGNOSTIC;
     else process.env.FORM_DISCOVERY_DIAGNOSTIC = previous;
+    if (previousVisual === undefined) delete process.env.FORM_VISUAL_EVIDENCE;
+    else process.env.FORM_VISUAL_EVIDENCE = previousVisual;
     await page.close();
     await browser.close();
     await close();
@@ -175,5 +181,142 @@ for (const dom of DOMS) {
     const run = await runLocator(`dom=${dom}&locality=empty&dealers=radios`, { dealerRecords: [] });
     assertBlockedWithoutSubmit(run, dom);
     assert.equal(run.counters.dealerChoices, 0);
+  });
+}
+
+function phoneRecord(run: Run) {
+  const records = run.result.formDiscoveryDiagnostics?.phoneValidationDiagnostics ?? [];
+  assert.equal(records.length, 1, JSON.stringify(records));
+  return records[0]!;
+}
+
+function selectionSteps(run: Run): DealerActivationStepWire[] {
+  return (run.result.dealerLookupTrace?.execution?.activationSteps ?? []).filter((s) => s.step.startsWith("click_") && s.step !== "click_trigger");
+}
+
+for (const dom of DOMS) {
+  test(`dealer locator (${dom} DOM): a dealer card moved into a separate selected-dealer section is verified by the widget's own hidden dealer fields and Submit runs once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=section`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    assert.equal(run.result.dealerLookupTrace?.execution?.hiddenFieldCommitDetected, true);
+    const clicked = selectionSteps(run)[0]?.clickedElement;
+    assert.equal(clicked?.tag, "li", JSON.stringify(clicked));
+    assert.equal(clicked?.after.connected, true, "the card itself was moved, not replaced");
+    assert.equal(clicked?.inShadowRoot, dom === "shadow");
+  });
+
+  test(`dealer locator (${dom} DOM): each selection click records what it pressed -- the card, then the detail view's choose control -- with its state before and after`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=cards`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    const steps = selectionSteps(run);
+    assert.deepEqual(
+      steps.map((s) => s.clickedElement?.tag),
+      ["li", "button"],
+      JSON.stringify(steps.map((s) => s.clickedElement)),
+    );
+    assert.equal(steps[0]!.clickedElement!.after.connected, false, "the card's click swapped out the search view");
+    assert.equal(steps[1]!.clickedElement!.after.connected, true);
+    assert.ok(steps.every((s) => s.revertedPreviousStep === false), "no selection undid the one before it");
+    assert.doesNotMatch(JSON.stringify(steps), /Garage Exemple|Exempleville|Choisir/, "structure and lengths only, never page text");
+  });
+
+  test(`dealer locator (${dom} DOM): off-screen native radios are recorded as pressed through their label`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=radios`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    const clicked = selectionSteps(run)[0]?.clickedElement;
+    assert.equal(clicked?.pressedVia, "label", JSON.stringify(clicked));
+    assert.equal(clicked?.before.checked, false);
+    assert.equal(clicked?.after.checked, true);
+  });
+
+  test(`lead phone (${dom} DOM): an international number the site rejects on blur is refilled once in the market's national format, accepted, and Submit runs once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=radios&phone=national`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    const phone = phoneRecord(run);
+    assert.equal(phone.initialShape.format, "international");
+    assert.equal(phone.initialVerdict.rejected, true, JSON.stringify(phone));
+    assert.ok(phone.initialVerdict.evidence.includes("error_message") || phone.initialVerdict.evidence.includes("error_class"), JSON.stringify(phone));
+    assert.equal(phone.retriedWithAlternateFormat, true);
+    assert.equal(phone.finalShape.format, "national");
+    assert.equal(phone.finalShape.domValueMatchesTyped, true);
+    assert.equal(phone.finalState, "no_rejection_observed");
+    assert.ok(run.counters.phoneBlurValidations >= 2, "the site validated the number on blur both times");
+    assert.equal(run.counters.leadPosts[0]!.phone, "0639981234");
+    assert.doesNotMatch(JSON.stringify(phone), /0639981234|\+33/, "never the number itself");
+  });
+
+  test(`lead phone (${dom} DOM): a number the site accepts after blur is left as typed, with no retry`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=radios&phone=any`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    const phone = phoneRecord(run);
+    assert.equal(phone.initialVerdict.rejected, false, JSON.stringify(phone));
+    assert.equal(phone.retriedWithAlternateFormat, false);
+    assert.equal(phone.finalState, "no_rejection_observed");
+    assert.ok(run.counters.phoneBlurValidations >= 1);
+    assert.equal(run.counters.leadPosts[0]!.phone, "+33639981234");
+  });
+
+  test(`lead phone (${dom} DOM): a phone the site still rejects in both formats blocks Submit even with the dealer committed`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=radios&phone=never`);
+    const context = JSON.stringify({ outcome: run.result.formFillOutcome, post: run.result.formPostSubmitDiagnostics?.preSubmitReadinessFailures, counters: run.counters });
+    assert.equal(run.result.formDealerSearchDiagnostics?.dealerValueVerified, true, context);
+    assert.equal(phoneRecord(run).finalState, "rejected");
+    assert.equal(phoneRecord(run).retriedWithAlternateFormat, true);
+    assert.ok(run.result.formPostSubmitDiagnostics?.preSubmitReadinessFailures?.some((f) => f.startsWith("phone_rejected_by_site:")), context);
+    assert.equal(run.result.formPostSubmitDiagnostics?.submitAttempted, false, context);
+    assert.equal(run.counters.submitEvents, 0, context);
+    assert.equal(run.counters.leadPosts.length, 0, context);
+  });
+
+  test(`lead phone (${dom} DOM): a valid phone does not let an uncommitted dealer through -- Submit stays blocked`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=cards&commit=no&phone=national`);
+    assertBlockedWithoutSubmit(run, dom);
+    assert.equal(phoneRecord(run).finalState, "no_rejection_observed");
+    assert.ok(!run.result.formPostSubmitDiagnostics?.preSubmitReadinessFailures?.some((f) => f.startsWith("phone_rejected_by_site:")));
+  });
+
+  test(`visual evidence (${dom} DOM): with the flag set, the phone and dealer checkpoints are captured, control-level ones clipped to their region`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=cards&phone=national`, { visualEvidence: true });
+    assertCommittedAndSubmittedOnce(run, dom);
+    const shots = run.result.formVisualEvidence?.shots ?? [];
+    const stages = shots.map((s) => s.stage);
+    for (const stage of ["form_discovered", "phone_after_fill", "phone_after_blur", "phone_after_alternate_format", "dealer_before_click", "dealer_after_click", "dealer_results_rendered", "required_fields_filled", "before_readiness", "submit_before_click"] as const) {
+      assert.ok(stages.includes(stage), `${stage} missing from ${JSON.stringify(stages)} (omitted ${JSON.stringify(run.result.formVisualEvidence?.omittedStages)})`);
+    }
+    assert.equal(shots.find((s) => s.stage === "phone_after_blur")?.area, "region");
+  });
+}
+
+test("visual evidence stays off unless its flag is set", async () => {
+  const run = await runLocator("dom=shadow&locality=empty&dealers=radios&phone=national");
+  assert.equal(run.result.formVisualEvidence, undefined);
+});
+
+// The live 2026-10-28 dealer widget, as the owner's screenshots show it: a plain dealer card whose
+// click collapses the list under a "change" link and repeats the chosen dealer in its own selected
+// box with a checkmark, with no checked/ARIA state and no hidden field written until the form is
+// sent. Before this was recognised the engine kept clicking what the first click had rendered
+// (the "change" link, then the reopened list) and the run ended unresolved with no Submit.
+for (const dom of DOMS) {
+  test(`dealer locator (${dom} DOM): a dealer card shown again in its own selected section counts as committed -- clicked once, nothing after it, Submit once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    assert.equal(run.result.formDealerSearchDiagnostics?.dealerVerificationEvidence, "selected_result_shown_in_separate_selected_section");
+    const events = run.result.dealerLookupTrace!.execution!.eventsDispatched;
+    assert.equal(events.filter((e) => e.startsWith("click_") && e !== "click_trigger").length, 1, JSON.stringify(events));
+    assertNoStalledStep(run, dom);
+  });
+
+  test(`dealer locator (${dom} DOM): a dealer card that is only highlighted, with no selected section, stays blocked`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked&commit=no`);
+    assertBlockedWithoutSubmit(run, dom);
+    assert.equal(run.counters.dealerChoices, 1, "the card is pressed once, never repeated");
+  });
+
+  test(`dealer locator (${dom} DOM): the selected-section dealer and a phone the site accepts only in national format -- both verified, Submit exactly once`, async () => {
+    const run = await runLocator(`dom=${dom}&locality=empty&dealers=picked&phone=national`);
+    assertCommittedAndSubmittedOnce(run, dom);
+    assert.equal(phoneRecord(run).finalState, "no_rejection_observed");
+    assert.equal(run.counters.leadPosts[0]!.phone, "0639981234");
   });
 }
