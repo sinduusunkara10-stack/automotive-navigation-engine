@@ -796,6 +796,8 @@ export interface ActionResult {
         | "dealer_after_follow_up"
         | "before_readiness"
         | "validation_errors_visible"
+        | "consent_validation_rejected"
+        | "consent_after_recovery"
         | "final_state";
       submitAttempt: number | null;
       capturedAt: string;
@@ -1212,6 +1214,13 @@ export interface ActionResult {
      * Absent when Submit was never attempted.
      */
     submitCancellationDiagnostics?: SubmitCancellationDiagnostics;
+    /**
+     * 1.53.0 additive amendment. Present only when a Submit was cancelled and the site's own
+     * validator rejected fields: the radio groups it rejected, each classified again and declined
+     * only when proven an optional commercial purpose, and the readiness re-check before the one
+     * recovery Submit. Never a label, value or page text.
+     */
+    siteRejectedConsentRecovery?: SiteRejectedConsentRecoveryWire;
   };
   /**
    * Generic, uniform outcome classification (schemaVersion 1.42.0): every action result gets
@@ -2351,4 +2360,22 @@ export interface FormScoringEvidence {
   purposeBonus: number;
   visibility: { visible: boolean; inChrome: boolean; areaRatio: number; hasNearbyHeading: boolean; hasVisibleSubmitButton: boolean };
   weights: { journey: number; visibility: number; fieldActionability: number };
+}
+
+export interface SiteRejectedConsentRecoveryWire {
+  groups: {
+    groupId: string;
+    memberFieldIds: string[];
+    rejectionLinks: ("member_validator_invalid" | "group_error_surface")[];
+    purpose: "required_privacy_processing" | "terms_and_conditions" | "optional_marketing" | "optional_profiling" | "optional_third_party" | "customer_qualification" | "journey_intent" | "ambiguous";
+    purposeEvidence: string;
+    checkedBefore: "positive" | "negative" | "unknown" | "none";
+    checkedAfter: "positive" | "negative" | "unknown" | "none";
+    action: "declined_optional_commercial" | "decline_not_verified" | "left_unanswered_purpose_not_proven" | "not_actionable" | "already_answered";
+    checkedStateVerified: boolean | null;
+    reason: string;
+  }[];
+  rejectedFieldIdsOutsideConsentGroups: string[];
+  allRejectedGroupsAnswered: boolean;
+  readinessFailuresAfterRecovery: string[];
 }

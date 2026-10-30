@@ -34,6 +34,17 @@
       //   phone=national|never|any a required phone field validated on blur, with an inline error:
       //                            national accepts only a 10-digit number starting with 0, never
       //                            accepts nothing, any accepts every value
+      //   consent=named|text|ambiguous|late
+      //                            a Yes/No radio group with no required marker that the site's own
+      //                            validator nevertheless requires on Submit (error classes on the
+      //                            radios plus one inline error for the group, no aria-invalid, no
+      //                            native invalidity):
+      //     named      only the group's camelCase name says marketing (prefs.optInMkg)
+      //     text       only the question says marketing, as an inflected word ("promotionnelles")
+      //     ambiguous  nothing says what the group is for
+      //     late       nothing says it before Submit; the site's inline error then does
+      //   consentError=outside     the group's error is rendered after the group's block instead of
+      //                            inside it, and the radios get no error class
       const params = new URLSearchParams(location.search);
       const localityMode = params.get("locality") || "list";
       const dealerMode = params.get("dealers") || "radios";
@@ -42,6 +53,12 @@
       const renderDelay = Number(params.get("renderDelay") || 0);
       const rerender = params.get("rerender") === "1";
       const phoneMode = params.get("phone");
+      const consentMode = params.get("consent");
+      const consentErrorOutside = params.get("consentError") === "outside";
+      const consentName = consentMode === "named" ? "prefs.optInMkg" : "q7";
+      const consentQuestion =
+        consentMode === "text" ? "Recevoir nos communications promotionnelles par e-mail" : consentMode === "late" ? "" : "Merci de nous indiquer votre choix";
+      const consentError = consentMode === "late" ? "Indiquez si vous souhaitez recevoir des communications marketing" : "Ce champ est obligatoire";
       Object.assign(window, { __leadPosts: [], __submitEvents: 0, __localityRequests: 0, __dealerRequests: 0, __dealerCommits: 0, __dealerChoices: 0, __localityChoices: 0, __phoneBlurValidations: 0 });
 
       const HTML = `
@@ -52,6 +69,7 @@
           .card.is-selected { border-color: #000; background: #eee; }
           .has-error input { border: 2px solid #c00; }
           .field-error { color: #c00; display: block; }
+          .is-invalid + span { color: #c00; }
           #dl-suggest li { padding: 4px; cursor: pointer; list-style: none; }
         </style>
         <form id="lead" novalidate>
@@ -60,6 +78,7 @@
           <div class="row"><label for="f-last">Nom*</label><input id="f-last" name="lastName" type="text" required /></div>
           <div class="row"><label for="f-email">E-mail*</label><input id="f-email" name="email" type="email" required /></div>
           ${phoneMode ? `<div class="row" id="f-phone-row"><label for="f-phone">Téléphone*</label><input id="f-phone" name="phone" type="tel" required /><span class="field-error" id="f-phone-error" hidden></span></div>` : ""}
+          ${consentMode ? `<div class="row" id="c-row">${consentQuestion ? `<p>${consentQuestion}</p>` : ""}<div id="c-opts"><label><input type="radio" name="${consentName}" value="1" /><span>Oui</span></label> <label><input type="radio" name="${consentName}" value="0" /><span>Non</span></label>${consentErrorOutside ? "" : `<span class="field-error" id="c-error" hidden></span>`}</div></div>${consentErrorOutside ? `<span class="field-error" id="c-error" hidden></span>` : ""}` : ""}
           <fieldset class="row" id="dl">
             <legend>Choisissez votre point de vente</legend>
             <div id="dl-view"></div>
@@ -254,6 +273,14 @@
               });
             }
 
+            const consentAnswered = () => Boolean(root.querySelector(`input[name="${consentName}"]:checked`));
+            const markConsent = (invalid) => {
+              root.querySelectorAll(`input[name="${consentName}"]`).forEach((r) => r.classList.toggle("is-invalid", invalid && !consentErrorOutside));
+              $("c-error").hidden = !invalid;
+              $("c-error").textContent = invalid ? consentError : "";
+            };
+            if (consentMode) root.querySelectorAll(`input[name="${consentName}"]`).forEach((r) => r.addEventListener("change", () => markConsent(false)));
+
             const form = $("lead");
             form.addEventListener("submit", async (event) => {
               event.preventDefault();
@@ -264,6 +291,10 @@
               }
               const missing = ["f-first", "f-last", "f-email", "dl-id"].filter((id) => !$(id).value);
               if (phoneMode && !validatePhone()) missing.push("f-phone");
+              if (consentMode && !consentAnswered()) {
+                markConsent(true);
+                missing.push("consent");
+              }
               if (missing.length > 0) {
                 $("f-error").textContent = "Veuillez compléter les champs obligatoires";
                 return;
