@@ -1946,6 +1946,16 @@ export async function runStep(params: {
   // callers get the same verified return behaviour without each needing its own special
   // case; every other action type, and every go_back while still on "main", dispatches
   // exactly as before.
+  // Diagnostics-only (failed-task error observability): records the action about to be
+  // dispatched so that if this step throws before completing, the failure handler in
+  // engine.ts can report what the engine was attempting -- never consulted by any
+  // navigation/reasoning/safety decision.
+  state.lastAttemptedAction = {
+    stepIndex,
+    actionType: effectiveAction.type,
+    ...(effectiveAction.type === "click" && effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
+  };
+
   const actionResult =
     effectiveAction.type === "go_back" && state.activeSurface !== MAIN_SURFACE_ID
       ? await (async () => {

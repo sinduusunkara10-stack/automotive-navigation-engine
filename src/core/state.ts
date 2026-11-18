@@ -141,6 +141,16 @@ export class RunState {
   verifiedFormSubmission: VerifiedFormSubmission | undefined;
 
   /**
+   * Diagnostics-only: the action about to be dispatched, set immediately before
+   * core/loop.ts's dispatchAction call site and left in place until the next step
+   * overwrites it. Never read by any navigation/reasoning/safety logic -- its only
+   * consumer is engine.ts's own failure handler, so it can report "the action being
+   * attempted" if the run throws mid-step, before that step's own actionHistory entry
+   * would otherwise exist.
+   */
+  lastAttemptedAction: { stepIndex: number; actionType: string; targetElementId?: string } | undefined;
+
+  /**
    * Consecutive count of steps that ended in a staleTarget-classified action failure (see
    * ActionResult.staleTarget) -- reset to 0 the moment a step makes real progress (a
    * successful action, or a non-click action). Bounds core/loop.ts's non-fatal blocker

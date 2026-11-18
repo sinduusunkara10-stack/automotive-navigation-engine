@@ -76,6 +76,22 @@ test("a failed result survives an API process restart", async () => {
   assert.equal(record?.error, "boom");
 });
 
+test("a failed result's optional errorDetails survives an API process restart", async () => {
+  const writerProcessStore = freshStore();
+  await writerProcessStore.createRun("run_restart_3b", "task-restart-3b");
+  await writerProcessStore.failRun("run_restart_3b", "boom", {
+    taskId: "task-restart-3b",
+    stepCount: 1,
+    currentUrl: "http://127.0.0.1/start.html",
+  });
+
+  const newProcessStore = freshStore();
+  const record = await newProcessStore.getRun("run_restart_3b");
+  assert.equal(record?.status, "failed");
+  assert.equal(record?.errorDetails?.stepCount, 1);
+  assert.equal(record?.errorDetails?.currentUrl, "http://127.0.0.1/start.html");
+});
+
 test("a running run whose owning process never comes back reads as stale/worker_lost from a fresh process", async () => {
   const timing = { ttlSeconds: 86400, staleThresholdMs: 10, heartbeatIntervalMs: 15_000 };
   const writerProcessStore = freshStore(timing);
