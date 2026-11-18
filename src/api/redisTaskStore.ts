@@ -77,11 +77,14 @@ export function createRedisTaskStore(client: RedisLike, timing: TaskStoreTimingC
       await write(record);
     },
 
-    async failRun(runId, error) {
+    async failRun(runId, error, details) {
       const record = await read(runId);
       if (!record) return;
       record.status = "failed";
       record.error = error;
+      if (details) {
+        record.errorDetails = details;
+      }
       record.updatedAt = new Date().toISOString();
       await write(record);
     },

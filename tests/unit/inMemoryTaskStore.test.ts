@@ -62,6 +62,25 @@ test("failRun stores the error and moves status to failed", async () => {
   assert.equal(fetched?.error, "boom");
 });
 
+test("failRun stores optional diagnostic errorDetails alongside the error message", async () => {
+  const store = createInMemoryTaskStore(DEFAULT_TIMING);
+  await store.createRun("run_3b", "task-3b");
+  await store.failRun("run_3b", "boom", {
+    taskId: "task-3b",
+    stack: "Error: boom\n    at somewhere",
+    stepCount: 2,
+    currentUrl: "http://127.0.0.1/configurator.html",
+    lastAttemptedAction: { stepIndex: 2, actionType: "click", targetElementId: "el-5" },
+  });
+
+  const fetched = await store.getRun("run_3b");
+  assert.equal(fetched?.status, "failed");
+  assert.equal(fetched?.error, "boom");
+  assert.equal(fetched?.errorDetails?.stepCount, 2);
+  assert.equal(fetched?.errorDetails?.currentUrl, "http://127.0.0.1/configurator.html");
+  assert.deepEqual(fetched?.errorDetails?.lastAttemptedAction, { stepIndex: 2, actionType: "click", targetElementId: "el-5" });
+});
+
 test("heartbeat updates updatedAt for a running record", async () => {
   const store = createInMemoryTaskStore(DEFAULT_TIMING);
   const created = await store.createRun("run_4", "task-4");

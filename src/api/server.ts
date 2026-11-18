@@ -178,6 +178,9 @@ async function handleGetTask(res: ServerResponse, store: TaskStore, runId: strin
       taskId: record.taskId,
       status: "failed",
       error: record.error ?? "Task execution failed.",
+      // Diagnostics-only, not schema-governed (same convention as staleReason above) --
+      // present only when the failure path (src/api/runner.ts) actually captured detail.
+      ...(record.errorDetails ? { errorDetails: record.errorDetails } : {}),
     });
     return;
   }

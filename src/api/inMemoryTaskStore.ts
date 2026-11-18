@@ -56,11 +56,14 @@ export function createInMemoryTaskStore(timing: TaskStoreTimingConfig): TaskStor
       record.updatedAt = new Date().toISOString();
     },
 
-    async failRun(runId, error) {
+    async failRun(runId, error, details) {
       const record = runs.get(runId);
       if (!record) return;
       record.status = "failed";
       record.error = error;
+      if (details) {
+        record.errorDetails = details;
+      }
       record.updatedAt = new Date().toISOString();
     },
 

@@ -78,6 +78,59 @@ function boundStepLogForStorage(stepLog: StepLog, maxElements: number): StepLog 
   };
 }
 
+/**
+ * Diagnostics-only failure context attached to a thrown error's `engineFailureContext`
+ * property before it propagates out of runTask -- see the catch clause below and
+ * src/api/runner.ts's own catch, which logs and (where the task-status endpoint's
+ * RunRecord supports it) persists this. Never read by any navigation/reasoning/safety
+ * logic; purely for operators debugging a run that failed with no other detail.
+ */
+export interface EngineFailureContext {
+  stepCount: number;
+  currentUrl?: string;
+  lastAttemptedAction?: { stepIndex: number; actionType: string; targetElementId?: string };
+  missingRequiredCriteriaIds?: string[];
+}
+
+/**
+ * Logs the actual exception (with stack trace) plus whatever run context is available,
+ * then attaches that same context to the error (non-destructively -- the error's own
+ * message/stack are never altered) so a caller further up (src/api/runner.ts) can expose
+ * it too, instead of only a generic "Task execution failed" string. Best-effort throughout:
+ * reading page.url() or task fields can never itself throw a second error that would mask
+ * the original one.
+ */
+function logAndAttachFailureContext(params: { task: TaskRequest; state: RunState; page: Page; error: unknown }): void {
+  const { task, state, page, error } = params;
+  let currentUrl: string | undefined;
+  try {
+    currentUrl = page.url();
+  } catch {
+    // page may already be unusable (e.g. closed by the site itself); omit rather than mask.
+  }
+  let missingRequiredCriteriaIds: string[] | undefined;
+  try {
+    missingRequiredCriteriaIds = getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds);
+  } catch {
+    // Never let diagnostics collection itself fail the error path.
+  }
+  const context: EngineFailureContext = {
+    stepCount: state.stepCount,
+    ...(currentUrl ? { currentUrl } : {}),
+    ...(state.lastAttemptedAction ? { lastAttemptedAction: state.lastAttemptedAction } : {}),
+    ...(missingRequiredCriteriaIds && missingRequiredCriteriaIds.length > 0 ? { missingRequiredCriteriaIds } : {}),
+  };
+  console.error(
+    `[navigation-engine] Task "${task.taskId}" failed during execution (step ${context.stepCount}` +
+      `${context.currentUrl ? `, url: ${context.currentUrl}` : ""}` +
+      `${context.lastAttemptedAction ? `, attempting: ${context.lastAttemptedAction.actionType}` : ""}):`,
+    error,
+  );
+  if (error instanceof Error) {
+    (error as Error & { engineFailureContext?: EngineFailureContext }).engineFailureContext = context;
+  }
+}
+
 function toDomainDiscoveryDiagnostics(
   discovery: DomainDiscoveryResult,
   allowedDomainsUsed: string[],
@@ -574,6 +627,9 @@ export async function runTask(params: {
       startWindowGa4EndIndex,
       startWindowDataLayerEndIndex,
     });
+  } catch (error) {
+    logAndAttachFailureContext({ task, state, page, error });
+    throw error;
   } finally {
     detachGa4Capture?.();
     detachDataLayerPushCapture?.();

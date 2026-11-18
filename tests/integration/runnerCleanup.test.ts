@@ -142,6 +142,9 @@ test("a browser launch/newPage failure fails the run and still closes the browse
 
   const record = await store.getRun("run_launch_throws");
   assert.equal(record?.status, "failed");
+  // Diagnostics-only error-observability fix: the real exception's own message is
+  // preserved rather than replaced with a generic placeholder.
+  assert.equal(record?.error, "simulated newPage() failure");
   assert.equal(stats.closeCalls, 1, "expected the browser to still be closed after the failure");
 });
 

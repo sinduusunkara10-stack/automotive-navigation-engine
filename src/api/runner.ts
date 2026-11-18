@@ -19,6 +19,8 @@ import {
 } from "../config/containerMemoryCircuitBreakerConfig.js";
 import { readContainerMemory, type ContainerMemoryReading } from "../safety/containerMemoryGuard.js";
 import type { ContainerMemoryDiagnostics } from "../types/task-response.js";
+import type { RunFailureDetails } from "./taskStore.js";
+import type { EngineFailureContext } from "../core/engine.js";
 
 // Reduces Chromium's own memory footprint without touching anything that affects
 // rendering fidelity or multi-frame behavior (observationBuilder.ts depends on both being
@@ -190,8 +192,24 @@ export async function executeTaskAsync(
     }
     result.diagnostics.memory = recordMemorySample(result.diagnostics.memory ?? [], "after_cleanup");
     await store.completeRun(runId, result);
-  } catch {
-    await store.failRun(runId, "Task execution failed before a result could be produced.");
+  } catch (error) {
+    // Preserve the real failure instead of only the generic placeholder below: log the
+    // actual exception (with stack trace) plus runId/taskId and whatever step/milestone/
+    // URL/action context engine.ts's own catch clause (src/core/engine.ts) was able to
+    // attach to it, then persist the same detail so the task-status endpoint can expose it
+    // too. Diagnostics-only -- never changes what status a run ends in.
+    const engineFailureContext = (error as { engineFailureContext?: EngineFailureContext } | undefined)?.engineFailureContext;
+    console.error(
+      `[navigation-engine] runId "${runId}" (taskId "${task.taskId}") failed before a result could be produced:`,
+      error,
+    );
+    const message = error instanceof Error && error.message ? error.message : "Task execution failed before a result could be produced.";
+    const details: RunFailureDetails = {
+      taskId: task.taskId,
+      ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),
+      ...(engineFailureContext ?? {}),
+    };
+    await store.failRun(runId, message, details);
   } finally {
     clearInterval(heartbeat);
     clearInterval(memorySamplerInterval);
