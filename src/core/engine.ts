@@ -27,6 +27,7 @@ import { readActionNavigationTimeoutMs } from "../config/actionNavigationConfig.
 import { assessUrlSafety } from "../discovery/hostSafety.js";
 import { runDomainDiscovery, type DomainDiscoveryResult } from "../discovery/domainDiscovery.js";
 import { recordMemorySample } from "./memoryDiagnostics.js";
+import { buildEngineFailureContext } from "../diagnostics/failureContext.js";
 import { appendBoundedPreservingEnds, capPreservingEnds } from "./boundedArray.js";
 import {
   MAX_STORED_INTERACTIVE_ELEMENTS_KEEP_FIRST,
@@ -79,47 +80,22 @@ function boundStepLogForStorage(stepLog: StepLog, maxElements: number): StepLog 
 }
 
 /**
- * Diagnostics-only failure context attached to a thrown error's `engineFailureContext`
- * property before it propagates out of runTask -- see the catch clause below and
- * src/api/runner.ts's own catch, which logs and (where the task-status endpoint's
- * RunRecord supports it) persists this. Never read by any navigation/reasoning/safety
- * logic; purely for operators debugging a run that failed with no other detail.
+ * Logs the actual exception (with stack trace) plus basic run context, then attaches the
+ * full diagnostics-only failure context (src/diagnostics/failureContext.ts) to the error so
+ * src/api/runner.ts can expose it on the task-status endpoint. The property is
+ * non-enumerable so console/inspect output of the error itself stays the one-line summary
+ * above. The error's own message/stack are never altered.
  */
-export interface EngineFailureContext {
-  stepCount: number;
-  currentUrl?: string;
-  lastAttemptedAction?: { stepIndex: number; actionType: string; targetElementId?: string };
-  missingRequiredCriteriaIds?: string[];
-}
-
-/**
- * Logs the actual exception (with stack trace) plus whatever run context is available,
- * then attaches that same context to the error (non-destructively -- the error's own
- * message/stack are never altered) so a caller further up (src/api/runner.ts) can expose
- * it too, instead of only a generic "Task execution failed" string. Best-effort throughout:
- * reading page.url() or task fields can never itself throw a second error that would mask
- * the original one.
- */
-function logAndAttachFailureContext(params: { task: TaskRequest; state: RunState; page: Page; error: unknown }): void {
-  const { task, state, page, error } = params;
-  let currentUrl: string | undefined;
-  try {
-    currentUrl = page.url();
-  } catch {
-    // page may already be unusable (e.g. closed by the site itself); omit rather than mask.
-  }
-  let missingRequiredCriteriaIds: string[] | undefined;
-  try {
-    missingRequiredCriteriaIds = getMissingRequiredCriteriaIds(task.successCriteria, state.satisfiedCriteriaIds);
-  } catch {
-    // Never let diagnostics collection itself fail the error path.
-  }
-  const context: EngineFailureContext = {
-    stepCount: state.stepCount,
-    ...(currentUrl ? { currentUrl } : {}),
-    ...(state.lastAttemptedAction ? { lastAttemptedAction: state.lastAttemptedAction } : {}),
-    ...(missingRequiredCriteriaIds && missingRequiredCriteriaIds.length > 0 ? { missingRequiredCriteriaIds } : {}),
-  };
+function logAndAttachFailureContext(params: {
+  task: TaskRequest;
+  state: RunState;
+  page: Page;
+  steps: readonly StepLog[];
+  reasoning: ReasoningProvider;
+  error: unknown;
+}): void {
+  const { task, state, page, steps, reasoning, error } = params;
+  const context = buildEngineFailureContext({ task, state, mainPage: page, steps, reasoning });
   console.error(
     `[navigation-engine] Task "${task.taskId}" failed during execution (step ${context.stepCount}` +
       `${context.currentUrl ? `, url: ${context.currentUrl}` : ""}` +
@@ -127,7 +103,12 @@ function logAndAttachFailureContext(params: { task: TaskRequest; state: RunState
     error,
   );
   if (error instanceof Error) {
-    (error as Error & { engineFailureContext?: EngineFailureContext }).engineFailureContext = context;
+    Object.defineProperty(error, "engineFailureContext", {
+      value: context,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
   }
 }
 
@@ -334,6 +315,10 @@ export async function runTask(params: {
   if (dataLayerPushCapture) {
     state.setDataLayerPushListenerActive(page, dataLayerPushCapture.attached);
   }
+  // Diagnostics-only (src/diagnostics/pageLifecycle.ts): listeners only, read solely by the
+  // failure handler below. Hoisted `steps` lets that handler report the steps already taken.
+  const detachPageLifecycle = state.pageLifecycle.attach(page);
+  let steps: StepLog[] = [];
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
     : undefined;
@@ -462,7 +447,6 @@ export async function runTask(params: {
       });
     }
 
-    let steps: StepLog[] = [];
     let terminal: TerminalStatus | undefined;
     let finishReason = "loop_exhausted";
 
@@ -628,12 +612,13 @@ export async function runTask(params: {
       startWindowDataLayerEndIndex,
     });
   } catch (error) {
-    logAndAttachFailureContext({ task, state, page, error });
+    logAndAttachFailureContext({ task, state, page, steps, reasoning, error });
     throw error;
   } finally {
     detachGa4Capture?.();
     detachDataLayerPushCapture?.();
     detachErrorCapture?.();
+    detachPageLifecycle();
     state.detachAllAdoptedSurfaceListeners();
   }
 }

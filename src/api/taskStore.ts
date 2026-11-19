@@ -1,4 +1,5 @@
 import type { ContainerMemoryDiagnostics, TaskResponse } from "../types/task-response.js";
+import type { EngineFailureContext } from "../types/failureDiagnostics.js";
 
 export type RunStatus = "running" | "completed" | "failed" | "stale";
 
@@ -9,13 +10,9 @@ export type RunStatus = "running" | "completed" | "failed" | "stale";
  * convention as RunRecord.staleReason): it lives outside `result`, so a caller choosing to
  * read it is a caller concern, never a wire-contract version bump.
  */
-export interface RunFailureDetails {
+export interface RunFailureDetails extends Partial<EngineFailureContext> {
   stack?: string;
   taskId?: string;
-  stepCount?: number;
-  currentUrl?: string;
-  lastAttemptedAction?: { stepIndex: number; actionType: string; targetElementId?: string };
-  missingRequiredCriteriaIds?: string[];
 }
 
 /**

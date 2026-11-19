@@ -23,6 +23,7 @@ import {
 import { computeCandidateSurfaceFingerprint } from "../core/surfaceFingerprint.js";
 import { assessConsentSurface } from "../safety/consentClassifier.js";
 import { buildObservation, elementLocatorSelector } from "../observation/observationBuilder.js";
+import { markEngineClose } from "../diagnostics/pageLifecycle.js";
 
 /** Popup fingerprinting and retry protection: a repeat encounter of the same candidate is fully rescored once every this-many encounters (a bounded "materially new evidence" check without needing to re-read the page first, which would defeat the point of skipping work) -- every other repeat reuses the cached tier/score, skipping both the resettle pass and any Claude ambiguity call. See core/surfaceFingerprint.ts. */
 const FINGERPRINT_RECONSIDERATION_INTERVAL = 3;
@@ -353,6 +354,7 @@ export async function adoptPopupForCapture(
   if (!wantsGa4 && !wantsDataLayer) {
     // Neither capture module was requested -- nothing to instrument; close immediately,
     // matching the pre-existing behaviour for a task that never asked for this evidence.
+    markEngineClose(popup, "popup_capture_not_requested");
     await popup.close().catch(() => {});
     return { observed: false };
   }
@@ -418,6 +420,7 @@ export async function adoptPopupForCapture(
   } finally {
     detachGa4?.();
     detachPush?.();
+    markEngineClose(popup, "popup_captured_not_adopted");
     await popup.close().catch(() => {});
   }
 
