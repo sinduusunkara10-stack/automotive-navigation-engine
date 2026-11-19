@@ -56,13 +56,19 @@ const LOW_CONFIDENCE: Decision = {
   fallbackReason: "low_confidence",
 };
 
+function popupHost(baseUrl: string): string {
+  return baseUrl.replace("127.0.0.1", "localhost");
+}
+
 function task(baseUrl: string): TaskRequest {
   return {
     schemaVersion: "1.51.0",
     taskId: "adopted-surface-recovery-test",
     objective: "Campaign offer quote request.",
     startUrl: `${baseUrl}/adopted-recovery-landing.html`,
-    allowedDomains: ["127.0.0.1"],
+    // The CTAs open their tab on "localhost" (another hostname for the same server), like a
+    // campaign CTA that opens a partner/configurator host in a new tab.
+    allowedDomains: ["127.0.0.1", "localhost"],
     successCriteria: [
       {
         id: "step-1",
@@ -75,11 +81,11 @@ function task(baseUrl: string): TaskRequest {
         id: "step-2",
         type: "url_pattern",
         description: "Request summary",
-        config: { pattern: `${baseUrl}/adopted-recovery-summary.html` },
+        config: { pattern: `${popupHost(baseUrl)}/adopted-recovery-summary.html` },
         required: true,
       },
     ],
-    captureModules: ["page_visits"],
+    captureModules: ["page_visits", "cta_clicks", "data_layer_evidence", "ga4_network_events"],
     limits: { maxSteps: 12, maxBacktracks: 3 },
     safety: {
       allowedActions: ["click", "scroll", "go_back", "stop_success", "stop_blocked", "stop_failure"],
@@ -118,7 +124,7 @@ test("adopted tab that satisfied the latest milestone: a low-confidence fallback
 
   await withRun(provider, (response, baseUrl) => {
     assert.equal(response.status, "success", JSON.stringify(response.steps.map((s) => s.decision)));
-    assert.equal(response.finalUrl, `${baseUrl}/adopted-recovery-summary.html`);
+    assert.equal(response.finalUrl, `${popupHost(baseUrl)}/adopted-recovery-summary.html`);
 
     const adoption = response.diagnostics.surfaceAdoption;
     assert.ok(adoption?.attempts.some((a) => a.event === "adopted"), "the form tab was adopted");
@@ -129,7 +135,7 @@ test("adopted tab that satisfied the latest milestone: a low-confidence fallback
     const formMilestone = response.diagnostics.milestoneEvidence?.find((m) => m.criterionId === "step-1");
     assert.equal(formMilestone?.stepIndex, 0, "satisfied by the click that opened the tab");
     assert.equal(formMilestone?.phase, "post_action");
-    assert.equal(formMilestone?.pageUrl, `${baseUrl}/adopted-recovery-form.html`, "evaluated on the adopted tab, not the opener");
+    assert.equal(formMilestone?.pageUrl, `${popupHost(baseUrl)}/adopted-recovery-form.html`, "evaluated on the adopted tab, not the opener");
 
     const retry = response.diagnostics.recovery?.attempts.find((a) => a.anchorCriterionId === "step-1");
     assert.ok(retry, "milestone-anchored recovery handled the low-confidence fallback");
@@ -149,16 +155,21 @@ test("go_back from an adopted tab that satisfied no milestone returns to the ope
 
   await withRun(provider, (response, baseUrl) => {
     assert.equal(response.status, "success", JSON.stringify(response.steps.map((s) => s.decision)));
-    assert.equal(response.finalUrl, `${baseUrl}/adopted-recovery-summary.html`);
+    assert.equal(response.finalUrl, `${popupHost(baseUrl)}/adopted-recovery-summary.html`);
 
-    const events = response.diagnostics.surfaceAdoption?.attempts.map((a) => a.event) ?? [];
-    assert.ok(events.includes("returned"), "the brochure tab was left via surface return");
-    assert.equal(events.filter((e) => e === "adopted").length, 2, "brochure, then the form, were adopted");
-
-    const goBackStep = response.steps.find((s) => s.actionResult.resultingUrl === `${baseUrl}/adopted-recovery-landing.html`);
-    assert.ok(goBackStep?.actionResult.success, "the go_back returned to the opener");
+    const attempts = response.diagnostics.surfaceAdoption?.attempts ?? [];
+    assert.equal(attempts[0]?.event, "adopted");
+    assert.ok(attempts[0]?.pageUrl?.endsWith("/adopted-recovery-brochure.html"), "the brochure tab was adopted first");
+    assert.deepEqual(
+      { stepIndex: attempts[1]?.stepIndex, event: attempts[1]?.event, pageUrl: attempts[1]?.pageUrl },
+      { stepIndex: 1, event: "returned", pageUrl: `${baseUrl}/adopted-recovery-landing.html` },
+      "the reasoning layer's go_back left the brochure tab for the opener",
+    );
+    const goBackStep = response.steps[1];
+    assert.equal(goBackStep!.actionResult.success, true, "the go_back step completed without a closed-page crash");
+    assert.equal(response.steps[2]!.currentUrl, `${baseUrl}/adopted-recovery-landing.html`, "the next step ran on the opener");
 
     const formMilestone = response.diagnostics.milestoneEvidence?.find((m) => m.criterionId === "step-1");
-    assert.equal(formMilestone?.pageUrl, `${baseUrl}/adopted-recovery-form.html`);
+    assert.equal(formMilestone?.pageUrl, `${popupHost(baseUrl)}/adopted-recovery-form.html`);
   });
 });

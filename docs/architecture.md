@@ -4630,13 +4630,17 @@ anchor observation all use that page. A milestone satisfied by a click that open
 a tab is now judged on the adopted tab in the same step. Its recovery anchor is recorded there
 too, with `RecoveryAnchor.surfaceId`.
 
-`gatherSemanticPageSignals` returns empty, never-matching signals for a page that is closed,
-or closes while it is read, instead of throwing. Errors on an open page still throw.
+With `emptyWhenClosed`, `gatherSemanticPageSignals` returns empty, never-matching signals for a
+page that is closed, or closes while it is read, instead of throwing. Errors on an open page
+still throw. Milestone evaluation (`successEvaluator.ts`) opts in. Surface-relevance scoring
+does not, so its handling of a popup that closes itself while being assessed is unchanged.
 
 When recovery would retreat (the action has become `stop_blocked`) and the selected anchor was
 recorded on the adopted tab the run is on now, it counts as already reached even if the
 fingerprint drifted (e.g. after a scroll). A `go_back` there would close the tab and land on
 the opener, never on the anchor. The reasoning layer is asked again on the current tab, which
 is the existing zero-hop retry. If that retry still blocks, the next step falls back as before
-(an older anchor or journey replanning). An adopted tab that satisfied no new milestone has no
-anchor of its own, so recovery still goes back to the opener to try another CTA.
+(an older anchor or journey replanning). A bounded branch that closes (`stop_blocked`) while
+the run is on such a tab is archived in place, with no branch-closure `go_back`, and this same
+recovery decides the next action. An adopted tab that satisfied no new milestone has no anchor
+of its own, so recovery still goes back to the opener to try another CTA.

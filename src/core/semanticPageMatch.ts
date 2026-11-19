@@ -70,6 +70,13 @@ export interface GatherSemanticPageSignalsOptions {
    * whole-page evidence pool.
    */
   scopeToUncoveredOnly?: boolean;
+  /**
+   * When true, a page that is closed (or closes while being read) yields empty,
+   * never-matching signals instead of throwing. Opt-in: milestone evaluation uses it, so a
+   * page closed mid-step can never fail a run. Surface-relevance scoring deliberately does not:
+   * its existing handling of a popup that closes itself during assessment stays unchanged.
+   */
+  emptyWhenClosed?: boolean;
 }
 
 /**
@@ -83,6 +90,9 @@ export async function gatherSemanticPageSignals(
   page: Page,
   options: GatherSemanticPageSignalsOptions = {},
 ): Promise<SemanticPageSignals> {
+  if (options.emptyWhenClosed !== true) {
+    return readSemanticPageSignals(page, options);
+  }
   // A page closed mid-step (e.g. an adopted surface just closed by returnToParentSurface)
   // carries no evidence: an empty, never-matching signal set instead of a thrown
   // "Target page, context or browser has been closed" that would fail the whole run.

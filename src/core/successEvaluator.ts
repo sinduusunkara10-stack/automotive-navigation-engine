@@ -695,7 +695,7 @@ async function evaluateSemanticPageMatch(
   const signals: readonly SemanticSignalName[] =
     configuredSignals && configuredSignals.length > 0 ? configuredSignals : ALL_SEMANTIC_SIGNALS;
 
-  const pageSignals = await gatherSemanticPageSignals(page, { scopeToUncoveredOnly: surfaceScoped === true });
+  const pageSignals = await gatherSemanticPageSignals(page, { scopeToUncoveredOnly: surfaceScoped === true, emptyWhenClosed: true });
   const score = scoreSemanticPageMatch(anchorText, pageSignals, signals);
   if (score.overall >= minScore) {
     return {

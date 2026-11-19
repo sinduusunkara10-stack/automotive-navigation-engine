@@ -1511,6 +1511,15 @@ export async function runStep(params: {
   // *outside* any active branch, exactly as before this phase.
   const branchActiveAndExploring = Boolean(state.activeBranch && !state.activeBranch.result);
   let branchReturnAttempted = false;
+  // The run is on an adopted tab/popup where a required milestone was satisfied (a recovery
+  // anchor was recorded on it). Retreating from here closes that tab and abandons the
+  // milestone, so a branch closing on it ends in place and recovery is decided below
+  // (milestone-anchored recovery re-asks the reasoning layer on this tab first).
+  const onAdoptedSurfaceWithAnchor =
+    state.activeSurface !== MAIN_SURFACE_ID &&
+    state.activePage !== undefined &&
+    state.recoveryAnchors.some((a) => a.surfaceId === state.activeSurface);
+  let branchClosedInPlaceOnAdoptedSurface = false;
   // Captured here (rather than re-read from state.branchHistory/activeBranch later) since
   // the branch may or may not have been archived yet by the time the step log is built --
   // this keeps that later text correct regardless of which path below was taken.
@@ -1554,6 +1563,11 @@ export async function runStep(params: {
       decision = zeroHopRetry.decision;
       safetyResult = zeroHopRetry.safetyResult;
       effectiveAction = zeroHopRetry.effectiveAction;
+    } else if (onAdoptedSurfaceWithAnchor) {
+      branch.returnStatus = "not_attempted";
+      pushAlternativeCandidateDiagnostic({ state, branch, stepIndex, budget: alternativeCandidateBudget });
+      state.archiveActiveBranch();
+      branchClosedInPlaceOnAdoptedSurface = true;
     } else if (!state.verifiedFormSubmission && task.safety.allowedActions.includes("go_back")) {
       branch.returnHopsBudget = branch.depth + 1;
       branch.returnHopsAttempted += 1;
@@ -1596,7 +1610,7 @@ export async function runStep(params: {
   // which of these two layers would otherwise have let it through.
   const journeyReplanningEligible =
     !state.verifiedFormSubmission &&
-    !branchActiveAndExploring &&
+    (!branchActiveAndExploring || branchClosedInPlaceOnAdoptedSurface) &&
     !branchReturnAttempted &&
     effectiveAction.type === "stop_blocked" &&
     state.journeyReplanningAttempts < MAX_JOURNEY_REPLANNING_ATTEMPTS &&
