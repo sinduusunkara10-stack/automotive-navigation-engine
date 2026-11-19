@@ -49,6 +49,8 @@ import {
 } from "./successEvaluator.js";
 import type { ActionAnalytics, ActionResult } from "../types/task-response.js";
 import { MAIN_SURFACE_ID, type RunState, type SurfaceCausingAction } from "./state.js";
+import { beginDispatchTrace, finishDispatchTrace } from "../diagnostics/dispatchTrace.js";
+import type { GoBackSource } from "../types/failureDiagnostics.js";
 import { detectClosedAdoptedSurfaces, returnToParentSurface } from "./surfaceReturn.js";
 import { shouldEnterInDocumentSurface, shouldLeaveInDocumentSurface } from "./inDocumentSurface.js";
 import { gatherPanelEvidence, looksLikeGenericDismissControl, type PanelEvidence } from "./panelEvidence.js";
@@ -948,6 +950,15 @@ export async function runStep(params: {
           progressEvidence: `return hop ${branch.returnHopsAttempted}/${branch.returnHopsBudget}`,
         });
         const forcedAction: SelectedAction = { type: "go_back" };
+        const branchHopTrace = beginDispatchTrace({
+          state,
+          stepIndex,
+          action: forcedAction,
+          goBack: {
+            source: "branch_return_hop",
+            dispatchedAs: state.activeSurface !== MAIN_SURFACE_ID ? "surface_return" : "browser_history",
+          },
+        });
         // Return-to-parent recovery (Phase 3 PR 4): off "main", a go_back means leaving the
         // adopted surface, never an ordinary browser-history navigation on it -- substitute
         // returnToParentSurface, which the top-of-function unexpected-closure check and the
@@ -983,6 +994,7 @@ export async function runStep(params: {
                 actionNavigationTimeoutMs,
                 settleCeilingMs,
               });
+        finishDispatchTrace({ state, trace: branchHopTrace, stepPage: page, actionResult: returnActionResult });
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         // goBack timeout/classification fix (production incident
         // run_b3743f06-1667-443e-b9fa-e804aa5caecf, see actions/goBack.ts): a go_back whose
@@ -1257,6 +1269,9 @@ export async function runStep(params: {
   // failed, never to an arbitrary DOM-order guess.
 
   let { decision, safetyResult, effectiveAction } = await obtainDecision({ page, task, state, observation, reasoning });
+  // Diagnostics-only: which engine path substituted a go_back below, if any. Never read by
+  // any selection logic -- only recorded on the dispatch trace.
+  let goBackSource: GoBackSource | undefined;
 
   // PR 1C: Low-confidence recovery (see docs/architecture.md "Low-confidence recovery").
   // A stop_blocked decision caused specifically by the reasoning layer's own confidence
@@ -1541,6 +1556,7 @@ export async function runStep(params: {
       branch.returnHopsBudget = branch.depth + 1;
       branch.returnHopsAttempted += 1;
       effectiveAction = { type: "go_back" };
+      goBackSource = "branch_closure";
       branchReturnAttempted = true;
     } else {
       // go_back is not an allowed action at all, or a verified submission already exists and
@@ -1736,6 +1752,7 @@ export async function runStep(params: {
       state.activeAnchorRestore = { anchor: candidateRecoveryAnchor, hopsAttempted: previousHops + 1, hopsBudget: PER_ANCHOR_HOP_LIMIT };
       state.anchorRestoreHopsAttempted += 1;
       effectiveAction = { type: "go_back" };
+      goBackSource = "anchor_hop";
       state.recoveryAttemptDiagnostics.push({
         stepIndex,
         anchorCriterionId: candidateRecoveryAnchor.criterionId,
@@ -1769,6 +1786,7 @@ export async function runStep(params: {
   } else if (journeyReplanningAttempted) {
     state.journeyReplanningAttempts += 1;
     effectiveAction = { type: "go_back" };
+    goBackSource = blockedDecisionWasProposedDirectly ? "journey_replanning" : "stop_blocked_substitution";
 
     // PR 1C: Alternative Route Exploration -- seeds the one-shot nudge/guard consumed at
     // the top of the *next* runStep call (see the exhausted-candidate-protection block
@@ -1950,11 +1968,21 @@ export async function runStep(params: {
   // dispatched so that if this step throws before completing, the failure handler in
   // engine.ts can report what the engine was attempting -- never consulted by any
   // navigation/reasoning/safety decision.
-  state.lastAttemptedAction = {
+  const dispatchTrace = beginDispatchTrace({
+    state,
     stepIndex,
-    actionType: effectiveAction.type,
-    ...(effectiveAction.type === "click" && effectiveAction.target ? { targetElementId: effectiveAction.target } : {}),
-  };
+    action: effectiveAction,
+    goBack:
+      effectiveAction.type === "go_back"
+        ? {
+            source: goBackSource ?? (decision.action.type === "go_back" ? "reasoning_decision" : "other_recovery"),
+            dispatchedAs: state.activeSurface !== MAIN_SURFACE_ID ? "surface_return" : "browser_history",
+            ...(decision.action.type !== "go_back" ? { substitutedFor: decision.action.type } : {}),
+            ...(decision.fallbackReason ? { decisionFallbackReason: decision.fallbackReason } : {}),
+            ...(safetyResult.flags.length > 0 ? { safetyFlags: [...safetyResult.flags] } : {}),
+          }
+        : undefined,
+  });
 
   const actionResult =
     effectiveAction.type === "go_back" && state.activeSurface !== MAIN_SURFACE_ID
@@ -2017,6 +2045,7 @@ export async function runStep(params: {
           activeSurfaceInfo: effectiveAction.type === "fill_form" ? observation.activeSurface : undefined,
           optionalConsentOptInFallbackForTest: effectiveAction.type === "fill_form" ? task.safety.allowOptionalConsentOptInFallbackForTest === true : undefined,
         });
+  finishDispatchTrace({ state, trace: dispatchTrace, stepPage: page, actionResult });
 
   if (effectiveAction.type === "fill_form" && !state.verifiedFormSubmission) {
     state.verifiedFormSubmission = deriveVerifiedFormSubmission(actionResult, stepIndex);
@@ -3325,6 +3354,8 @@ async function obtainDecision(params: {
   // vocabulary or sends raw page HTML -- it is the exact same reasoning.decide() call shape
   // as every other decision, never a distinct, unconstrained code path.
   const decisionNeedsRecovery = decision.action.type === "stop_blocked" && Boolean(decision.fallbackReason);
+  let journeyMemoryRecoveryFired = false;
+  let journeyMemoryRecoveryUsed = false;
   if (
     journeyMemoryFlags.enabled &&
     journeyMemorySummary &&
@@ -3332,6 +3363,7 @@ async function obtainDecision(params: {
     state.journeyMemoryRecoveryCallsUsed < journeyMemoryTiming.maxRecoveryCalls
   ) {
     state.journeyMemoryRecoveryCallsUsed += 1;
+    journeyMemoryRecoveryFired = true;
     const recoveryStartedAt = Date.now();
     let recoveryDecision: Decision | undefined;
     try {
@@ -3348,10 +3380,18 @@ async function obtainDecision(params: {
     };
     if (succeeded && recoveryDecision) {
       decision = recoveryDecision;
+      journeyMemoryRecoveryUsed = true;
     } else {
       state.journeyMemoryFallbackExplorationUsed = true;
     }
   }
+
+  state.lastDecisionJourneyMemory = {
+    stepIndex: state.stepCount,
+    guidanceOffered: Boolean(journeyMemorySummary),
+    recoveryCallFired: journeyMemoryRecoveryFired,
+    recoveryDecisionUsed: journeyMemoryRecoveryUsed,
+  };
 
   const safetyResult = validateDecision({
     action: decision.action,

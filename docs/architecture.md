@@ -4591,3 +4591,29 @@ details of the form", "submit the form", "stop and return") were still never sat
 `tests/fixtures/post-submit-journey.html` is a lead form whose confirmation offers a "Modify my
 details" control. It runs in light DOM and in an open shadow root, with
 `scenario=ok|reject|unconfirmed|analytics_only`.
+
+### Failed-run black-box diagnostics (no contract change; request 1.51.0 and response 1.53.0 unchanged)
+
+When `runTask` throws, `src/core/engine.ts` attaches an `EngineFailureContext`
+(`src/types/failureDiagnostics.ts`, built by `src/diagnostics/failureContext.ts`) to the error.
+`src/api/runner.ts` stores it in the run record's `errorDetails`, which
+`GET /v1/tasks/:runId` returns. `errorDetails` is not schema-governed, and a successful run is
+unchanged. The context always holds:
+- `currentUrl` from the active surface's page (`state.activePage ?? page`) and `mainPageUrl`;
+- `partialDiagnostics`: steps so far, surface adoption and return attempts, recovery and
+  alternative exploration, reasoning decisions, milestone evidence and Journey Memory use;
+- `pageLifecycle` (`src/diagnostics/pageLifecycle.ts`): new pages, page close/crash, context
+  close, browser disconnect and surface enter/leave. Each entry has a time, a stable page id
+  and the URL. A close is `closedBy: "engine"` only when `returnToParentSurface` or
+  `popupCapture` marked it with `markEngineClose` first; any other close is `"external"`;
+- `actionTrace` (`src/diagnostics/dispatchTrace.ts`): the active page, surface and open pages
+  before and after each dispatched action. A `go_back` also records its source (reasoning
+  decision, journey replanning, stop_blocked substitution, anchor hop, branch closure, branch
+  return hop or other recovery). This is recorded only; selection is unchanged.
+
+Caps: 100 lifecycle events, 50 action-trace records and 50 entries per exported list, keeping
+the first and the latest entries. Text and metadata only: no screenshots, DOM, traces or
+network bodies.
+
+`NAV_FAILURE_DIAGNOSTICS_LOG=1` (default off) also writes a time-ordered timeline of these
+entries to the logs (`src/diagnostics/failureTimeline.ts`). It changes logging only.

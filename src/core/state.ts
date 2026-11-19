@@ -12,6 +12,8 @@ import type {
 } from "../types/recovery.js";
 import { RouteMemory } from "./routeMemory.js";
 import type { VerifiedFormSubmission } from "./verifiedSubmission.js";
+import { PageLifecycleLog } from "../diagnostics/pageLifecycle.js";
+import type { DecisionJourneyMemoryTrace, LastAttemptedAction } from "../types/failureDiagnostics.js";
 import { MAX_BRANCH_HISTORY, type BranchRecord } from "./branchExploration.js";
 import {
   isEquivalentCheckpoint,
@@ -148,7 +150,17 @@ export class RunState {
    * attempted" if the run throws mid-step, before that step's own actionHistory entry
    * would otherwise exist.
    */
-  lastAttemptedAction: { stepIndex: number; actionType: string; targetElementId?: string } | undefined;
+  lastAttemptedAction: LastAttemptedAction | undefined;
+
+  /**
+   * Diagnostics-only (see src/diagnostics/pageLifecycle.ts): Page/context/browser lifecycle
+   * events, surface stack changes and a per-dispatch page-state trace. Never read by any
+   * navigation/reasoning/safety logic; only engine.ts's failure handler reads it.
+   */
+  readonly pageLifecycle = new PageLifecycleLog();
+
+  /** Diagnostics-only: whether the most recent obtainDecision call offered Journey Memory guidance (see core/loop.ts). */
+  lastDecisionJourneyMemory: DecisionJourneyMemoryTrace | undefined;
 
   /**
    * Consecutive count of steps that ended in a staleTarget-classified action failure (see
@@ -427,6 +439,7 @@ export class RunState {
     if (page) {
       this.pageBySurfaceId.set(surfaceId, page);
     }
+    this.pageLifecycle.record({ kind: "surface_entered", surfaceId, ...(page ? { pageId: this.pageLifecycle.pageId(page) } : {}) });
   }
 
   /**
@@ -444,7 +457,12 @@ export class RunState {
     if (this.surfaceStack.length <= 1) {
       return undefined;
     }
-    return this.surfaceStack.pop();
+    const popped = this.surfaceStack.pop();
+    if (popped) {
+      const page = this.pageBySurfaceId.get(popped);
+      this.pageLifecycle.record({ kind: "surface_left", surfaceId: popped, ...(page ? { pageId: this.pageLifecycle.pageId(page) } : {}) });
+    }
+    return popped;
   }
 
   /**

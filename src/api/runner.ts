@@ -20,7 +20,9 @@ import {
 import { readContainerMemory, type ContainerMemoryReading } from "../safety/containerMemoryGuard.js";
 import type { ContainerMemoryDiagnostics } from "../types/task-response.js";
 import type { RunFailureDetails } from "./taskStore.js";
-import type { EngineFailureContext } from "../core/engine.js";
+import type { EngineFailureContext } from "../types/failureDiagnostics.js";
+import { readNavFailureDiagnosticsLog } from "../config/failureDiagnosticsLogConfig.js";
+import { buildFailureTimeline } from "../diagnostics/failureTimeline.js";
 
 // Reduces Chromium's own memory footprint without touching anything that affects
 // rendering fidelity or multi-frame behavior (observationBuilder.ts depends on both being
@@ -204,6 +206,11 @@ export async function executeTaskAsync(
       error,
     );
     const message = error instanceof Error && error.message ? error.message : "Task execution failed before a result could be produced.";
+    if (readNavFailureDiagnosticsLog(process.env)) {
+      for (const line of buildFailureTimeline({ runId, taskId: task.taskId, context: engineFailureContext, errorMessage: message })) {
+        console.error(line);
+      }
+    }
     const details: RunFailureDetails = {
       taskId: task.taskId,
       ...(error instanceof Error && error.stack ? { stack: error.stack } : {}),

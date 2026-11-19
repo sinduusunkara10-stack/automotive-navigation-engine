@@ -16,6 +16,7 @@
 import type { Page } from "playwright";
 import type { RunState } from "./state.js";
 import { MAIN_SURFACE_ID } from "./state.js";
+import { markEngineClose } from "../diagnostics/pageLifecycle.js";
 
 export interface ReturnToParentResult {
   restored: boolean;
@@ -40,6 +41,7 @@ export async function returnToParentSurface(params: { state: RunState; mainPage:
   const childPage = state.activePage;
 
   if (childPage && !childPage.isClosed()) {
+    markEngineClose(childPage, "surface_return");
     await childPage.close().catch(() => {
       // Closing is best-effort tidiness, never a condition the return itself depends on --
       // a page that refuses to close (already navigating away, torn down by the site
