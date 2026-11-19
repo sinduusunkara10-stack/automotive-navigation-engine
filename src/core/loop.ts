@@ -995,6 +995,8 @@ export async function runStep(params: {
                 settleCeilingMs,
               });
         finishDispatchTrace({ state, trace: branchHopTrace, stepPage: page, actionResult: returnActionResult });
+        // A surface return above closes the adopted Page `page` still points at.
+        const pageAfterReturnHop = state.activePage ?? params.page;
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         // goBack timeout/classification fix (production incident
         // run_b3743f06-1667-443e-b9fa-e804aa5caecf, see actions/goBack.ts): a go_back whose
@@ -1010,7 +1012,7 @@ export async function runStep(params: {
         // ends the run on the spot.
         const goBackCommittedUnverified = returnActionResult.goBackOutcome === "navigation_committed_restoration_unverified";
         if (goBackCommittedUnverified) {
-          await waitForAdaptiveSettle(page, { ceilingMs: settleCeilingMs });
+          await waitForAdaptiveSettle(pageAfterReturnHop, { ceilingMs: settleCeilingMs });
           // Task 1 fix (production incident run_fae0519a-ef71-46b9-a053-4ca82bb30000): this
           // go_back committed (per actions/goBack.ts, the common case for every successful
           // history navigation -- the executor itself never assigns "restoration_verified")
@@ -1037,7 +1039,7 @@ export async function runStep(params: {
           // reported failure.
           const checkpointForBranch = state.getCheckpointForBranch(branch.branchId);
           const lastChanceReObservation = await reobserveForBranchReturn({
-            page,
+            page: pageAfterReturnHop,
             withActiveSurface: (o) => withActiveSurface(o, state),
             decisionPointFingerprint: branch.decisionPointId,
             checkpoint: checkpointForBranch,
@@ -1048,7 +1050,7 @@ export async function runStep(params: {
           let reconstruction: Awaited<ReturnType<typeof attemptCheckpointReconstruction>> | undefined;
           if (!finalRestored) {
             reconstruction = await attemptCheckpointReconstruction({
-              page,
+              page: pageAfterReturnHop,
               withActiveSurface: (o) => withActiveSurface(o, state),
               checkpoint: checkpointForBranch,
               decisionPointFingerprint: branch.decisionPointId,
@@ -1623,8 +1625,18 @@ export async function runStep(params: {
   const anchorAlternativeBudgetAvailable = candidateRecoveryAnchor
     ? state.getAlternativeExplorationAttempts(candidateRecoveryAnchor.decisionPointFingerprint) < alternativeCandidateBudget
     : false;
+  // An anchor recorded on the adopted tab/popup the run is on right now (its milestone was
+  // satisfied here) is "already here" even if the fingerprint drifted (e.g. after scrolls): a
+  // go_back from this surface would close it and land on the opener, never on the anchor.
+  const anchorOnCurrentAdoptedSurface = Boolean(
+    candidateRecoveryAnchor &&
+      state.activeSurface !== MAIN_SURFACE_ID &&
+      state.activePage !== undefined &&
+      candidateRecoveryAnchor.surfaceId === state.activeSurface,
+  );
   const anchorAlreadyAtTarget = Boolean(
-    candidateRecoveryAnchor && currentFingerprintForRecovery === candidateRecoveryAnchor.decisionPointFingerprint,
+    candidateRecoveryAnchor &&
+      (currentFingerprintForRecovery === candidateRecoveryAnchor.decisionPointFingerprint || anchorOnCurrentAdoptedSurface),
   );
   // Per-anchor hop ceiling (independent of, and tighter than, MAX_ANCHOR_RESTORE_HOPS_TOTAL's
   // whole-run budget): if a specific anchor cannot be reached within a small, fixed number of
@@ -2560,8 +2572,13 @@ export async function runStep(params: {
           ...(actionResult.verifiedSuccessType ? { verifiedSuccessType: actionResult.verifiedSuccessType } : {}),
         }
       : undefined;
+  // `page` is fixed at the top of this step, but the dispatch above can change which Page is
+  // active: a go_back off an adopted surface closes that surface's Page (returnToParentSurface)
+  // and a click can adopt a new tab/popup. Post-action evidence (milestones, recovery anchors)
+  // must come from the page the journey is actually on now, never a closed or left-behind one.
+  const postActionPage = state.activePage ?? params.page;
   const panelContextPostAction = await buildPanelMatchContext({
-    page,
+    page: postActionPage,
     state,
     task,
     observation,
@@ -2583,7 +2600,7 @@ export async function runStep(params: {
   const newlySatisfied: string[] = [];
   for (let chainIteration = 0; chainIteration < MAX_CHAINED_MILESTONE_EVALUATIONS; chainIteration += 1) {
     const chainResult = await evaluateSuccessCriteria(
-      page,
+      postActionPage,
       task.successCriteria,
       task.objective,
       semanticVerifier,
@@ -2639,7 +2656,7 @@ export async function runStep(params: {
   // least one criterion actually became satisfied this step -- never on the common,
   // no-new-milestone step.
   if (newlySatisfied.length > 0) {
-    const postActionObservationForAnchors = await buildObservation(page);
+    const postActionObservationForAnchors = await buildObservation(postActionPage);
     for (const criterionId of newlySatisfied) {
       const evidenceRecord = [...state.milestoneEvidence].reverse().find((r) => r.criterionId === criterionId);
       state.recoveryAnchors.push(
@@ -2648,6 +2665,7 @@ export async function runStep(params: {
           criteria: task.successCriteria,
           stepIndex,
           observation: postActionObservationForAnchors,
+          surfaceId: state.activeSurface,
           evidenceTier: evidenceRecord?.evidenceTier ?? "inferred",
           sequence: state.nextRecoveryAnchorSequence(),
         }),

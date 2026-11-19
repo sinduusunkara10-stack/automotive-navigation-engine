@@ -36,6 +36,12 @@ export interface RecoveryAnchor {
   evidenceTier: "observed" | "inferred" | "assumed";
   /** Monotonically increasing per-run sequence number, for stable ordering when several anchors share a stepIndex. */
   sequence: number;
+  /**
+   * RunState.activeSurface when this milestone was satisfied. An anchor recorded on an
+   * adopted tab/popup cannot be reached by go_back from that same surface (go_back there
+   * closes it), so recovery treats it as "already here" instead of hopping away.
+   */
+  surfaceId?: string;
 }
 
 /**

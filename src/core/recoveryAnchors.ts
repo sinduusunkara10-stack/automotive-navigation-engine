@@ -55,8 +55,9 @@ export function buildRecoveryAnchor(params: {
   observation: Observation;
   evidenceTier: "observed" | "inferred" | "assumed";
   sequence: number;
+  surfaceId?: string;
 }): RecoveryAnchor {
-  const { criterionId, criteria, stepIndex, observation, evidenceTier, sequence } = params;
+  const { criterionId, criteria, stepIndex, observation, evidenceTier, sequence, surfaceId } = params;
   return {
     criterionId,
     milestoneOrder: computeCriterionOrder(criteria, criterionId),
@@ -67,6 +68,7 @@ export function buildRecoveryAnchor(params: {
     candidateIdentitiesAtAnchor: computeCandidateIdentitiesAtAnchor(observation),
     evidenceTier,
     sequence,
+    ...(surfaceId !== undefined ? { surfaceId } : {}),
   };
 }
 
