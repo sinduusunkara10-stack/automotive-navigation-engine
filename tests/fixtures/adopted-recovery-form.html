@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Quote request form</title></head>
+<body style="min-height: 4000px">
+  <h1>Quote request form</h1>
+  <h2>Campaign offer quote request</h2>
+  <p><a href="adopted-recovery-summary.html">Continue to summary</a></p>
+  <script>
+    // Scrolling reveals one extra control, so the page's decision-point fingerprint after a
+    // scroll differs from the one recorded when the form was first reached.
+    window.addEventListener("scroll", () => {
+      if (document.getElementById("back-to-top")) return;
+      const button = document.createElement("button");
+      button.id = "back-to-top";
+      button.type = "button";
+      button.textContent = "Back to top";
+      button.style.position = "fixed";
+      button.style.bottom = "10px";
+      button.style.right = "10px";
+      document.body.appendChild(button);
+    });
+  </script>
+</body>
+</html>
