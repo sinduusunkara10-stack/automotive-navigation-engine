@@ -4644,3 +4644,29 @@ is the existing zero-hop retry. If that retry still blocks, the next step falls 
 the run is on such a tab is archived in place, with no branch-closure `go_back`, and this same
 recovery decides the next action. An adopted tab that satisfied no new milestone has no anchor
 of its own, so recovery still goes back to the opener to try another CTA.
+
+### Adopted surfaces: tag step attribution (no contract change)
+
+The GA4 and dataLayer listeners that `popupCapture.ts` attaches to a popup before the adoption
+decision stamp each event with a step read through `PopupContextCaptureHandles.stepIndexSource`.
+It starts as the opening click's step. On adoption, `retagPopupContextCaptureAsMain` swaps it for
+the run's live step counter (`SurfaceAdoptionRequest.getRunStepIndex`, i.e.
+`RunState.stepCount`, the same getter the start page's listeners use). Events fired on an
+adopted tab during later steps therefore carry those steps. A popup that is captured and
+closed without adoption keeps the opening step. The raw capture entries are otherwise
+unchanged.
+
+`buildAnalyticsReportingRows` adds two kinds of action marker alongside the start, `page_visits`
+and `navigate` markers. Each is a `PAGE_VISIT` row whose `actionId` is
+`<taskId>:action:<step>`, and the marker's evidence rows carry the same `actionId`:
+
+- an adopted tab, at the opening click's step, using the click's `resultingUrl` and
+  `resultingTitle`;
+- each `fill_form` step, using that step's `currentUrl`.
+
+Evidence is still attributed by URL first. An action marker never takes evidence from a step
+before its own, because it shares its URL with the page it acted on. Evidence that matches no
+marker URL (for example a confirmation page after a `fill_form` submit) falls back, as before,
+to the latest marker at or before its step. A journey with no adopted tab and no `fill_form`
+step gets the same rows as before. A click's `resultingTitle` is read from the active page, so
+for a click that adopts a tab it is that tab's title.

@@ -830,6 +830,8 @@ interface PageMarker {
   url: string;
   title?: string;
   timestamp: string;
+  /** Set for a marker that belongs to an engine action rather than to a plain page visit: an adopted tab (the click that opened it) or a fill_form step. */
+  actionId?: string;
 }
 
 function urlMatchesMarker(candidate: string | undefined, markerUrl: string): boolean {
@@ -860,6 +862,11 @@ function pickOwningMarkerIndex(markers: PageMarker[], eventStepIndex: number, ca
   for (let i = 0; i < markers.length; i++) {
     const marker = markers[i]!;
     if (!candidateUrls.some((url) => urlMatchesMarker(url, marker.url))) {
+      continue;
+    }
+    // An action marker (adopted tab, fill_form) shares its URL with the page it acted on, so
+    // evidence from earlier steps on that page must not be pulled forward into the action.
+    if (marker.actionId && marker.stepIndex > eventStepIndex) {
       continue;
     }
     const distance = Math.abs(marker.stepIndex - eventStepIndex);
@@ -969,7 +976,7 @@ function buildRowsForStartWindow(params: {
  * ANALYTICS_EVENT row.
  */
 function buildRowsForPageVisit(
-  visit: PageVisitCapture,
+  visit: PageMarker,
   evidence: { ga4Events: Ga4NetworkEventCapture[]; dataLayerPushes: DataLayerCapture[] },
   ctx: { runId: string; taskId: string; schemaVersion: string; journeyType?: string },
 ): AnalyticsReportingRow[] {
@@ -982,6 +989,7 @@ function buildRowsForPageVisit(
     recordType: "PAGE_VISIT",
     stepIndex: visit.stepIndex,
     timestamp: visit.timestamp,
+    ...(visit.actionId ? { actionId: visit.actionId } : {}),
     sourcePageUrl: visit.url,
     ...(visit.title ? { destinationPageTitle: visit.title } : {}),
     eventRole: "PAGE_VISIT",
@@ -995,7 +1003,7 @@ function buildRowsForPageVisit(
     taskId: ctx.taskId,
     schemaVersion: ctx.schemaVersion,
     journeyType: ctx.journeyType,
-    actionId: `${ctx.taskId}:page:${visit.stepIndex}`,
+    actionId: visit.actionId ?? `${ctx.taskId}:page:${visit.stepIndex}`,
     ga4Events: evidence.ga4Events,
     dataLayerPushes: evidence.dataLayerPushes,
     targets: [visit.url],
@@ -1109,11 +1117,45 @@ export function buildAnalyticsReportingRows(params: {
     )
     .map((step) => ({ stepIndex: step.stepIndex, url: step.actionResult.resultingUrl!, timestamp: step.timestamp }));
 
+  // A tab adopted by a click, and a fill_form step, are pages/actions the journey really ran on
+  // but neither is a page_visits entry nor a navigate step. Without a marker of their own, their
+  // evidence matches no marker URL and falls back to the start window.
+  const adoptedSurfaceMarkers: PageMarker[] = steps
+    .filter(
+      (step) =>
+        step.selectedAction.type === "click" &&
+        step.actionResult.surfaceAdopted === true &&
+        Boolean(step.actionResult.resultingUrl) &&
+        !explicitLaterUrls.has(step.actionResult.resultingUrl!),
+    )
+    .map((step) => {
+      const ctaClick = ctaClicks.find((click) => click.stepIndex === step.stepIndex);
+      return {
+        stepIndex: step.stepIndex,
+        url: step.actionResult.resultingUrl!,
+        ...(ctaClick?.resultingTitle ? { title: ctaClick.resultingTitle } : {}),
+        timestamp: step.timestamp,
+        actionId: `${taskId}:action:${step.stepIndex}`,
+      };
+    });
+  const fillFormMarkers: PageMarker[] = steps
+    .filter((step) => step.selectedAction.type === "fill_form")
+    .map((step) => ({
+      stepIndex: step.stepIndex,
+      url: step.currentUrl,
+      timestamp: step.timestamp,
+      actionId: `${taskId}:action:${step.stepIndex}`,
+    }));
+
   const markers: PageMarker[] = [
     { stepIndex: startStepIndex, url: resolvedStartPageUrl, title: resolvedStartPageTitle, timestamp: startTimestamp },
-    ...[...explicitLaterVisits, ...navigateDerivedVisits]
-      .map((visit) => ({ stepIndex: visit.stepIndex, url: visit.url, title: visit.title, timestamp: visit.timestamp }))
-      .sort((a, b) => a.stepIndex - b.stepIndex),
+    ...[
+      ...[...explicitLaterVisits, ...navigateDerivedVisits].map(
+        (visit): PageMarker => ({ stepIndex: visit.stepIndex, url: visit.url, title: visit.title, timestamp: visit.timestamp }),
+      ),
+      ...adoptedSurfaceMarkers,
+      ...fillFormMarkers,
+    ].sort((a, b) => a.stepIndex - b.stepIndex),
   ];
 
   // A click's own window is fully resolved elsewhere (actionAnalytics.ga4RequestsObservedDuringActionWindow/
