@@ -83,6 +83,8 @@ export interface SurfaceAdoptionRequest {
    * a personal-data or session field.
    */
   triggeringActionFingerprint?: string;
+  /** The run's live step counter (RunState.stepCount, the same getter engine.ts gives the start page's listeners), handed to retagPopupContextCaptureAsMain on adoption. Absent keeps the opening click's stepIndex, the prior behaviour. */
+  getRunStepIndex?: () => number;
   /** Read-only lookup into RunState's per-run fingerprint cache -- see RunState.getPopupFingerprintOutcome. Absent means "no fingerprinting", reproducing prior behaviour exactly (every candidate always fully scored). */
   popupFingerprintLookup?: (fingerprint: string) => { tier: RelevanceTier; score: number; attempts: number } | undefined;
   /** Write-only: records this assessment's outcome into RunState's fingerprint cache -- see RunState.recordPopupFingerprintOutcome. */
@@ -263,6 +265,14 @@ export interface PopupContextCaptureHandles {
   /** Mutable -- retagPopupContextCaptureAsMain flips these in place so an already-attached listener's *future* events are tagged as the run's main surface, with no second attach. */
   ga4Context?: Ga4NetworkCaptureContext;
   pushContext?: DataLayerPushCaptureContext;
+  /**
+   * Mutable for the same reason as ga4Context/pushContext: these listeners start out stamping
+   * every event with the opening click's stepIndex, and retagPopupContextCaptureAsMain swaps in
+   * the run's live step counter once the popup becomes the active surface -- otherwise every
+   * later event on an adopted tab (form fills, submits, confirmations) stays stamped with the
+   * step that opened it.
+   */
+  stepIndexSource: { get: () => number };
   /** Mirrors attachDataLayerPushCapture's own `attached` -- true (never requested/never known to have failed) when data_layer_evidence wasn't requested at all. */
   dataLayerPushAttached: boolean;
 }
@@ -290,23 +300,26 @@ export async function attachPopupContextCapture(
 ): Promise<PopupContextCaptureHandles> {
   const wantsGa4 = captureModules.includes("ga4_network_events");
   const wantsDataLayer = captureModules.includes("data_layer_evidence");
+  const stepIndexSource = { get: () => stepIndex };
   if (!wantsGa4 && !wantsDataLayer) {
-    return { dataLayerPushAttached: true };
+    return { dataLayerPushAttached: true, stepIndexSource };
   }
   const contextId = popupContextId(stepIndex);
+  const getStepIndex = () => stepIndexSource.get();
   // GA4 attach first (synchronous -- see ga4NetworkEvents.ts), then dataLayer attach
   // (awaited, since it needs a round trip to register the exposeBinding/addInitScript) --
   // same ordering adoptPopupForCapture's own pre-existing attach used, preserved so this is
   // a pure extraction, not a timing change for the path that already worked.
   const ga4Context: Ga4NetworkCaptureContext | undefined = wantsGa4 ? { contextId, forcedSource: "popup_context" } : undefined;
-  const detachGa4 = ga4Context ? attachGa4NetworkCapture(popup, captures, () => stepIndex, ga4Context) : undefined;
+  const detachGa4 = ga4Context ? attachGa4NetworkCapture(popup, captures, getStepIndex, ga4Context) : undefined;
   const pushContext: DataLayerPushCaptureContext | undefined = wantsDataLayer ? { contextId, forcedSource: "popup_context" } : undefined;
-  const pushResult = pushContext ? await attachDataLayerPushCapture(popup, captures, () => stepIndex, pushContext) : undefined;
+  const pushResult = pushContext ? await attachDataLayerPushCapture(popup, captures, getStepIndex, pushContext) : undefined;
   return {
     detachGa4,
     detachPush: pushResult?.detach,
     ga4Context,
     pushContext,
+    stepIndexSource,
     dataLayerPushAttached: pushResult?.attached ?? true,
   };
 }
@@ -319,7 +332,10 @@ export async function attachPopupContextCapture(
  * context object at event time, never a value captured at attach time, so this takes effect
  * for every future event with zero risk of a duplicate attach.
  */
-export function retagPopupContextCaptureAsMain(handles: PopupContextCaptureHandles): void {
+export function retagPopupContextCaptureAsMain(handles: PopupContextCaptureHandles, getRunStepIndex?: () => number): void {
+  if (getRunStepIndex) {
+    handles.stepIndexSource.get = getRunStepIndex;
+  }
   if (handles.ga4Context) {
     handles.ga4Context.forcedSource = undefined;
     handles.ga4Context.contextId = MAIN_CONTEXT_ID;
@@ -639,7 +655,7 @@ export async function adoptOrCapturePopup(params: {
     // fallback). This is what makes destination-load evidence (captured above, before this
     // point, under the popup_context tag) and every later in-tab click's evidence share one
     // continuous, gap-free listener -- never detached and re-attached at all.
-    retagPopupContextCaptureAsMain(earlyCapture);
+    retagPopupContextCaptureAsMain(earlyCapture, surfaceAdoption.getRunStepIndex);
     // Destination-load evidence recovery: unlike window.dataLayer (persistent in-page state
     // a later per-step snapshot naturally re-reads), a GA4 pixel fired before
     // attachPopupContextCapture's listener could attach -- plausible for an inline

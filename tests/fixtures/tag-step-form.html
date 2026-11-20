@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><title>Quote request form</title>
+  <script>window.dataLayer = window.dataLayer || [];</script>
+</head>
+<body style="min-height: 4000px">
+  <h1>Quote request form</h1>
+  <p><a href="tag-step-summary.html">Continue to summary</a></p>
+  <script>
+    let pushed = false;
+    window.addEventListener("scroll", () => {
+      if (pushed) return;
+      pushed = true;
+      window.dataLayer.push({ event: "form_scrolled" });
+    });
+  </script>
+</body>
+</html>

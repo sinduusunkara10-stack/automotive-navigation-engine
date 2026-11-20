@@ -1968,6 +1968,7 @@ export async function runStep(params: {
         allowedDomains: effectiveAllowedDomains,
         adoptedSurfaceCount: state.adoptedSurfaceCount,
         maxAdoptedSurfacesPerRun: task.safety.maxAdoptedSurfacesPerRun,
+        getRunStepIndex: () => state.stepCount,
         ...(relevanceObjectiveTexts.length > 0 ? { relevanceObjectiveTexts } : {}),
         ...(relevanceAmbiguityResolver ? { relevanceAmbiguityResolver } : {}),
         ...(task.safety.consentInteractionPolicy ? { consentInteractionPolicy: task.safety.consentInteractionPolicy } : {}),
@@ -2326,7 +2327,8 @@ export async function runStep(params: {
   let captureWindowEndedAt: string | undefined;
   if (wantsCtaClickCapture && isClick) {
     if (actionResult.success) {
-      resultingTitle = await page.title().catch(() => undefined);
+      // `page` is still the opener when this click just adopted a new tab.
+      resultingTitle = await (state.activePage ?? params.page).title().catch(() => undefined);
     }
     if (wantsGa4Window || wantsDataLayerPushWindow) {
       await page.waitForTimeout(GA4_ACTION_WINDOW_MS).catch(() => undefined);
