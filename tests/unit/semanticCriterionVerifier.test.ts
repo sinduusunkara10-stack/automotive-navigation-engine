@@ -277,3 +277,44 @@ test("item 4: panelEvidence, when present, is included in the prompt sent to the
   const sentPrompt = JSON.parse(client.requests[0]!.userPrompt) as { panelEvidence?: { identity: string } };
   assert.equal(sentPrompt.panelEvidence?.identity, "dialog|Offer details");
 });
+
+// ---------------------------------------------------------------------------------------
+// Cross-language panel verification fix (adopted-context panel-evidence corrective pass):
+// a causally-linked, usable panel's own relevanceTier is only a same-language lexical-
+// overlap score -- it must never be instructed as a hard veto, since that defeats the whole
+// point of asking a meaning-based verifier about a panel whose content is in a different
+// language than the criterion. The system prompt must still keep every fail-closed
+// requirement (causallyLinked, documentUsable, genuine correspondence) that stops a bare
+// click/tag from passing a panel-state criterion on its own.
+// ---------------------------------------------------------------------------------------
+
+test("cross-language panel fix: the system prompt never instructs a hard veto on reject/ambiguous relevanceTier", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "Panel confirmed." })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput());
+
+  const systemPrompt = client.requests[0]!.system;
+  assert.doesNotMatch(
+    systemPrompt,
+    /require the panel's own "relevanceTier" to not be "reject"/,
+    "the prompt must no longer hard-veto a panel criterion purely on a same-language lexical relevanceTier score",
+  );
+  assert.match(systemPrompt, /different language/i, "the prompt must explain relevanceTier is not reliable across languages");
+});
+
+test("cross-language panel fix: the system prompt still requires causallyLinked, documentUsable, and genuine correspondence to fail closed", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "Panel confirmed." })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput());
+
+  const systemPrompt = client.requests[0]!.system;
+  assert.match(systemPrompt, /"causallyLinked" is false/);
+  assert.match(systemPrompt, /"documentUsable" is false/);
+  assert.match(
+    systemPrompt,
+    /verified click or a tracking tag firing is never by itself/,
+    "a click/tag alone must still never be instructed as sufficient to pass a panel-state criterion",
+  );
+});

@@ -88,7 +88,7 @@ export function buildEngineFailureContext(params: {
   reasoning: ReasoningProvider;
 }): EngineFailureContext {
   const { task, state, mainPage, steps, reasoning } = params;
-  const activePage = state.activePage ?? mainPage;
+  const activePage = state.effectivePage ?? mainPage;
   const currentUrl = attempt(() => activePage.url(), undefined);
   const mainPageUrl = attempt(() => mainPage.url(), undefined);
   const missingRequiredCriteriaIds = attempt(

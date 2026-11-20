@@ -15,18 +15,28 @@
  */
 
 /**
- * Whether this step should enter a new in_document surface. Only ever considered while still
- * on "main" -- a second drawer/panel opening from within an already-tracked in_document
- * surface (nested drawers) is out of this PR's scope (see docs/architecture.md "Known
- * limitations"); it simply leaves the existing in_document surface active rather than
- * incorrectly nesting or replacing it.
+ * Whether this step should enter a new in_document surface. Considered while on "main" OR on
+ * an already-adopted "adopted_context" surface (adopted-context panel-evidence fix) -- a
+ * drawer/panel/modal opened inside a tab the engine has already adopted (e.g. a configurator
+ * opened as its own browsing context) is exactly as real an in-page surface as one opened on
+ * "main", and the panel-evidence subsystem this nesting enables (causal linkage, scoped
+ * headings/interactiveText, relevance context) must not be unavailable just because the
+ * parent happens not to be "main". Never considered while already on an in_document surface --
+ * a second drawer/panel opening from within an already-tracked in_document surface (nested
+ * drawers, two levels deep) stays out of scope (see docs/architecture.md "Known limitations");
+ * it simply leaves the existing in_document surface active rather than incorrectly nesting or
+ * replacing it. This is still only one level of in-document nesting, exactly as before -- the
+ * parent surface it nests under is just no longer restricted to "main".
  */
 export function shouldEnterInDocumentSurface(params: {
-  onMain: boolean;
+  currentSurfaceKind: "main" | "adopted_context" | "in_document";
   activeDialogPresent: boolean;
   lastActionSurfaceChangeType: string | undefined;
 }): boolean {
-  return params.onMain && (params.activeDialogPresent || Boolean(params.lastActionSurfaceChangeType));
+  return (
+    params.currentSurfaceKind !== "in_document" &&
+    (params.activeDialogPresent || Boolean(params.lastActionSurfaceChangeType))
+  );
 }
 
 /**

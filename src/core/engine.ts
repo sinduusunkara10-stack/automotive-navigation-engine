@@ -670,7 +670,7 @@ export async function runTask(params: {
     }
     if (postTerminalProbeConfig.enabled && terminal === "success") {
       response.diagnostics.postTerminalAnalyticsProbe = await runPostTerminalAnalyticsProbe({
-        activePage: state.activePage ?? page,
+        activePage: state.effectivePage ?? page,
         terminalDecisionAt: decidedAt,
         durationMs: postTerminalProbeConfig.durationMs,
       });

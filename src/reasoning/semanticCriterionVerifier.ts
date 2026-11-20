@@ -163,14 +163,23 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "share identical vocabulary with the criterion description before confirming a match; " +
     "causal linkage plus the panel genuinely being present, stable, and not contradicted by " +
     "negative evidence is sufficient on its own for a milestone that only asks whether that " +
-    "surface appeared. Still require the panel's own \"relevanceTier\" to not be \"reject\", and " +
-    "still fail closed (do not confirm) when \"causallyLinked\" is false, \"documentUsable\" is " +
-    "false, or \"relevanceTier\" is \"ambiguous\" with nothing else corroborating a genuine " +
-    "match. This relevanceTier requirement governs only a criterion that is itself asking " +
-    "whether that panel/surface appeared -- it never disqualifies a different criterion (e.g. " +
-    "that a specific control was clicked) whose own completion \"lastActionEvidence\" alone " +
-    "already genuinely supports, regardless of what relevanceTier says about an unrelated " +
-    "panel that happens to be open. When \"verifiedFormSubmission\" is present, the engine itself (never " +
+    "surface appeared. \"relevanceTier\"/\"relevanceScore\" are only a literal-word-overlap " +
+    "score computed in whatever language the criterion happens to be written in -- they are " +
+    "NOT reliable evidence of relevance when the panel's own content is written in a " +
+    "different language than the criterion/objective (the exact case this panel evidence " +
+    "exists to let you judge properly), so a \"reject\" or \"ambiguous\" relevanceTier must " +
+    "never by itself block confirmation. Instead, judge the panel's own headings/" +
+    "interactiveElementText by genuine real-world MEANING, exactly as you would whole-page " +
+    "evidence, including across languages. Still fail closed (do not confirm) when " +
+    "\"causallyLinked\" is false, \"documentUsable\" is false, or when the panel's own " +
+    "evidence, read for its real meaning, does not genuinely correspond to the specific state " +
+    "the criterion describes -- a verified click or a tracking tag firing is never by itself " +
+    "sufficient evidence that the resulting panel/surface actually shows what the criterion " +
+    "describes; you must find that in the panel's own evidence. This governs only a criterion " +
+    "that is itself asking whether that panel/surface appeared -- it never disqualifies a " +
+    "different criterion (e.g. that a specific control was clicked) whose own completion " +
+    "\"lastActionEvidence\" alone already genuinely supports, regardless of what the panel's " +
+    "own content says. When \"verifiedFormSubmission\" is present, the engine itself (never " +
     "you) observed earlier in this run that one form had every required field filled " +
     "(requiredFieldsFilled equals requiredFieldsDetected), passed its pre-submit readiness checks, was " +
     "submitted, and was followed by completion evidence on the page itself (confirmationSignals: a URL " +

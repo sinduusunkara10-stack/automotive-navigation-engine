@@ -94,7 +94,11 @@ export interface ClosedSurfaceRecovery {
  */
 export function detectClosedAdoptedSurfaces(state: RunState): ClosedSurfaceRecovery[] {
   const recovered: ClosedSurfaceRecovery[] = [];
-  while (state.activeSurface !== MAIN_SURFACE_ID && state.activePage?.isClosed()) {
+  // effectivePage (not activePage): a Page-less in_document surface shares whichever Page is
+  // beneath it, so its own underlying adopted tab closing must still be detected and unwound
+  // even while the in_document surface itself sits on top (adopted-context panel-evidence
+  // fix) -- activePage's direct-lookup-only semantics would otherwise mask that closure.
+  while (state.activeSurface !== MAIN_SURFACE_ID && state.effectivePage?.isClosed()) {
     const poppedSurfaceId = state.activeSurface;
     state.popSurface();
     recovered.push({ poppedSurfaceId, parentSurfaceId: state.activeSurface });

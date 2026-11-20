@@ -140,8 +140,21 @@ function readPendingAlternativeExploration(state: RunState): RunState["pendingAl
   return state.pendingAlternativeExploration;
 }
 
-/** Drawer/modal formalization (Phase 3 PR 5): the id prefix core/state.ts's nextInDocumentSurfaceId always uses -- see withActiveSurface below. */
+/** Drawer/modal formalization (Phase 3 PR 5): the id prefix core/state.ts's nextInDocumentSurfaceId always uses -- see withActiveSurface/surfaceKindOf below. */
 const IN_DOCUMENT_SURFACE_ID_PREFIX = "in_document-";
+
+/**
+ * The single place a surface id's kind is derived from its own prefix -- shared by
+ * withActiveSurface (the wire-facing Observation.activeSurface) and the in_document entry
+ * check below (adopted-context panel-evidence fix), so both always agree on what "currently
+ * on an in_document surface" or "currently on adopted_context" means.
+ */
+function surfaceKindOf(surfaceId: string): "main" | "adopted_context" | "in_document" {
+  if (surfaceId === MAIN_SURFACE_ID) {
+    return "main";
+  }
+  return surfaceId.startsWith(IN_DOCUMENT_SURFACE_ID_PREFIX) ? "in_document" : "adopted_context";
+}
 
 /**
  * Active surface tracking scaffolding (Phase 3 PR 2, see CLAUDE.md and
@@ -161,7 +174,7 @@ function withActiveSurface(observation: Observation, state: RunState): Observati
   return {
     ...observation,
     activeSurface: {
-      kind: surfaceId.startsWith(IN_DOCUMENT_SURFACE_ID_PREFIX) ? "in_document" : "adopted_context",
+      kind: surfaceKindOf(surfaceId),
       identity: surfaceId,
     },
   };
@@ -298,13 +311,14 @@ export async function runStep(params: {
   // Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
   // adoption"): every read/write of `page` for the rest of this step -- buildObservation,
   // dispatchAction, evaluateSuccessCriteria, readElementState, all of it -- now resolves
-  // against whichever Page RunState.activePage names (an adopted popup/new-tab), falling
-  // back to the run's own originally-tracked params.page whenever activeSurface is "main".
-  // This is the *entire* mechanism that makes "the reasoning loop now observes/acts against
-  // the adopted surface" true: every one of this function's ~20 existing page-using call
-  // sites needed zero further changes to pick that up, since they were already written
-  // against a single local `page` binding.
-  const page = state.activePage ?? params.page;
+  // against whichever Page RunState.effectivePage names (an adopted popup/new-tab, or the
+  // adopted page beneath a Page-less in_document surface -- adopted-context panel-evidence
+  // fix), falling back to the run's own originally-tracked params.page whenever nothing on
+  // the stack has a Page of its own. This is the *entire* mechanism that makes "the
+  // reasoning loop now observes/acts against the adopted surface" true: every one of this
+  // function's ~20 existing page-using call sites needed zero further changes to pick that
+  // up, since they were already written against a single local `page` binding.
+  const page = state.effectivePage ?? params.page;
   const stepIndex = state.stepCount;
   // Surface adoption: the effective allowedDomains for whichever surface is currently
   // active -- task.allowedDomains, plus a per-surface extended-trust hostname when one was
@@ -340,16 +354,21 @@ export async function runStep(params: {
   // that return gets one real step on "main" before the same still-visible drawer/modal
   // evidence would otherwise immediately re-trigger entry.
   const suppressEntryThisStep = state.consumeSuppressInDocumentEntry();
+  // Adopted-context panel-evidence fix: the parent surface a new in_document surface would
+  // nest under -- "main" or an already-adopted "adopted_context" -- captured before any push
+  // below changes state.activeSurface.
+  const preEntryActiveSurfaceId = state.activeSurface;
   if (
     !suppressEntryThisStep &&
     shouldEnterInDocumentSurface({
-      onMain: state.activeSurface === MAIN_SURFACE_ID,
+      currentSurfaceKind: surfaceKindOf(preEntryActiveSurfaceId),
       activeDialogPresent: Boolean(rawObservation.activeDialog),
       lastActionSurfaceChangeType: lastRecordedAction?.surfaceChangeType,
     })
   ) {
     const newSurfaceId = state.nextInDocumentSurfaceId();
     state.pushSurface(newSurfaceId);
+    state.recordInDocumentParentSurfaceId(newSurfaceId, preEntryActiveSurfaceId);
     if (rawObservation.activeDialog) {
       state.markInDocumentEnteredViaActiveDialog(newSurfaceId);
     }
@@ -996,7 +1015,7 @@ export async function runStep(params: {
               });
         finishDispatchTrace({ state, trace: branchHopTrace, stepPage: page, actionResult: returnActionResult });
         // A surface return above closes the adopted Page `page` still points at.
-        const pageAfterReturnHop = state.activePage ?? params.page;
+        const pageAfterReturnHop = state.effectivePage ?? params.page;
         state.recordAction(forcedAction, { url: observation.url, title: observation.title });
         // goBack timeout/classification fix (production incident
         // run_b3743f06-1667-443e-b9fa-e804aa5caecf, see actions/goBack.ts): a go_back whose
@@ -2328,7 +2347,7 @@ export async function runStep(params: {
   if (wantsCtaClickCapture && isClick) {
     if (actionResult.success) {
       // `page` is still the opener when this click just adopted a new tab.
-      resultingTitle = await (state.activePage ?? params.page).title().catch(() => undefined);
+      resultingTitle = await (state.effectivePage ?? params.page).title().catch(() => undefined);
     }
     if (wantsGa4Window || wantsDataLayerPushWindow) {
       await page.waitForTimeout(GA4_ACTION_WINDOW_MS).catch(() => undefined);
@@ -2592,7 +2611,7 @@ export async function runStep(params: {
   // active: a go_back off an adopted surface closes that surface's Page (returnToParentSurface)
   // and a click can adopt a new tab/popup. Post-action evidence (milestones, recovery anchors)
   // must come from the page the journey is actually on now, never a closed or left-behind one.
-  const postActionPage = state.activePage ?? params.page;
+  const postActionPage = state.effectivePage ?? params.page;
   const panelContextPostAction = await buildPanelMatchContext({
     page: postActionPage,
     state,
