@@ -33,6 +33,8 @@ export interface PostSubmitObservationWire {
   hardCapMs: number;
   extensionCount: number;
   extensionReasons: ("business_request_in_flight" | "submit_control_disabled" | "loading_indicator_active" | "dom_mutations_continuing" | "form_replacement_in_progress")[][];
+  /** Wall-clock time (ISO) just before the Submit click. */
+  submitClickedAt?: string;
   totalObservationMs: number;
   businessRequestDetected: boolean;
   businessRequestCount: number;
@@ -1119,6 +1121,9 @@ export interface ActionResult {
    * Present whenever a submit control was found and clicked, or the pre-submit readiness gate ran.
    */
   formPostSubmitDiagnostics?: {
+    /** Wall-clock start/end (ISO) of the post-submit analytics capture after a successful submit (contextId fill_form:N+1). Null when submit did not succeed. */
+    postSubmitAnalyticsCaptureStartedAt?: string | null;
+    postSubmitAnalyticsCaptureEndedAt?: string | null;
     /** True whenever the submit did not result in a URL change or an on-screen confirmation, after any retries -- or whenever submit was never attempted at all because the readiness gate failed. */
     submitCanceled: boolean;
     /** Field ids still failing native constraint validation or carrying aria-invalid="true" after the last submit attempt. */
@@ -2132,6 +2137,43 @@ export interface Diagnostics {
    * run -- absent entirely otherwise, the default.
    */
   journeyMemory?: JourneyMemoryDiagnostics;
+  /** Wall-clock run-end timing. Present on a run that reached the end of the navigation loop. */
+  runTiming?: RunTimingDiagnostics;
+  /** Present only when POST_TERMINAL_ANALYTICS_PROBE_ENABLED was on and the run ended in success. */
+  postTerminalAnalyticsProbe?: PostTerminalAnalyticsProbeDiagnostics;
+}
+
+export interface RunTimingDiagnostics {
+  /** When the navigation loop reached its terminal decision. */
+  terminalDecisionAt: string;
+  /** When the run's own GA4/dataLayer/error capture listeners were detached; nothing is added to captures after this. */
+  listenersDetachedAt: string;
+  /** When runTask finished, after the post-terminal analytics probe if it ran. */
+  runEndedAt: string;
+}
+
+export interface PostTerminalAnalyticsProbeHit {
+  timestamp: string;
+  msAfterTerminalDecision: number;
+  /** GA4 "en" values from the query string and every batched body line; empty when none was readable. */
+  eventNames: string[];
+  requestHost: string;
+  requestPath: string;
+  method: string;
+  /** Index of the request's page in the browser context's pages() at the time of the hit. */
+  pageIndex?: number;
+  isActivePage?: boolean;
+}
+
+export interface PostTerminalAnalyticsProbeDiagnostics {
+  enabled: true;
+  configuredDurationMs: number;
+  terminalDecisionAt: string;
+  probeStartedAt: string;
+  probeEndedAt: string;
+  probeDurationMs: number;
+  lateHitCount: number;
+  lateHits: PostTerminalAnalyticsProbeHit[];
 }
 
 /**

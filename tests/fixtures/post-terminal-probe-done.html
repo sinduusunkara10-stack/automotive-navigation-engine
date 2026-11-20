@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Request complete</title></head>
+<body>
+  <h1>Request complete</h1>
+  <script>
+    function collect(params) {
+      navigator.sendBeacon("/g/collect?v=2&tid=G-PROBETEST", params);
+    }
+    collect("en=page_view");
+    // Fires long after the run's terminal decision, like a delayed conversion batch.
+    setTimeout(() => collect("en=lead\nen=form_complete"), 4000);
+  </script>
+</body>
+</html>

@@ -1118,7 +1118,13 @@ async function countConfirmationMarkers(page: Page): Promise<number> {
   return total;
 }
 
-async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: number, captureModules: CaptureModuleName[]): Promise<void> {
+async function captureAnalyticsPhase(
+  page: Page,
+  captures: Captures,
+  stepIndex: number,
+  captureModules: CaptureModuleName[],
+): Promise<{ startedAt: string; endedAt: string }> {
+  const startedAt = new Date().toISOString();
   let detach: (() => void) | undefined;
   if (captureModules.includes("ga4_network_events")) {
     detach = attachGa4NetworkCapture(page, captures, () => stepIndex, { contextId: `fill_form:${stepIndex}` });
@@ -1129,6 +1135,7 @@ async function captureAnalyticsPhase(page: Page, captures: Captures, stepIndex: 
     const entries = await captureDataLayer(page, stepIndex, { contextId: `fill_form:${stepIndex}` });
     captures.data_layer_evidence = [...(captures.data_layer_evidence ?? []), ...entries];
   }
+  return { startedAt, endedAt: new Date().toISOString() };
 }
 
 type SubmissionOutcome =
@@ -2063,8 +2070,9 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     const capture = startDealerLookupNetworkCapture(page, { includeDocumentRequests: true });
     capture.setStep("submit_click");
     await visualEvidenceByPage.get(page)?.capture("submit_before_click", attemptNumber, submit, { maxBase64Chars: VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS });
+    const submitClickedAt = new Date().toISOString();
     await submit.click({ timeout: 10_000 }).catch(() => {});
-    const { observation, urlChanged, confirmationAppeared: observedConfirmation } = await observeSubmissionOutcome({
+    const { observation: observed, urlChanged, confirmationAppeared: observedConfirmation } = await observeSubmissionOutcome({
       page,
       capture,
       beforeUrl,
@@ -2075,6 +2083,7 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
       detectChallenge: detectCaptchaOnPage,
       config,
     });
+    const observation = { ...observed, submitClickedAt };
     await visualEvidenceByPage.get(page)?.capture("submit_outcome", attemptNumber, submit, { maxBase64Chars: VISUAL_EVIDENCE_REGION_MAX_BASE64_CHARS });
     const allRequests = [...capture.snapshot()];
     const networkRequests = await capture.stop().catch(() => []);
@@ -2452,6 +2461,9 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
                   ? `the business submission request was ${submissionServerResponseCategory === "accepted" ? "accepted (2xx)" : "still pending or failed in transport"} but no confirmation state followed within the adaptive observation window -- the outcome cannot be confirmed either way`
                   : "submit was cancelled but no diagnosable cause was observed, even though a network request was sent";
   const formPostSubmitDiagnostics = {
+    /** Filled in only on the success path, around the post-submit captureAnalyticsPhase below. */
+    postSubmitAnalyticsCaptureStartedAt: null as string | null,
+    postSubmitAnalyticsCaptureEndedAt: null as string | null,
     submitCanceled: !attempt.succeeded,
     invalidFieldIds: attempt.postSubmit.invalidFieldIds,
     nativeValidationMessages: attempt.postSubmit.nativeValidationMessages,
@@ -2534,7 +2546,9 @@ async function executeFillFormInner(params: ExecuteFillFormParams): Promise<Acti
     };
   }
 
-  await captureAnalyticsPhase(page, captures, stepIndex + 1, captureModules);
+  const postSubmitCapture = await captureAnalyticsPhase(page, captures, stepIndex + 1, captureModules);
+  formPostSubmitDiagnostics.postSubmitAnalyticsCaptureStartedAt = postSubmitCapture.startedAt;
+  formPostSubmitDiagnostics.postSubmitAnalyticsCaptureEndedAt = postSubmitCapture.endedAt;
 
   const runnerUpSuccess = selection.rejectedFormsAndReasons[0];
   const formDiscoveryDebugSuccess = await emitDiagnostic(
