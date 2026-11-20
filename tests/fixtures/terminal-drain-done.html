@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Request complete</title></head>
+<body>
+  <h1>Request complete</h1>
+  <script>
+    // hits=<ms,ms,...>&names=<en,en,...>: one GA4 collect beacon per offset after load.
+    // stream=<ms>: a beacon every <ms> forever (never goes quiet).
+    const params = new URLSearchParams(location.search);
+    const collect = (name) => navigator.sendBeacon("/g/collect?v=2&tid=G-DRAINTEST&en=" + name, "x=1");
+    const offsets = (params.get("hits") || "").split(",").filter(Boolean).map(Number);
+    const names = (params.get("names") || "").split(",");
+    offsets.forEach((offset, i) => setTimeout(() => collect(names[i] || "hit_" + i), offset));
+    if (params.get("stream")) {
+      let n = 0;
+      setInterval(() => collect("stream_" + (n += 1)), Number(params.get("stream")));
+    }
+  </script>
+</body>
+</html>

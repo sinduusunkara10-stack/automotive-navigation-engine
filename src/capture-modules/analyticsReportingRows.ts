@@ -1058,6 +1058,16 @@ export function buildAnalyticsReportingRows(params: {
   startWindowGa4EndIndex?: number;
   /** @deprecated No longer used -- see startWindowGa4EndIndex. */
   startWindowDataLayerEndIndex?: number;
+  /**
+   * Terminal analytics drain (core/terminalAnalyticsDrain.ts): the very entries ga4NetworkEvents/
+   * dataLayerEvidence gained after the run's terminal success decision, while the engine passively
+   * waited for hits caused by the final action. They were recorded by the same live listeners as
+   * everything else, so they are ordinary evidence; this only says which action they belong to.
+   * With a final action in `steps` (the last step that is not a stop_* decision) they are reported
+   * under that action's `<taskId>:action:<step>` instead of falling back by URL to whichever page
+   * marker happens to precede them (usually the start page). Absent or empty means nothing changes.
+   */
+  terminalDrainEvidence?: { ga4Events: Ga4NetworkEventCapture[]; dataLayerPushes: DataLayerCapture[] };
 }): AnalyticsReportingRow[] {
   const {
     taskId,
@@ -1073,6 +1083,12 @@ export function buildAnalyticsReportingRows(params: {
     dataLayerEvidence = [],
   } = params;
   const runId = taskId;
+
+  const finalActionStep = [...steps].reverse().find((step) => !step.selectedAction.type.startsWith("stop_"));
+  const drainGa4 = finalActionStep ? (params.terminalDrainEvidence?.ga4Events ?? []) : [];
+  const drainDataLayer = finalActionStep ? (params.terminalDrainEvidence?.dataLayerPushes ?? []) : [];
+  const drainGa4Set = new Set(drainGa4);
+  const drainDataLayerSet = new Set(drainDataLayer);
 
   const startVisit = pageVisits[0];
   const resolvedStartPageUrl = startVisit?.url ?? startPageUrl ?? startUrl;
@@ -1169,14 +1185,14 @@ export function buildAnalyticsReportingRows(params: {
   // stepIndex-range split misattributes evidence right at a page boundary.
   const ga4ByMarker: Ga4NetworkEventCapture[][] = markers.map(() => []);
   for (const event of ga4NetworkEvents) {
-    if (clickStepIndexes.has(event.stepIndex)) {
+    if (clickStepIndexes.has(event.stepIndex) || drainGa4Set.has(event)) {
       continue;
     }
     ga4ByMarker[pickOwningMarkerIndex(markers, event.stepIndex, candidateUrlsForGa4(event))]!.push(event);
   }
   const dataLayerByMarker: DataLayerCapture[][] = markers.map(() => []);
   for (const push of dataLayerEvidence) {
-    if (clickStepIndexes.has(push.stepIndex)) {
+    if (clickStepIndexes.has(push.stepIndex) || drainDataLayerSet.has(push)) {
       continue;
     }
     dataLayerByMarker[pickOwningMarkerIndex(markers, push.stepIndex, [push.url])]!.push(push);
@@ -1220,6 +1236,25 @@ export function buildAnalyticsReportingRows(params: {
         ),
       );
     }
+  }
+
+  if (finalActionStep && (drainGa4.length > 0 || drainDataLayer.length > 0)) {
+    const lastStep = steps[steps.length - 1]!;
+    rows.push(
+      ...buildRowsForEvidenceWindow({
+        runId,
+        taskId,
+        schemaVersion,
+        journeyType,
+        actionId: `${taskId}:action:${finalActionStep.stepIndex}`,
+        ga4Events: drainGa4,
+        dataLayerPushes: drainDataLayer,
+        targets: [finalActionStep.actionResult.resultingUrl, lastStep.currentUrl].filter(
+          (url, index, all): url is string => Boolean(url) && all.indexOf(url) === index,
+        ),
+        stepIndex: finalActionStep.stepIndex,
+      }),
+    );
   }
 
   return rows.map((row, index) => ({ ...row, journeySequence: index + 1 }));
