@@ -66,7 +66,7 @@ class RecordingVerifier implements SemanticCriterionVerifier {
 
 function task(baseUrl: string, query: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "verified-submission-milestones",
     objective: "1. load the above starturl\n2. fill out the details of the form\n3. submit the form\n4. stop and return",
     startUrl: `${baseUrl}/post-submit-journey.html?${query}`,
@@ -85,7 +85,7 @@ function task(baseUrl: string, query: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 

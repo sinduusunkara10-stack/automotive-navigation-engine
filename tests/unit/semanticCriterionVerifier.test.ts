@@ -318,3 +318,46 @@ test("cross-language panel fix: the system prompt still requires causallyLinked,
     "a click/tag alone must still never be instructed as sufficient to pass a panel-state criterion",
   );
 });
+
+// ---------------------------------------------------------------------------------------
+// criterionId diagnostics (additive, no behaviour change): lets a caller attribute a run's
+// verifier decisions log to specific criteria (e.g. step-1 vs step-2) without inferring it
+// from call order or evidence text. Never read by buildPrompt/buildCacheKey -- two different
+// criteria with identical objective/criterionDescription/pageEvidence still legitimately
+// share a cache entry.
+// ---------------------------------------------------------------------------------------
+
+test("criterionId is attributed per decision-log entry, including on a cache hit", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "Configurateur / Choisir." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput({ criterionId: "step-1" }));
+  // Identical objective/criterionDescription/pageEvidence -- same cache key -- but a
+  // different criterionId, as two distinct milestones describing the same page state would.
+  await verifier.verify(buildInput({ criterionId: "step-2" }));
+
+  const decisions = verifier.getUsageDiagnostics().decisions;
+  assert.ok(decisions);
+  assert.equal(decisions!.length, 2);
+  assert.equal(decisions![0]!.criterionId, "step-1");
+  assert.equal(decisions![0]!.outcome, "satisfied");
+  assert.equal(decisions![1]!.criterionId, "step-2");
+  assert.equal(decisions![1]!.outcome, "cache_hit");
+  // Only one real model call was made -- criterionId must not affect the cache key.
+  assert.equal(client.requests.length, 1);
+});
+
+test("criterionId is omitted from a decision-log entry when the caller didn't supply one", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "Configurateur / Choisir." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput());
+
+  const decisions = verifier.getUsageDiagnostics().decisions;
+  assert.ok(decisions);
+  assert.equal("criterionId" in decisions![0]!, false);
+});
