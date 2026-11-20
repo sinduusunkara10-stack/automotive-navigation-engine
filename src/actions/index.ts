@@ -192,12 +192,17 @@ export async function dispatchAction(params: DispatchParams): Promise<ActionResu
   const urlBeforeDispatch = safePageUrl(page) ?? "";
   const snapshotBeforeDispatch = await captureInteractionSnapshot(page).catch(() => undefined);
   const result = await dispatchByType(params);
-  const interactionOutcome = await classifyInteractionOutcome({
+  const measuredOutcome = await classifyInteractionOutcome({
     page,
     urlBeforeDispatch,
     snapshotBeforeDispatch,
     result,
   });
+  // A scroll can change what is on screen without adding or removing a single control, which the
+  // element-set diff above cannot see. Measured scroll movement (actions/scroll.ts) is itself an
+  // observable in-page change, so it must never be reported as NO_OBSERVABLE_CHANGE.
+  const interactionOutcome: ActionResult["interactionOutcome"] =
+    measuredOutcome === "NO_OBSERVABLE_CHANGE" && result.scrollDiagnostics?.movementVerified ? "IN_PAGE_STATE_CHANGE" : measuredOutcome;
   const formPresence =
     isFormDiscoveryDiagnosticEnabled() && PAGE_PRESENCE_PROBED_ACTIONS.has(params.action.type) && !page.isClosed()
       ? await probeFormPresence(page).catch(() => undefined)

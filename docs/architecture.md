@@ -4722,3 +4722,34 @@ response and its `analyticsReportingRows` are built.
 - `POST_TERMINAL_ANALYTICS_PROBE_ENABLED` (above) is independent and still off by default. When on,
   the probe starts after the drain and the listeners' detachment, so it shows what still arrives
   after the drain; `runTiming.terminalDecisionAt` is stamped before the drain.
+
+### Container-aware scrolling and measured scroll movement (`src/actions/scroll.ts`, `src/actions/index.ts`)
+
+Reasoning only chooses the `scroll` action (and an optional `deltaY`). The engine then picks the
+scroller deterministically and measures what happened:
+
+- **Target-aware** (the action names a main-document target): walk the target's ancestors (crossing
+  open shadow roots); an ancestor qualifies only if its computed `overflow-y` permits scrolling and
+  `scrollHeight > clientHeight`. The nearest qualifying ancestor that can still move in the requested
+  direction wins, else the nearest qualifying one, else the window (`document_fallback`). An
+  unresolvable or frame-scoped target never invents a container.
+- **Exploratory** (no target): the active interaction region -- an open scrollable dialog (or a
+  scrollable descendant of it), else the scroller of the focused element -- else the window. An
+  unrelated scrollable region elsewhere is never chosen. `containerSelectionSource` records
+  `target_ancestor | active_region | document_fallback`.
+- **Execution**: for a container the pointer is moved to a probe point inside it that is actually
+  hit-tested to that container before `mouse.wheel`; if every probe point is covered, the container is
+  scrolled programmatically (`dispatchMethod: "programmatic"`). Window scrolling keeps the previous
+  behaviour.
+- **Success** is measured: window `scrollY`/`documentElement.scrollTop`/`body.scrollTop` or the
+  container's `scrollTop`, plus the target's bounding rect and **viewport** visibility (a DOM-visible box
+  that meaningfully intersects the viewport and its clipping ancestors -- distinct from the DOM-only
+  `visible` flag, which is unchanged). Movement of at least 1 px, a target moving relative to the viewport,
+  or a target entering the viewport verifies the scroll. A top/bottom boundary, a non-scrollable
+  scroller, a sub-threshold or zero delta yields `movementVerified: false` with a
+  `movementFailureReason`; the action still reports `success: true` (it was dispatched) so run-level
+  failure handling is unchanged.
+- **Outcome**: a scroll whose movement is verified is `IN_PAGE_STATE_CHANGE` even when the control set
+  is identical; it is `NO_OBSERVABLE_CHANGE` only when nothing moved and nothing structural changed.
+- Diagnostics are `actionResult.scrollDiagnostics` (additive within 1.53.0). `fill_form` and Playwright's
+  own auto-scroll are untouched.
