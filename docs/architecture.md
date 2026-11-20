@@ -4692,6 +4692,37 @@ arrive after the engine stops capturing. Capture timing is unchanged.
   layer or writes to `captures`, so late hits never reach `analyticsReportingRows`. Off, it does
   nothing and adds no time.
 
+### Terminal analytics drain (additive contract amendment)
+
+A run that ends in success used to detach its GA4/dataLayer listeners and build the response at
+once, so a hit caused by the final action but sent a little later (a form's lead/form_complete batch,
+a destination page's own beacons) was lost. Right after the loop reaches a terminal success decision,
+`runTask` now runs `runTerminalAnalyticsDrain` (`src/core/terminalAnalyticsDrain.ts`) before the
+response and its `analyticsReportingRows` are built.
+
+- Passive. Navigation is over: no reasoning call, click, scroll, navigation, recovery, extra step or
+  milestone evaluation. It only polls `captures.ga4_network_events` and `captures.data_layer_evidence`
+  (100 ms), which the run's live listeners, on the start page and every adopted surface, keep
+  appending to. Timers only, so a page that closed itself meanwhile cannot break it.
+- Runs only for a success terminal and only when `ga4_network_events` or `data_layer_evidence` is
+  captured. Other runs are unchanged.
+- It ends when 1500 ms pass with no new entry (`exitReason: quiet_window`), or at the hard cap
+  (`hard_cap`): 8000 ms when the run ended after a verified form submission
+  (`RunState.verifiedFormSubmission`), 3000 ms after any other successful terminal action. Not a fixed
+  sleep, so a quiet page costs one quiet window (about 1.5 s).
+- Entries recorded during the drain are ordinary captures. For `analyticsReportingRows` they are
+  reported under the final action (the last step that is not a `stop_*` decision) as
+  `<taskId>:action:<step>`, rather than falling back by URL to an earlier page marker.
+  `buildAnalyticsReportingRows` takes them as `terminalDrainEvidence` for that attribution only; the
+  capture entries themselves are not modified.
+- `diagnostics.terminalAnalyticsDrain`: `startedAt`, `endedAt`, `durationMs`, `quietWindowMs`,
+  `hardCapMs`, `exitReason`, `verifiedFormSubmission`, `ga4HitsObserved`, `dataLayerPushesObserved`.
+  A capture array that is already at its bound keeps a constant length, so a new entry is detected
+  by its last element changing (counted as one per poll).
+- `POST_TERMINAL_ANALYTICS_PROBE_ENABLED` (above) is independent and still off by default. When on,
+  the probe starts after the drain and the listeners' detachment, so it shows what still arrives
+  after the drain; `runTiming.terminalDecisionAt` is stamped before the drain.
+
 ### Container-aware scrolling and measured scroll movement (`src/actions/scroll.ts`, `src/actions/index.ts`)
 
 Reasoning only chooses the `scroll` action (and an optional `deltaY`). The engine then picks the
