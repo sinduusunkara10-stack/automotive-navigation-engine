@@ -195,3 +195,60 @@ test("detectClosedAdoptedSurfaces: stops as soon as it reaches a still-open surf
   assert.deepEqual(recovered, [{ poppedSurfaceId: "adopted-2", parentSurfaceId: "adopted-1" }]);
   assert.equal(state.activeSurface, "adopted-1");
 });
+
+// ---------------------------------------------------------------------------------------
+// Adopted-context panel-evidence fix: a Page-less in_document surface (a drawer/panel) can
+// now nest on top of an adopted-context surface, not only on top of "main". RunState.activePage
+// must resolve through the Page-less in_document surface to the adopted Page beneath it, both
+// for an ordinary return and for closed-surface detection.
+// ---------------------------------------------------------------------------------------
+
+test("effectivePage resolves through a Page-less in_document surface to the adopted Page beneath it, while activePage stays direct (undefined)", () => {
+  const state = new RunState();
+  const popup = fakePage("configurator-popup");
+  state.pushSurface("adopted-1", popup);
+  state.pushSurface("in_document-1"); // a panel opened inside the already-adopted configurator tab
+  state.recordInDocumentParentSurfaceId("in_document-1", "adopted-1");
+
+  assert.equal(state.activeSurface, "in_document-1");
+  assert.equal(state.effectivePage, popup, "the panel has no Page of its own; the adopted tab beneath it is still the live page");
+  assert.equal(
+    state.activePage,
+    undefined,
+    "activePage stays a direct, un-walked lookup -- the panel surface itself owns no Page, which callers like surfaceReturn.ts's own close-decision rely on",
+  );
+  assert.equal(state.getInDocumentParentSurfaceId("in_document-1"), "adopted-1");
+});
+
+test("returnToParentSurface: a panel opened inside an adopted context returns to that same adopted tab, not main", async () => {
+  const state = new RunState();
+  const mainPage = fakePage("main");
+  const popup = fakePage("configurator-popup");
+  state.pushSurface("adopted-1", popup);
+  state.pushSurface("in_document-1");
+  state.recordInDocumentParentSurfaceId("in_document-1", "adopted-1");
+
+  const result = await returnToParentSurface({ state, mainPage });
+
+  assert.equal(result.restored, true);
+  assert.equal(result.poppedSurfaceId, "in_document-1");
+  assert.equal(result.parentSurfaceId, "adopted-1");
+  assert.equal(result.parentUrl, popup.url());
+  assert.equal(state.activeSurface, "adopted-1");
+  assert.equal(state.activePage, popup);
+});
+
+test("detectClosedAdoptedSurfaces: detects the underlying adopted tab closing even while a Page-less in_document panel sits on top of it", () => {
+  const state = new RunState();
+  const popup = fakePage("configurator-popup", { closed: true });
+  state.pushSurface("adopted-1", popup);
+  state.pushSurface("in_document-1");
+
+  const recovered = detectClosedAdoptedSurfaces(state);
+
+  assert.deepEqual(recovered, [
+    { poppedSurfaceId: "in_document-1", parentSurfaceId: "adopted-1" },
+    { poppedSurfaceId: "adopted-1", parentSurfaceId: MAIN_SURFACE_ID },
+  ]);
+  assert.equal(state.activeSurface, MAIN_SURFACE_ID);
+});

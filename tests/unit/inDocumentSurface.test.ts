@@ -11,7 +11,7 @@ import { shouldEnterInDocumentSurface, shouldLeaveInDocumentSurface } from "../.
 
 test("shouldEnterInDocumentSurface: enters when a genuine activeDialog appears while on main", () => {
   assert.equal(
-    shouldEnterInDocumentSurface({ onMain: true, activeDialogPresent: true, lastActionSurfaceChangeType: undefined }),
+    shouldEnterInDocumentSurface({ currentSurfaceKind: "main", activeDialogPresent: true, lastActionSurfaceChangeType: undefined }),
     true,
   );
 });
@@ -19,7 +19,7 @@ test("shouldEnterInDocumentSurface: enters when a genuine activeDialog appears w
 test("shouldEnterInDocumentSurface: enters when the last action carried a surfaceChangeType, even with no activeDialog (a non-aria drawer/panel)", () => {
   assert.equal(
     shouldEnterInDocumentSurface({
-      onMain: true,
+      currentSurfaceKind: "main",
       activeDialogPresent: false,
       lastActionSurfaceChangeType: "layer_panel_appeared",
     }),
@@ -27,16 +27,35 @@ test("shouldEnterInDocumentSurface: enters when the last action carried a surfac
   );
 });
 
-test("shouldEnterInDocumentSurface: never enters while already off main -- no nested drawer-within-drawer support in this PR", () => {
+test("shouldEnterInDocumentSurface: adopted-context panel-evidence fix -- also enters a panel/drawer opened inside an already-adopted browsing context, not just main", () => {
   assert.equal(
-    shouldEnterInDocumentSurface({ onMain: false, activeDialogPresent: true, lastActionSurfaceChangeType: undefined }),
+    shouldEnterInDocumentSurface({
+      currentSurfaceKind: "adopted_context",
+      activeDialogPresent: false,
+      lastActionSurfaceChangeType: "layer_panel_appeared",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldEnterInDocumentSurface({ currentSurfaceKind: "adopted_context", activeDialogPresent: true, lastActionSurfaceChangeType: undefined }),
+    true,
+  );
+});
+
+test("shouldEnterInDocumentSurface: never enters while already on an in_document surface -- no nested drawer-within-drawer (two levels deep)", () => {
+  assert.equal(
+    shouldEnterInDocumentSurface({ currentSurfaceKind: "in_document", activeDialogPresent: true, lastActionSurfaceChangeType: "layer_panel_appeared" }),
     false,
   );
 });
 
-test("shouldEnterInDocumentSurface: no-op when neither signal is present", () => {
+test("shouldEnterInDocumentSurface: no-op when neither signal is present, on main or on an adopted context", () => {
   assert.equal(
-    shouldEnterInDocumentSurface({ onMain: true, activeDialogPresent: false, lastActionSurfaceChangeType: undefined }),
+    shouldEnterInDocumentSurface({ currentSurfaceKind: "main", activeDialogPresent: false, lastActionSurfaceChangeType: undefined }),
+    false,
+  );
+  assert.equal(
+    shouldEnterInDocumentSurface({ currentSurfaceKind: "adopted_context", activeDialogPresent: false, lastActionSurfaceChangeType: undefined }),
     false,
   );
 });

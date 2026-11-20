@@ -60,15 +60,26 @@ test("a large panel appearing with NO new controls (e.g. a loading/backdrop-only
   assert.equal(result.type, "none");
 });
 
-test("a large panel appearing with only ONE new control does not clear the co-occurrence guard (shared with the elements_appeared fallback) -- not treated as a new surface at all", () => {
+test("visibility-toggle support: a large panel appearing with only ONE new control (e.g. a sparse summary panel with just a close control) still counts as layer_panel_appeared", () => {
   const before = snapshot({ interactiveIdentities: ["button::View details"] });
   const after = snapshot({
     interactiveIdentities: ["button::View details", "button::Close panel"],
     panelSignature: "div|Offer details panel",
   });
   const result = classifyObservedSurfaceChange(before, after);
-  assert.equal(result.type, "none");
+  assert.equal(result.type, "layer_panel_appeared");
   assert.equal(result.newElementCount, 1);
+});
+
+test("a large panel appearing (panelSignature changed) but with ZERO new controls -- a pure backdrop/loading overlay -- is still never treated as a new surface", () => {
+  const before = snapshot({ interactiveIdentities: ["button::View details"] });
+  const after = snapshot({
+    interactiveIdentities: ["button::View details"],
+    panelSignature: "div|Backdrop only, same controls as before",
+  });
+  const result = classifyObservedSurfaceChange(before, after);
+  assert.equal(result.type, "none");
+  assert.equal(result.newElementCount, 0);
 });
 
 test("two or more new elements with no dialog and no panel signature is classified as elements_appeared (weak, no-ARIA fallback signal)", () => {

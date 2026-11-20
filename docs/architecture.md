@@ -3388,11 +3388,13 @@ text instruction (which already covered it).
 
 - `core/inDocumentSurface.ts` (new): `shouldEnterInDocumentSurface`/`shouldLeaveInDocumentSurface`,
   pure decision logic mirroring `surfaceAdoption.ts`'s own style.
-  - **Enter**: only while still on `"main"` (a drawer opening from within an already-tracked
-    in_document surface is out of this PR's scope -- no nested-drawer support), and only when
-    this step's fresh observation shows a genuine `activeDialog`, or the immediately preceding
-    action carried a `surfaceChangeType` -- the same two signals the prompt already reasoned
-    about, now also driving `RunState`'s own surface stack.
+  - **Enter**: while on `"main"` OR on an already-adopted `"adopted_context"` surface (adopted-
+    context panel-evidence fix, addendum below) -- never while already on an in_document surface
+    (a drawer opening from within an already-tracked in_document surface is out of scope -- no
+    two-levels-deep nested-drawer support) -- and only when this step's fresh observation shows a
+    genuine `activeDialog`, or the immediately preceding action carried a `surfaceChangeType` --
+    the same two signals the prompt already reasoned about, now also driving `RunState`'s own
+    surface stack.
   - **Leave**: only for a surface that was entered via a genuine `activeDialog` signal, once that
     signal disappears on a later observation -- a surface entered only via the one-shot
     `surfaceChangeType` heuristic has no equivalent persistent "is it still there" signal, so it
@@ -3492,6 +3494,37 @@ Route Memory's own §16 precedent).
   once `activeSurface` correctly reports `"main"` again -- not because the drawer visually
   disappeared. `tests/integration/e2eAcceptance.test.ts`'s dead-end variant tests exactly this
   claim, not a stronger one.
+
+### Addendum: adopted-context panel-evidence fix
+
+`shouldEnterInDocumentSurface` originally hard-required `onMain`, so a drawer/panel opened
+*inside* an already-adopted browsing context (e.g. a configurator opened as its own tab via §27
+surface adoption) could never be formalised as an in_document surface -- it stayed
+`"adopted_context"` forever, so `core/panelEvidence.ts`'s causal-linkage/scoped-evidence subsystem
+(this section's own panel-attribution corrective pass, §13 of the BMW investigation referenced in
+CLAUDE.md) was only ever available for the one step of the causing click itself
+(`buildPanelMatchContext`'s `justOpenedThisStep` branch, ungated on surface kind), then
+permanently lost on every later step. Fixed generically (no brand-specific logic): entry is now
+considered from either `"main"` or `"adopted_context"`, still never from `"in_document"` itself
+(the same one-level-nesting limit above, just no longer anchored to `"main"` specifically).
+`RunState.activePage` stayed a direct, un-walked lookup (several callers, e.g.
+`core/loop.ts`'s `onAdoptedSurfaceWithAnchor` and `core/surfaceReturn.ts`'s own close-decision,
+rely on it meaning "the current top surface itself owns a separate Page"); a new
+`RunState.effectivePage` getter walks down the surface stack instead, for every caller that needs
+the real live Page to read/act against (per-step page resolution, `detectClosedAdoptedSurfaces`,
+diagnostics). Separately, `src/reasoning/semanticCriterionVerifier.ts`'s prompt no longer
+instructs a hard veto on a panel's own `relevanceTier` being `"reject"`/`"ambiguous"` for a
+resulting-surface milestone -- that tier is only a same-language lexical-overlap score and is not
+reliable evidence when the panel's content is in a different language than the criterion (the
+exact Peugeot "Résumé panel" case this fix was written for); causal linkage, `documentUsable`, and
+genuine meaning-based correspondence are still required to fail closed. `observation/
+observationBuilder.ts`'s `classifyObservedSurfaceChange` also now recognises a newly-appeared
+panel-shaped container with as few as one new interactive control (not two) as `layer_panel_appeared`,
+so a sparse panel (e.g. a summary/price panel with just a close control) is not missed purely for
+having little interactive content -- a panel with zero new controls (a pure backdrop/loading
+overlay) is still never treated as a new surface. See `tests/integration/
+adoptedContextPanelEvidence.test.ts` for end-to-end coverage (panel evidence persisting past the
+opening step, and a false-positive-protection case).
 
 ## 29. Persistent Cross-Run Journey Memory
 

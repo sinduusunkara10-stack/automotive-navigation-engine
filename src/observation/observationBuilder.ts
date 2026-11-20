@@ -747,6 +747,17 @@ export type ClickSideEffectType = "dialog_appeared" | "dialog_changed" | "intera
 // doesn't happen to use role="dialog"/aria-modal.
 const MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE = 2;
 
+// Visibility-toggle support (adopted-context panel-evidence fix, requirement E): a panel/
+// drawer that already existed in the DOM (hidden) and transitioned to visible is exactly as
+// real a new surface as one freshly created, but it can legitimately carry fewer new
+// interactive controls than MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE above (e.g. a
+// summary/price panel with a heading, some text, and a single close control). The co-
+// occurrence guard with a newly-appeared panelSignature (classifyObservedSurfaceChange
+// below) is loosened to just one new control for that specific, structurally-stronger
+// signal -- never to zero, which stays reserved for a backdrop/loading overlay that
+// introduces no interactive control at all (false-positive protection, requirement F).
+const MIN_NEW_INTERACTIVE_ELEMENTS_FOR_PANEL_SIGNATURE = 1;
+
 /**
  * Pure, deterministic comparison of two InteractionSnapshots -- no Playwright/browser
  * involvement, so this is directly unit-testable. Used both by actions/click.ts (to decide
@@ -833,13 +844,16 @@ export function classifyObservedSurfaceChange(before: InteractionSnapshot, after
     return { type: dialogEffect.type, newElementCount };
   }
 
-  // A newly-appeared large panel is only trusted alongside the same
-  // MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE co-occurrence guard
-  // detectClickSideEffect's own weaker fallback signal already requires -- a large fixed/
-  // sticky element appearing with no new controls at all (e.g. a loading spinner overlay) is
-  // not evidence of a new *interactive* surface worth re-prioritising the prompt around.
+  // A newly-appeared large panel is trusted alongside a lighter co-occurrence guard than the
+  // plain elements_appeared fallback below (MIN_NEW_INTERACTIVE_ELEMENTS_FOR_PANEL_SIGNATURE,
+  // requirement E) -- a large fixed/sticky element appearing with no new controls at all
+  // (e.g. a loading spinner overlay) is still not evidence of a new *interactive* surface
+  // worth re-prioritising the prompt around, but one genuinely new control is enough once
+  // it's co-located with a newly-appeared panel-shaped container, so a panel with sparse
+  // interactive content (e.g. a summary/price panel with just a close control) is not missed
+  // purely for having fewer than two new controls.
   const panelAppeared = Boolean(after.panelSignature) && after.panelSignature !== before.panelSignature;
-  if (panelAppeared && newElementCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_SURFACE_CHANGE) {
+  if (panelAppeared && newElementCount >= MIN_NEW_INTERACTIVE_ELEMENTS_FOR_PANEL_SIGNATURE) {
     return { type: "layer_panel_appeared", newElementCount };
   }
 

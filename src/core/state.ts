@@ -217,6 +217,16 @@ export class RunState {
   private inDocumentSurfaceCounter = 0;
   /** Drawer/modal formalization (Phase 3 PR 5): which in_document surface ids were entered via a genuine Observation.activeDialog signal -- see core/inDocumentSurface.ts's shouldLeaveInDocumentSurface for why only those can be auto-left on their own. */
   private readonly inDocumentEnteredViaActiveDialog = new Set<string>();
+  /**
+   * Nested in-document surfaces (adopted-context panel-evidence fix): the surface id that
+   * was active immediately before a given in_document surface was pushed -- "main" or an
+   * adopted-context surface id, never another in_document surface id (one-level-deep nesting
+   * is still enforced by core/inDocumentSurface.ts's shouldEnterInDocumentSurface). Purely
+   * internal bookkeeping/diagnostics -- never put on the wire (ActiveSurfaceInfo stays
+   * unchanged), since popSurface's own stack already restores the correct parent regardless
+   * of whether this map is consulted.
+   */
+  private readonly inDocumentParentSurfaceId = new Map<string, string>();
 
   /**
    * Panel-attribution corrective pass (item 2 of the approved design -- see CLAUDE.md and
@@ -361,10 +371,43 @@ export class RunState {
    * Surface adoption (Phase 3 PR 3): the live Page core/loop.ts must observe/act against for
    * the current step, or undefined when activeSurface is "main" (in which case the caller's
    * own, separately-threaded main Page is used instead). Never main's own Page -- see
-   * pageBySurfaceId's own doc comment.
+   * pageBySurfaceId's own doc comment. An in_document surface is Page-less and was, before
+   * the adopted-context panel-evidence fix, only ever nested directly under "main" -- also
+   * Page-less -- so looking up the top of the stack alone was always correct. Deliberately a
+   * *direct* lookup on the top surface id only, never a walk down the stack: callers that
+   * check `activePage !== undefined` (e.g. core/loop.ts's onAdoptedSurfaceWithAnchor) use it
+   * to mean "the current top surface is itself a genuinely separate, closeable Page", which
+   * must stay false while on a Page-less in_document surface even once one can nest on top
+   * of an adopted context (see effectivePage below for the walking counterpart) --
+   * core/surfaceReturn.ts's own close-decision for the surface being left relies on this
+   * same direct-lookup meaning.
    */
   get activePage(): Page | undefined {
     return this.pageBySurfaceId.get(this.activeSurface);
+  }
+
+  /**
+   * Adopted-context panel-evidence fix: the live Page the engine should actually read/act
+   * against for the current step -- walking down the stack from the top and returning the
+   * first surface id with a Page mapped, so a Page-less in_document surface (which shares
+   * whichever document it was opened inside, never a separate Page of its own) resolves to
+   * the real page beneath it on the stack, not just to `undefined`/the run's original
+   * tracked page. Before nested in-document surfaces were allowed on top of an
+   * adopted-context surface, this always coincided with `activePage ?? <original page>`,
+   * since an in_document surface only ever sat directly on "main" (also Page-less) -- this
+   * getter generalises that resolution correctly now that it can sit on an adopted-context
+   * surface too. Returns undefined only when nothing on the whole stack (down to "main")
+   * has a Page mapped, exactly reproducing every pre-existing caller's own `?? params.page`/
+   * `?? mainPage` fallback.
+   */
+  get effectivePage(): Page | undefined {
+    for (let i = this.surfaceStack.length - 1; i >= 0; i -= 1) {
+      const page = this.pageBySurfaceId.get(this.surfaceStack[i]!);
+      if (page) {
+        return page;
+      }
+    }
+    return undefined;
   }
 
   /** How many distinct surfaces have ever been adopted this run (never decremented by popSurface) -- the budget safety.maxAdoptedSurfacesPerRun bounds. */
@@ -391,6 +434,15 @@ export class RunState {
 
   wasInDocumentEnteredViaActiveDialog(surfaceId: string): boolean {
     return this.inDocumentEnteredViaActiveDialog.has(surfaceId);
+  }
+
+  /** Records which surface (main or adopted-context) a newly-entered in_document surface nests under -- see inDocumentParentSurfaceId's own doc comment. */
+  recordInDocumentParentSurfaceId(surfaceId: string, parentSurfaceId: string): void {
+    this.inDocumentParentSurfaceId.set(surfaceId, parentSurfaceId);
+  }
+
+  getInDocumentParentSurfaceId(surfaceId: string): string | undefined {
+    return this.inDocumentParentSurfaceId.get(surfaceId);
   }
 
   /**
