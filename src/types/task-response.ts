@@ -351,6 +351,55 @@ export interface SettleDiagnostic {
   reason: "quiet_window" | "ceiling_reached";
 }
 
+export type ScrollContainerSelectionSource = "target_ancestor" | "active_region" | "document_fallback";
+
+export type ScrollMovementFailureReason =
+  | "zero_delta"
+  | "not_scrollable"
+  | "at_top_boundary"
+  | "at_bottom_boundary"
+  | "sub_threshold_movement"
+  | "no_position_change";
+
+export interface ScrollRectSnapshot {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 1.53.0 additive amendment: measured evidence for one scroll action (actions/scroll.ts).
+ * Position fields describe the scroller the engine actually used (the window, or one
+ * scrollable container); the window's own three scroll offsets are always recorded too.
+ */
+export interface ScrollDiagnostics {
+  requestedDeltaY: number;
+  containerSelectionSource: ScrollContainerSelectionSource;
+  scrollTargetType: "window" | "scrollable_container";
+  /** Tag name plus role/landmark only -- never page text. */
+  containerLabel?: string;
+  dispatchMethod: "mouse_wheel" | "programmatic";
+  beforeScrollTop: number;
+  afterScrollTop: number;
+  scrollDeltaObserved: number;
+  scrollHeight: number;
+  clientHeight: number;
+  atTopBefore: boolean;
+  atBottomBefore: boolean;
+  atTopAfter: boolean;
+  atBottomAfter: boolean;
+  windowScrollY: { before: number; after: number };
+  documentElementScrollTop: { before: number; after: number };
+  bodyScrollTop: { before: number; after: number };
+  targetBoundingRectBefore?: ScrollRectSnapshot;
+  targetBoundingRectAfter?: ScrollRectSnapshot;
+  targetViewportVisibleBefore?: boolean;
+  targetViewportVisibleAfter?: boolean;
+  movementVerified: boolean;
+  movementFailureReason?: ScrollMovementFailureReason;
+}
+
 /**
  * What every action executor itself returns (actions/click.ts, navigate.ts, goBack.ts,
  * scroll.ts, wait.ts, capture.ts, fillForm.ts, stop*.ts): every ActionResult field except
@@ -453,6 +502,8 @@ export interface ActionResult {
    * always describes the tracked page's own settle wait).
    */
   settleDiagnostic?: SettleDiagnostic;
+  /** 1.53.0 additive amendment: present only for a `scroll` action -- see ScrollDiagnostics. */
+  scrollDiagnostics?: ScrollDiagnostics;
   /**
    * Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
    * adoption"): true only when this click's own popup/new-context event (openedNewContext)
@@ -2141,6 +2192,28 @@ export interface Diagnostics {
   runTiming?: RunTimingDiagnostics;
   /** Present only when POST_TERMINAL_ANALYTICS_PROBE_ENABLED was on and the run ended in success. */
   postTerminalAnalyticsProbe?: PostTerminalAnalyticsProbeDiagnostics;
+  /** Present when a successful run captured GA4 or dataLayer evidence and so waited for the terminal analytics drain. */
+  terminalAnalyticsDrain?: TerminalAnalyticsDrainDiagnostics;
+}
+
+/**
+ * The passive wait after a terminal success decision (src/core/terminalAnalyticsDrain.ts). Events the
+ * run's live listeners recorded during it are ordinary captures and reporting rows, unlike the
+ * diagnostic probe's.
+ */
+export interface TerminalAnalyticsDrainDiagnostics {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  quietWindowMs: number;
+  hardCapMs: number;
+  exitReason: "quiet_window" | "hard_cap";
+  /** True when the run ended after a verified form submission, which selects the longer hard cap. */
+  verifiedFormSubmission: boolean;
+  /** New captures.ga4_network_events entries recorded during the drain. */
+  ga4HitsObserved: number;
+  /** New captures.data_layer_evidence entries (live pushes) recorded during the drain. */
+  dataLayerPushesObserved: number;
 }
 
 export interface RunTimingDiagnostics {

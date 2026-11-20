@@ -2,7 +2,9 @@ import type { Page } from "playwright";
 import type { ResolvedTaskRequest, TaskRequest } from "../types/task-request.js";
 import type {
   Captures,
+  DataLayerCapture,
   DomainDiscoveryDiagnostics,
+  Ga4NetworkEventCapture,
   EngineAssessment,
   MemorySample,
   StepLog,
@@ -51,6 +53,13 @@ import { analyzeHost } from "../discovery/registrableDomain.js";
 import type { JourneyMemoryDiagnostics } from "../types/journeyMemory.js";
 import { readPostTerminalAnalyticsProbeConfig, type PostTerminalAnalyticsProbeConfig } from "../config/postTerminalAnalyticsProbeConfig.js";
 import { runPostTerminalAnalyticsProbe } from "../diagnostics/postTerminalAnalyticsProbe.js";
+import { DEFAULT_TERMINAL_ANALYTICS_DRAIN_CONFIG, type TerminalAnalyticsDrainConfig } from "../config/terminalAnalyticsDrainConfig.js";
+import {
+  resolveTerminalAnalyticsDrainHardCapMs,
+  runTerminalAnalyticsDrain,
+  terminalAnalyticsDrainApplies,
+  type TerminalAnalyticsDrainResult,
+} from "./terminalAnalyticsDrain.js";
 
 const JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION = "1.0.0";
 
@@ -206,6 +215,8 @@ export async function runTask(params: {
   describeRoutedPage?: RoutedPageDescriber;
   /** Overrides POST_TERMINAL_ANALYTICS_PROBE_ENABLED (src/config/postTerminalAnalyticsProbeConfig.ts); tests only. */
   postTerminalAnalyticsProbe?: PostTerminalAnalyticsProbeConfig;
+  /** Overrides the terminal analytics drain's quiet window and caps (src/config/terminalAnalyticsDrainConfig.ts); tests only. */
+  terminalAnalyticsDrain?: TerminalAnalyticsDrainConfig;
 }): Promise<TaskResponse> {
   const {
     page,
@@ -217,6 +228,7 @@ export async function runTask(params: {
     describeRoutedPage,
   } = params;
   const postTerminalProbeConfig = params.postTerminalAnalyticsProbe ?? readPostTerminalAnalyticsProbeConfig();
+  const terminalDrainConfig = params.terminalAnalyticsDrain ?? DEFAULT_TERMINAL_ANALYTICS_DRAIN_CONFIG;
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -499,6 +511,22 @@ export async function runTask(params: {
 
     const lastStep = steps[steps.length - 1];
 
+    // Terminal analytics drain: navigation is over, but the live GA4/dataLayer listeners are still
+    // attached and a conversion batch caused by the final action may not have fired yet. Passive
+    // (no reasoning call, no action, no step); anything recorded meanwhile is ordinary capture
+    // evidence, so it must happen before the response and its analyticsReportingRows are built.
+    let terminalAnalyticsDrain: TerminalAnalyticsDrainResult | undefined;
+    if (terminal === "success" && terminalAnalyticsDrainApplies(task.captureModules)) {
+      const verifiedFormSubmission = state.verifiedFormSubmission !== undefined;
+      terminalAnalyticsDrain = await runTerminalAnalyticsDrain({
+        captures,
+        quietWindowMs: terminalDrainConfig.quietWindowMs,
+        hardCapMs: resolveTerminalAnalyticsDrainHardCapMs(terminalDrainConfig, verifiedFormSubmission),
+        pollIntervalMs: terminalDrainConfig.pollIntervalMs,
+        verifiedFormSubmission,
+      });
+    }
+
     // Write-back at run end (binding contract §5): a partially successful run still
     // contributes every independently-verified segment it produced, never only a
     // whole-run summary. Fails safe -- recordJourneySegments never throws.
@@ -627,6 +655,9 @@ export async function runTask(params: {
       startPageTitle,
       startWindowGa4EndIndex,
       startWindowDataLayerEndIndex,
+      ...(terminalAnalyticsDrain
+        ? { terminalDrainEvidence: { ga4Events: terminalAnalyticsDrain.ga4Events, dataLayerPushes: terminalAnalyticsDrain.dataLayerPushes } }
+        : {}),
     });
 
     // The probe runs only after the normal listeners are gone, so nothing it sees can reach
@@ -634,6 +665,9 @@ export async function runTask(params: {
     detachCaptureListeners();
     const listenersDetachedAt = new Date().toISOString();
     const decidedAt = terminalDecisionAt ?? listenersDetachedAt;
+    if (terminalAnalyticsDrain) {
+      response.diagnostics.terminalAnalyticsDrain = terminalAnalyticsDrain.diagnostics;
+    }
     if (postTerminalProbeConfig.enabled && terminal === "success") {
       response.diagnostics.postTerminalAnalyticsProbe = await runPostTerminalAnalyticsProbe({
         activePage: state.effectivePage ?? page,
@@ -670,6 +704,8 @@ function buildTerminalResponse(params: {
   startPageTitle?: string;
   startWindowGa4EndIndex?: number;
   startWindowDataLayerEndIndex?: number;
+  /** See buildAnalyticsReportingRows's terminalDrainEvidence. */
+  terminalDrainEvidence?: { ga4Events: Ga4NetworkEventCapture[]; dataLayerPushes: DataLayerCapture[] };
 }): TaskResponse {
   const {
     task,
@@ -689,6 +725,7 @@ function buildTerminalResponse(params: {
     startPageTitle,
     startWindowGa4EndIndex,
     startWindowDataLayerEndIndex,
+    terminalDrainEvidence,
   } = params;
   const lastStep = steps[steps.length - 1];
   // Independently verified, never derived from status alone: objectiveAchieved must
@@ -760,6 +797,7 @@ function buildTerminalResponse(params: {
       startWindowGa4EndIndex,
       startWindowDataLayerEndIndex,
       steps,
+      ...(terminalDrainEvidence ? { terminalDrainEvidence } : {}),
     }),
     diagnostics: {
       stepCount: state.stepCount,
