@@ -351,6 +351,55 @@ export interface SettleDiagnostic {
   reason: "quiet_window" | "ceiling_reached";
 }
 
+export type ScrollContainerSelectionSource = "target_ancestor" | "active_region" | "document_fallback";
+
+export type ScrollMovementFailureReason =
+  | "zero_delta"
+  | "not_scrollable"
+  | "at_top_boundary"
+  | "at_bottom_boundary"
+  | "sub_threshold_movement"
+  | "no_position_change";
+
+export interface ScrollRectSnapshot {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 1.53.0 additive amendment: measured evidence for one scroll action (actions/scroll.ts).
+ * Position fields describe the scroller the engine actually used (the window, or one
+ * scrollable container); the window's own three scroll offsets are always recorded too.
+ */
+export interface ScrollDiagnostics {
+  requestedDeltaY: number;
+  containerSelectionSource: ScrollContainerSelectionSource;
+  scrollTargetType: "window" | "scrollable_container";
+  /** Tag name plus role/landmark only -- never page text. */
+  containerLabel?: string;
+  dispatchMethod: "mouse_wheel" | "programmatic";
+  beforeScrollTop: number;
+  afterScrollTop: number;
+  scrollDeltaObserved: number;
+  scrollHeight: number;
+  clientHeight: number;
+  atTopBefore: boolean;
+  atBottomBefore: boolean;
+  atTopAfter: boolean;
+  atBottomAfter: boolean;
+  windowScrollY: { before: number; after: number };
+  documentElementScrollTop: { before: number; after: number };
+  bodyScrollTop: { before: number; after: number };
+  targetBoundingRectBefore?: ScrollRectSnapshot;
+  targetBoundingRectAfter?: ScrollRectSnapshot;
+  targetViewportVisibleBefore?: boolean;
+  targetViewportVisibleAfter?: boolean;
+  movementVerified: boolean;
+  movementFailureReason?: ScrollMovementFailureReason;
+}
+
 /**
  * What every action executor itself returns (actions/click.ts, navigate.ts, goBack.ts,
  * scroll.ts, wait.ts, capture.ts, fillForm.ts, stop*.ts): every ActionResult field except
@@ -453,6 +502,8 @@ export interface ActionResult {
    * always describes the tracked page's own settle wait).
    */
   settleDiagnostic?: SettleDiagnostic;
+  /** 1.53.0 additive amendment: present only for a `scroll` action -- see ScrollDiagnostics. */
+  scrollDiagnostics?: ScrollDiagnostics;
   /**
    * Surface adoption (Phase 3 PR 3, see CLAUDE.md and docs/architecture.md "Surface
    * adoption"): true only when this click's own popup/new-context event (openedNewContext)
