@@ -76,6 +76,36 @@ function tryParseFormEncodedBody(raw: string): Record<string, string>[] | undefi
   return parsed;
 }
 
+/** True for a GA4 collect request (the same path test the live listener uses). */
+export function isGa4CollectUrl(rawUrl: string): boolean {
+  try {
+    return new URL(rawUrl).pathname.endsWith(GA4_COLLECT_PATH);
+  } catch {
+    return false;
+  }
+}
+
+/** Every GA4 event name ("en") a collect request carries, from its query string and each batched body line, in order. */
+export function readGa4EventNames(request: Request): string[] {
+  const names: string[] = [];
+  try {
+    const query = new URL(request.url()).searchParams.get("en");
+    if (query) names.push(query);
+  } catch {
+    return names;
+  }
+  let body: string | null = null;
+  try {
+    body = request.postData();
+  } catch {
+    body = null;
+  }
+  for (const line of (body && tryParseFormEncodedBody(body.slice(0, MAX_GA4_POST_BODY_BYTES))) || []) {
+    if (line.en) names.push(line.en);
+  }
+  return names;
+}
+
 function classifyRequestFrame(page: Page, request: Request): { source: EvidenceCaptureSource; frameOrigin?: string } {
   let frame: Frame | null = null;
   try {

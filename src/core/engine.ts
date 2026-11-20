@@ -49,6 +49,8 @@ import { logJourneyMemoryStartup, logJourneyMemoryRunCompletion } from "./journe
 import type { JourneyMemoryStore } from "./journeyMemory/store.js";
 import { analyzeHost } from "../discovery/registrableDomain.js";
 import type { JourneyMemoryDiagnostics } from "../types/journeyMemory.js";
+import { readPostTerminalAnalyticsProbeConfig, type PostTerminalAnalyticsProbeConfig } from "../config/postTerminalAnalyticsProbeConfig.js";
+import { runPostTerminalAnalyticsProbe } from "../diagnostics/postTerminalAnalyticsProbe.js";
 
 const JOURNEY_MEMORY_SEGMENT_SCHEMA_VERSION = "1.0.0";
 
@@ -202,6 +204,8 @@ export async function runTask(params: {
    * it's already active context-wide from page creation, independent of this label.
    */
   describeRoutedPage?: RoutedPageDescriber;
+  /** Overrides POST_TERMINAL_ANALYTICS_PROBE_ENABLED (src/config/postTerminalAnalyticsProbeConfig.ts); tests only. */
+  postTerminalAnalyticsProbe?: PostTerminalAnalyticsProbeConfig;
 }): Promise<TaskResponse> {
   const {
     page,
@@ -212,6 +216,7 @@ export async function runTask(params: {
     isMemoryThresholdBreached,
     describeRoutedPage,
   } = params;
+  const postTerminalProbeConfig = params.postTerminalAnalyticsProbe ?? readPostTerminalAnalyticsProbeConfig();
   const state = new RunState();
   const captures: Captures = {};
   // Sampled at run start, after each step, and (by the caller, src/api/runner.ts) once
@@ -322,6 +327,17 @@ export async function runTask(params: {
   const detachErrorCapture = task.captureModules.includes("errors")
     ? attachErrorCapture(page, captures, () => state.stepCount)
     : undefined;
+  let listenersDetached = false;
+  const detachCaptureListeners = (): void => {
+    if (listenersDetached) return;
+    listenersDetached = true;
+    detachGa4Capture?.();
+    detachDataLayerPushCapture?.();
+    detachErrorCapture?.();
+    detachPageLifecycle();
+    state.detachAllAdoptedSurfaceListeners();
+  };
+  let terminalDecisionAt: string | undefined;
 
   try {
     // Deterministic preflight domain discovery (src/discovery) runs before the Claude-driven
@@ -477,6 +493,7 @@ export async function runTask(params: {
       if (outcome.terminal) {
         terminal = outcome.terminal;
         finishReason = outcome.finishReason ?? terminal;
+        terminalDecisionAt = new Date().toISOString();
       }
     }
 
@@ -592,7 +609,7 @@ export async function runTask(params: {
       });
     }
 
-    return buildTerminalResponse({
+    const response = buildTerminalResponse({
       task: effectiveTask,
       state,
       captures,
@@ -611,15 +628,26 @@ export async function runTask(params: {
       startWindowGa4EndIndex,
       startWindowDataLayerEndIndex,
     });
+
+    // The probe runs only after the normal listeners are gone, so nothing it sees can reach
+    // `captures` (which `response` shares by reference) or the reporting rows built above.
+    detachCaptureListeners();
+    const listenersDetachedAt = new Date().toISOString();
+    const decidedAt = terminalDecisionAt ?? listenersDetachedAt;
+    if (postTerminalProbeConfig.enabled && terminal === "success") {
+      response.diagnostics.postTerminalAnalyticsProbe = await runPostTerminalAnalyticsProbe({
+        activePage: state.activePage ?? page,
+        terminalDecisionAt: decidedAt,
+        durationMs: postTerminalProbeConfig.durationMs,
+      });
+    }
+    response.diagnostics.runTiming = { terminalDecisionAt: decidedAt, listenersDetachedAt, runEndedAt: new Date().toISOString() };
+    return response;
   } catch (error) {
     logAndAttachFailureContext({ task, state, page, steps, reasoning, error });
     throw error;
   } finally {
-    detachGa4Capture?.();
-    detachDataLayerPushCapture?.();
-    detachErrorCapture?.();
-    detachPageLifecycle();
-    state.detachAllAdoptedSurfaceListeners();
+    detachCaptureListeners();
   }
 }
 

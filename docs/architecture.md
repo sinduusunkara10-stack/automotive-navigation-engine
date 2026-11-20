@@ -4670,3 +4670,24 @@ marker URL (for example a confirmation page after a `fill_form` submit) falls ba
 to the latest marker at or before its step. A journey with no adopted tab and no `fill_form`
 step gets the same rows as before. A click's `resultingTitle` is read from the active page, so
 for a click that adopts a tab it is that tab's title.
+
+### Run-end analytics timing diagnostics (no contract change)
+
+These are diagnostics only, so it can be measured whether GA4 hits caused by a run's final action
+arrive after the engine stops capturing. Capture timing is unchanged.
+
+- `postSubmitObservation.submitClickedAt`: wall-clock time just before fill_form's Submit click.
+  The observation's other timings (`confirmationDetectedAtMs`, `totalObservationMs`, ...) are
+  offsets from it.
+- `formPostSubmitDiagnostics.postSubmitAnalyticsCaptureStartedAt` / `...EndedAt`: the existing
+  300 ms post-submit analytics capture (`contextId` `fill_form:N+1`) after a successful submit.
+- `diagnostics.runTiming`: `terminalDecisionAt` (the loop's terminal decision),
+  `listenersDetachedAt` (the run's GA4/dataLayer/error listeners are removed; `captures` cannot
+  change after this) and `runEndedAt`. Present when the run reached the end of the loop.
+- `diagnostics.postTerminalAnalyticsProbe`, only when `POST_TERMINAL_ANALYTICS_PROBE_ENABLED` is
+  on and the run ended in success. After the listeners are detached, one passive request listener
+  on the run's browser context records GA4 collect requests for 8 s: timestamp, ms after the
+  terminal decision, event names (query and every batched body line), host/path, method, and the
+  page index / whether it is the active page. It never navigates, clicks, calls the reasoning
+  layer or writes to `captures`, so late hits never reach `analyticsReportingRows`. Off, it does
+  nothing and adds no time.

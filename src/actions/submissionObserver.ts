@@ -83,6 +83,8 @@ export interface PostSubmitObservation {
   hardCapMs: number;
   extensionCount: number;
   extensionReasons: SubmissionExtensionReason[][];
+  /** Wall-clock time (ISO) just before the Submit click this observation belongs to. Set by fillForm.ts. */
+  submitClickedAt?: string;
   totalObservationMs: number;
   businessRequestDetected: boolean;
   businessRequestCount: number;

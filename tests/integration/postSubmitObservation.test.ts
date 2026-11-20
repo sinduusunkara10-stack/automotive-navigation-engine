@@ -304,3 +304,16 @@ test("privacy: dealer result option labels (names, addresses) never appear anywh
     else process.env.FORM_DISCOVERY_DIAGNOSTIC = previous;
   }
 });
+
+test("post-submit timing diagnostics: the submit-click time and the post-submit analytics capture window are recorded in order", async () => {
+  await withScenario({ scenario: "quick" }, (_page, result) => {
+    const diagnostics = result.formPostSubmitDiagnostics;
+    const clickedAt = Date.parse(diagnostics?.postSubmitObservation?.submitClickedAt ?? "");
+    const captureStart = Date.parse(diagnostics?.postSubmitAnalyticsCaptureStartedAt ?? "");
+    const captureEnd = Date.parse(diagnostics?.postSubmitAnalyticsCaptureEndedAt ?? "");
+    assert.equal(result.success, true);
+    assert.ok(Number.isFinite(clickedAt) && Number.isFinite(captureStart) && Number.isFinite(captureEnd), JSON.stringify(diagnostics));
+    assert.ok(captureStart >= clickedAt + (diagnostics!.postSubmitObservation!.totalObservationMs ?? 0) - 5, "capture starts after observation ended");
+    assert.ok(captureEnd - captureStart >= 300, "the existing 300 ms capture window is unchanged");
+  });
+});
