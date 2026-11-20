@@ -2141,6 +2141,28 @@ export interface Diagnostics {
   runTiming?: RunTimingDiagnostics;
   /** Present only when POST_TERMINAL_ANALYTICS_PROBE_ENABLED was on and the run ended in success. */
   postTerminalAnalyticsProbe?: PostTerminalAnalyticsProbeDiagnostics;
+  /** Present when a successful run captured GA4 or dataLayer evidence and so waited for the terminal analytics drain. */
+  terminalAnalyticsDrain?: TerminalAnalyticsDrainDiagnostics;
+}
+
+/**
+ * The passive wait after a terminal success decision (src/core/terminalAnalyticsDrain.ts). Events the
+ * run's live listeners recorded during it are ordinary captures and reporting rows, unlike the
+ * diagnostic probe's.
+ */
+export interface TerminalAnalyticsDrainDiagnostics {
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  quietWindowMs: number;
+  hardCapMs: number;
+  exitReason: "quiet_window" | "hard_cap";
+  /** True when the run ended after a verified form submission, which selects the longer hard cap. */
+  verifiedFormSubmission: boolean;
+  /** New captures.ga4_network_events entries recorded during the drain. */
+  ga4HitsObserved: number;
+  /** New captures.data_layer_evidence entries (live pushes) recorded during the drain. */
+  dataLayerPushesObserved: number;
 }
 
 export interface RunTimingDiagnostics {
