@@ -203,7 +203,7 @@ const STOP_SUCCESS: ClaudeDecisionPayload = { action: "stop_success", reason: "T
 
 function scoringTask(baseUrl: string, startFile: string, query: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "form-scoring-parity",
     objective: ENGLISH_STEPS.objective!,
     startUrl: `${baseUrl}/${startFile}?${query}`,
@@ -224,7 +224,7 @@ function scoringTask(baseUrl: string, startFile: string, query: string): TaskReq
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 

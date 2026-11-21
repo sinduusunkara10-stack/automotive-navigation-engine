@@ -85,6 +85,14 @@ export interface SemanticVerifiedFormSubmission {
 }
 
 export interface SemanticVerificationInput {
+  /**
+   * The success criterion's own id (schemas/task-request.schema.json's successCriteria[].id),
+   * forwarded purely for diagnostics -- see DecisionLogEntry.criterionId below. Never read by
+   * buildPrompt/buildCacheKey, and never influences a verdict: two different criteria with
+   * identical objective/criterionDescription/pageEvidence still legitimately share a cache
+   * entry, so this is deliberately excluded from buildCacheKey's key.
+   */
+  criterionId?: string;
   /** The task's objective text, verbatim -- may be written in any language. */
   objective: string;
   /** The criterion's own description text, verbatim -- may be written in any language. */
@@ -135,6 +143,8 @@ export interface SemanticCriterionVerifier {
 interface DecisionLogEntry {
   attempt: number;
   outcome: "satisfied" | "not_satisfied" | "error" | "cache_hit";
+  /** See SemanticVerificationInput.criterionId -- diagnostics only, absent when the caller didn't pass one. */
+  criterionId?: string;
   confidence?: number;
   evidence?: string;
   latencyMs: number;
@@ -252,6 +262,7 @@ function toDecisionSummary(entry: DecisionLogEntry): SemanticVerifierDecisionSum
   return {
     attempt: entry.attempt,
     outcome: entry.outcome,
+    ...(entry.criterionId !== undefined ? { criterionId: entry.criterionId } : {}),
     ...(entry.confidence !== undefined ? { confidence: entry.confidence } : {}),
     ...(entry.evidence !== undefined ? { evidence: entry.evidence } : {}),
     ...(entry.usage?.inputTokens !== undefined ? { inputTokens: entry.usage.inputTokens } : {}),
@@ -294,7 +305,14 @@ export class ClaudeSemanticCriterionVerifier implements SemanticCriterionVerifie
     const cacheKey = buildCacheKey(input);
     const cached = this.cache.get(cacheKey);
     if (cached) {
-      this.log({ attempt: -1, outcome: "cache_hit", confidence: cached.confidence, evidence: cached.evidence, latencyMs: 0 });
+      this.log({
+        attempt: -1,
+        outcome: "cache_hit",
+        ...(input.criterionId !== undefined ? { criterionId: input.criterionId } : {}),
+        confidence: cached.confidence,
+        evidence: cached.evidence,
+        latencyMs: 0,
+      });
       return cached;
     }
 
@@ -317,7 +335,13 @@ export class ClaudeSemanticCriterionVerifier implements SemanticCriterionVerifie
         const latencyMs = Date.now() - startedAt;
 
         if (!result.parsedOutput) {
-          this.log({ attempt, outcome: "error", latencyMs, usage: result.usage });
+          this.log({
+            attempt,
+            outcome: "error",
+            ...(input.criterionId !== undefined ? { criterionId: input.criterionId } : {}),
+            latencyMs,
+            usage: result.usage,
+          });
           continue;
         }
 
@@ -327,6 +351,7 @@ export class ClaudeSemanticCriterionVerifier implements SemanticCriterionVerifie
         this.log({
           attempt,
           outcome: satisfied ? "satisfied" : "not_satisfied",
+          ...(input.criterionId !== undefined ? { criterionId: input.criterionId } : {}),
           confidence: payload.confidence,
           evidence: payload.evidence,
           latencyMs,
@@ -336,7 +361,12 @@ export class ClaudeSemanticCriterionVerifier implements SemanticCriterionVerifie
         return outcome;
       } catch {
         const latencyMs = Date.now() - startedAt;
-        this.log({ attempt, outcome: "error", latencyMs });
+        this.log({
+          attempt,
+          outcome: "error",
+          ...(input.criterionId !== undefined ? { criterionId: input.criterionId } : {}),
+          latencyMs,
+        });
       }
     }
 

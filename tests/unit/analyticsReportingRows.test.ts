@@ -625,7 +625,7 @@ test("TEST14: the whole analytics reporting contract is deterministically ordere
   assert.equal(secondActionRows[2]!.eventRole, "CLICK_CANDIDATE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.53.0",
+    schemaVersion: "1.54.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -728,7 +728,7 @@ test("TEST15 [fixture label: live Vauxhall-shaped regression]: unresolved dataLa
   assert.equal(new Set(allEventIds).size, allEventIds.length);
 
   const response: TaskResponse = {
-    schemaVersion: "1.53.0",
+    schemaVersion: "1.54.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -874,7 +874,7 @@ test("TEST18: no start-window evidence produces no start-window rows, and the co
   assert.equal(rows[0]!.recordType, "START_PAGE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.53.0",
+    schemaVersion: "1.54.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",
@@ -959,7 +959,7 @@ test("TEST19: a navigate-only 3-page journey produces a PAGE_VISIT row (plus its
   assert.equal(rows[0]!.recordType, "START_PAGE");
 
   const response: TaskResponse = {
-    schemaVersion: "1.53.0",
+    schemaVersion: "1.54.0",
     taskId: "task-1",
     status: "success",
     statusReason: "stop_success_action",

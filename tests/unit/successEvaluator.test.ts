@@ -849,6 +849,61 @@ test("semanticVerifier is consulted, and its not-satisfied verdict is honoured, 
 });
 
 // ---------------------------------------------------------------------------------------
+// criterionId diagnostics (additive, no behaviour change): evaluateSemanticPageMatch forwards
+// the active criterion's own id to semanticVerifier.verify() purely for decision-log
+// attribution -- never consulted by the deterministic path, and never affects which
+// criterion is eligible or satisfied.
+// ---------------------------------------------------------------------------------------
+
+test("each criterion's own id is forwarded to semanticVerifier.verify(), attributing step-1 vs step-2", async () => {
+  const objective = "Reach the vehicle configurator.";
+  const stepOne: SuccessCriterion = {
+    id: "step-1",
+    type: "semantic_page_match",
+    description: "The listing page with the target card is visible.",
+  };
+  const stepTwo: SuccessCriterion = {
+    id: "step-2",
+    type: "semantic_page_match",
+    description: "The target model page is loaded.",
+  };
+  const html = page_("<h1>À propos de notre entreprise</h1>", "À propos");
+  const verifier = fakeVerifier(() => ({ satisfied: false, confidence: 0.95, evidence: "No match." }));
+
+  await withPage(html, async (page) => {
+    await evaluateSuccessCriteria(page, [stepOne, stepTwo], objective, verifier);
+  });
+
+  // The ordered-milestone gate only makes step-1 eligible until it's satisfied, so only
+  // step-1's own call happens here -- but it must carry step-1's id, not be unattributed.
+  assert.equal(verifier.calls.length, 1);
+  assert.equal(verifier.calls[0]?.criterionId, "step-1");
+});
+
+test("a deterministically-satisfied criterion creates no semanticVerifier entry to attribute", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_(
+    "<h1>Vehicle Configurator</h1><h2>Configuration Controls Visible</h2>" +
+      '<a href="#trim">Select trim level</a><a href="#colour">Choose exterior colour</a>',
+    "Configure Your Vehicle",
+  );
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 1, evidence: "should never be called" }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+    assert.ok(satisfied.includes("reached-configurator"));
+  });
+  // Satisfied by the deterministic lexical path alone -- no verifier call, so no
+  // criterionId-attributed decision-log entry exists for this criterion at all.
+  assert.equal(verifier.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------------------
 // Arbitrary objective-language / page-language pairs (task requirement: handle arbitrary
 // language pairs, not a fixed list) -- each uses a fake verifier standing in for a real
 // multilingual model call, since evaluateSuccessCriteria never itself contains any

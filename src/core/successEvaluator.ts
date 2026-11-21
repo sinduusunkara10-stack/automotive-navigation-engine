@@ -769,6 +769,7 @@ async function evaluateSemanticPageMatch(
   }
 
   const verification = await semanticVerifier.verify({
+    criterionId: criterion.id,
     objective,
     criterionDescription: criterion.description,
     pageEvidence: pageSignals,

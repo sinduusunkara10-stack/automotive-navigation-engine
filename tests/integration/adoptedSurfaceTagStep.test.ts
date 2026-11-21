@@ -41,7 +41,7 @@ class ScriptedProvider implements ReasoningProvider {
 
 function task(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "adopted-surface-tag-step-test",
     objective: "Quote request.",
     startUrl: `${baseUrl}/tag-step-landing.html`,
@@ -61,7 +61,7 @@ function task(baseUrl: string): TaskRequest {
       allowedActions: ["click", "scroll", "wait", "stop_success", "stop_blocked", "stop_failure"],
       allowSurfaceAdoption: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 

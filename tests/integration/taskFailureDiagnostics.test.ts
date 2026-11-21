@@ -17,7 +17,7 @@ const TIMING = { ttlSeconds: 86400, staleThresholdMs: 90_000, heartbeatIntervalM
 
 function buildTask(startUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "task-failure-diagnostics",
     objective: "Reach a page this fixture never actually provides.",
     startUrl,
@@ -33,7 +33,7 @@ function buildTask(startUrl: string): TaskRequest {
     captureModules: [],
     limits: { maxSteps: 5, maxBacktracks: 0, maxRepeatedActions: 3 },
     safety: { allowedActions: ["click", "wait", "stop_success", "stop_blocked", "stop_failure"] },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 
