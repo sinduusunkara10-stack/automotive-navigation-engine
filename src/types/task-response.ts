@@ -1847,6 +1847,13 @@ export type SemanticVerifierDecisionOutcome = "satisfied" | "not_satisfied" | "e
 export interface SemanticVerifierDecisionSummary {
   attempt: number;
   outcome: SemanticVerifierDecisionOutcome;
+  /**
+   * Which success criterion (successCriteria[].id) this verifier call was adjudicating --
+   * diagnostics only, absent when the engine didn't have one to forward. Lets a caller
+   * attribute a run's decisions log to specific criteria (e.g. step-1 vs step-2) without
+   * inferring it from call order or evidence text.
+   */
+  criterionId?: string;
   confidence?: number;
   evidence?: string;
   inputTokens?: number;
@@ -2343,7 +2350,7 @@ export interface AnalyticsReportingRow {
 }
 
 export interface TaskResponse {
-  schemaVersion: "1.53.0";
+  schemaVersion: "1.54.0";
   taskId: string;
   status: RunStatus;
   statusReason?: string;

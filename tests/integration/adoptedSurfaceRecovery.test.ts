@@ -62,7 +62,7 @@ function popupHost(baseUrl: string): string {
 
 function task(baseUrl: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "adopted-surface-recovery-test",
     objective: "Campaign offer quote request.",
     startUrl: `${baseUrl}/adopted-recovery-landing.html`,
@@ -91,7 +91,7 @@ function task(baseUrl: string): TaskRequest {
       allowedActions: ["click", "scroll", "go_back", "stop_success", "stop_blocked", "stop_failure"],
       allowSurfaceAdoption: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 

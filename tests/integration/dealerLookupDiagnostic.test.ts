@@ -45,7 +45,7 @@ class FillFormOnceProvider implements ReasoningProvider {
 
 function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "startUrl">): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "dealer-lookup-trace-engine-level",
     objective: "Submit the lead-capture form.",
     allowedDomains: ["127.0.0.1"],
@@ -58,7 +58,7 @@ function fillFormTask(overrides: Partial<TaskRequest> & Pick<TaskRequest, "start
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
     ...overrides,
   };
 }

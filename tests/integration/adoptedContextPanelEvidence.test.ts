@@ -99,7 +99,7 @@ const PANEL_MILESTONE_DESCRIPTION = "The summary side panel is open and shows th
 
 function buildTask(params: { startUrl: string }): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "adopted-context-panel-evidence",
     objective: OBJECTIVE,
     startUrl: params.startUrl,
@@ -114,7 +114,7 @@ function buildTask(params: { startUrl: string }): TaskRequest {
       allowSurfaceAdoption: true,
       surfaceAdoptionDomainPolicy: "require_allowed_domain",
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 

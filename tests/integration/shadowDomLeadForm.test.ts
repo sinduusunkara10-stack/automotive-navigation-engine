@@ -281,7 +281,7 @@ const STOP_SUCCESS: ClaudeDecisionPayload = {
 
 function shadowFormTask(baseUrl: string, query: string): TaskRequest {
   return {
-    schemaVersion: "1.51.0",
+    schemaVersion: "1.52.0",
     taskId: "shadow-dom-lead-form",
     objective: "Request a test drive through the lead form.",
     startUrl: `${baseUrl}/shadow-dom-lead-form.html${query ? `?${query}` : ""}`,
@@ -302,7 +302,7 @@ function shadowFormTask(baseUrl: string, query: string): TaskRequest {
       allowPaymentOrPurchase: false,
       allowPersonalDataEntry: true,
     },
-    outputSchemaVersion: "1.53.0",
+    outputSchemaVersion: "1.54.0",
   };
 }
 
