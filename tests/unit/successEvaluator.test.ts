@@ -904,6 +904,141 @@ test("a deterministically-satisfied criterion creates no semanticVerifier entry 
 });
 
 // ---------------------------------------------------------------------------------------
+// PR A (evidence enrichment, see CLAUDE.md and the Peugeot 208 milestone-verifier
+// investigation): evaluateSuccessCriteria's own candidateElementsSource parameter (the
+// reasoning layer's observation.interactiveElements) is threaded down to
+// evaluateSemanticPageMatch, which derives bounded SemanticCandidateElement evidence from
+// it and forwards it to semanticVerifier.verify() -- never consulted by the deterministic
+// path, and never performs its own DOM scan (selectSemanticCandidateElements operates
+// purely on the caller-supplied array).
+// ---------------------------------------------------------------------------------------
+
+test("observation.interactiveElements reaches the verifier as bounded candidateElements evidence", async () => {
+  const objective = "The Peugeot electric vehicles page is loaded and the PEUGEOT 208 vehicle card is visible.";
+  const criterion: SuccessCriterion = { id: "step-1", type: "semantic_page_match", description: objective };
+  // No English/French-vocabulary overlap at all between the objective and this page's own
+  // title/headings/interactiveText -- the deterministic path alone cannot resolve it (the
+  // exact reproduction shape from the investigation).
+  const html = page_("<h1>Découvrez notre gamme</h1>", "Nos véhicules électriques");
+  const interactiveElements = [
+    { id: "el-388", role: "a", accessibleName: "en savoir plus", destinationUrl: "https://www.peugeot.fr/nos-vehicules/208/electrique.html" },
+    { id: "el-1", role: "a", accessibleName: "Contactez-nous", destinationUrl: "https://www.peugeot.fr/contact.html" },
+  ];
+  const verifier = fakeVerifier(() => ({ satisfied: true, confidence: 0.9, evidence: "destinationUrl identifies the 208." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      objective,
+      verifier,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      interactiveElements,
+    );
+    assert.ok(satisfied.includes("step-1"));
+  });
+
+  assert.equal(verifier.calls.length, 1);
+  const candidateElements = verifier.calls[0]?.pageEvidence.candidateElements;
+  assert.ok(candidateElements, "candidateElements must be present on the verifier's pageEvidence");
+  assert.equal(candidateElements!.length, 1, "only the destinationUrl-relevant element is forwarded");
+  assert.equal(candidateElements![0]!.accessibleName, "en savoir plus");
+  assert.ok(candidateElements![0]!.destinationUrl?.includes("208"));
+});
+
+test("no candidateElementsSource yields no candidateElements evidence -- existing behaviour is unchanged", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  const html = page_("<h1>À propos de notre entreprise</h1>", "À propos");
+  const verifier = fakeVerifier(() => ({ satisfied: false, confidence: 0.95, evidence: "No match." }));
+
+  await withPage(html, async (page) => {
+    await evaluateSuccessCriteria(page, [criterion], objective, verifier);
+  });
+
+  assert.equal(verifier.calls.length, 1);
+  assert.equal(verifier.calls[0]?.pageEvidence.candidateElements, undefined);
+});
+
+test("the deterministic auto-pass is unaffected by candidateElementsSource -- a destinationUrl match alone never bypasses the verifier", async () => {
+  const objective = "Reach the vehicle configurator and stop once configuration controls are visible.";
+  const criterion: SuccessCriterion = {
+    id: "reached-configurator",
+    type: "semantic_page_match",
+    description: "Vehicle configuration controls are visible on the page.",
+  };
+  // Deterministic vocabulary score is zero (no shared English/French tokens at all), but a
+  // candidate element's destinationUrl happens to contain "configurator" -- this must still
+  // fall through to the verifier, never auto-satisfy deterministically.
+  const html = page_("<h1>À propos de notre entreprise</h1>", "À propos");
+  const interactiveElements = [
+    { id: "el-1", role: "a", accessibleName: "Learn more", destinationUrl: "https://example.com/vehicle-configurator" },
+  ];
+  const verifier = fakeVerifier(() => ({ satisfied: false, confidence: 0.95, evidence: "Not actually reached." }));
+
+  await withPage(html, async (page) => {
+    const satisfied = await evaluateSuccessCriteria(
+      page,
+      [criterion],
+      objective,
+      verifier,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      interactiveElements,
+    );
+    assert.ok(!satisfied.includes("reached-configurator"), "a destinationUrl match must never auto-pass the deterministic path");
+  });
+  assert.equal(verifier.calls.length, 1, "the verifier is still consulted -- candidateElements only strengthens its evidence, never bypasses it");
+});
+
+test("ordered-milestone gating is unaffected by candidateElementsSource: only the first unsatisfied required criterion is evaluated", async () => {
+  const objective = "Reach the vehicle configurator.";
+  const stepOne: SuccessCriterion = { id: "step-1", type: "semantic_page_match", description: "The listing page with the target card is visible." };
+  const stepTwo: SuccessCriterion = { id: "step-2", type: "semantic_page_match", description: "The target model page is loaded." };
+  const html = page_("<h1>À propos de notre entreprise</h1>", "À propos");
+  const interactiveElements = [{ id: "el-1", role: "a", accessibleName: "en savoir plus", destinationUrl: "https://example.com/208" }];
+  const verifier = fakeVerifier(() => ({ satisfied: false, confidence: 0.95, evidence: "No match." }));
+
+  await withPage(html, async (page) => {
+    await evaluateSuccessCriteria(
+      page,
+      [stepOne, stepTwo],
+      objective,
+      verifier,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      interactiveElements,
+    );
+  });
+
+  assert.equal(verifier.calls.length, 1, "step-2 is not eligible until step-1 is satisfied, candidateElementsSource notwithstanding");
+  assert.equal(verifier.calls[0]?.criterionId, "step-1");
+});
+
+// ---------------------------------------------------------------------------------------
 // Arbitrary objective-language / page-language pairs (task requirement: handle arbitrary
 // language pairs, not a fixed list) -- each uses a fake verifier standing in for a real
 // multilingual model call, since evaluateSuccessCriteria never itself contains any

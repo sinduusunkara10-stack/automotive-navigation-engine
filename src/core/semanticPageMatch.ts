@@ -1,5 +1,6 @@
 import type { Page } from "playwright";
-import { objectiveTokenCoverage } from "../discovery/relevance.js";
+import { objectiveRelevanceScore, objectiveTokenCoverage } from "../discovery/relevance.js";
+import type { InteractiveElement } from "../types/task-response.js";
 
 // Deliberately the same generic heading/interactive-element selectors as
 // src/observation/observationBuilder.ts (kept in sync so success evaluation never sees
@@ -54,6 +55,152 @@ export interface SemanticPageSignals {
   ariaState?: string[];
   /** Optional, generic progress-indicator text (e.g. "Step 2 of 4"); same non-scoring role as ariaState. */
   progressText?: string[];
+  /**
+   * Evidence-enrichment pass (PR A, see CLAUDE.md and the project thread's milestone-verifier
+   * investigation): a small, bounded set of structured interactive-element evidence --
+   * accessibleName/destinationUrl/role/nearestHeadingText -- selected from the reasoning
+   * layer's own observation.interactiveElements (see selectSemanticCandidateElements
+   * below), never from a second DOM scan. Lets a semanticVerifier see the same
+   * element-to-destination relationship navigation reasoning already has, for the exact
+   * case the deterministic title/headings/interactiveText token-overlap score above cannot
+   * resolve: a target's identity living in a generic-accessibleName control's destinationUrl
+   * rather than in its visible text. Never fed into scoreSemanticPageMatch -- extra
+   * verifier-only context, same non-scoring role as ariaState/progressText above. Absent
+   * when the caller supplied no interactiveElements source, reproducing prior behaviour
+   * exactly.
+   */
+  candidateElements?: SemanticCandidateElement[];
+}
+
+/**
+ * Bounded, structured evidence about one interactive element, derived from
+ * observation.interactiveElements (types/task-response.ts's InteractiveElement) -- never a
+ * second DOM read. Deliberately narrower than InteractiveElement itself: no element id (the
+ * verifier never targets anything), no visible/covered/disabled bookkeeping (already used
+ * to filter the candidate pool before this shape is built -- see
+ * selectSemanticCandidateElements), and every text field length-capped (see
+ * MAX_CANDIDATE_ACCESSIBLE_NAME_LENGTH etc. below) to keep the verifier prompt small.
+ */
+export interface SemanticCandidateElement {
+  accessibleName: string;
+  destinationUrl?: string;
+  role: string;
+  nearestHeadingText?: string;
+}
+
+// PR A bounds (approved design, see CLAUDE.md and the project thread's evidence-enrichment
+// design): a prompt-size budget across the *selected* candidate elements, never a limit of
+// one entry per target -- multiple genuine elements supporting the same target (e.g. "Learn
+// more" and "Configure", both linking into the same model's own path) are mutually
+// supporting evidence and are deliberately allowed to coexist within these bounds.
+const MAX_CANDIDATE_ELEMENTS = 12;
+const MAX_CANDIDATE_ACCESSIBLE_NAME_LENGTH = 60;
+const MAX_CANDIDATE_HEADING_TEXT_LENGTH = 60;
+const MAX_CANDIDATE_DESTINATION_URL_LENGTH = 120;
+const MAX_CANDIDATE_ELEMENTS_BUDGET_CHARS = 900;
+
+function truncateCandidateText(text: string, maxLength: number): string {
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+/**
+ * destinationUrl, normalised for verifier evidence: prefer the path (the identifying route
+ * segment, e.g. "/nos-vehicules/208/electrique.html") over the full URL, so an unrelated
+ * origin/query/hash never pads out the evidence budget or distracts the verifier -- see PR
+ * A's design, item D ("Destination URL should be normalised safely for verifier evidence").
+ * Falls back to the raw (capped) string for a value that isn't a parseable absolute URL.
+ */
+function normaliseDestinationUrlForEvidence(destinationUrl: string): string {
+  try {
+    const parsed = new URL(destinationUrl);
+    const pathPart = parsed.pathname && parsed.pathname !== "/" ? parsed.pathname : parsed.href;
+    return truncateCandidateText(pathPart, MAX_CANDIDATE_DESTINATION_URL_LENGTH);
+  } catch {
+    return truncateCandidateText(destinationUrl, MAX_CANDIDATE_DESTINATION_URL_LENGTH);
+  }
+}
+
+/** destinationUrl's path, split into token-friendly words (e.g. "/208-5-portes/" -> "208 5 portes") for ranking only -- never the normalised evidence value itself. */
+function destinationUrlRankingText(destinationUrl: string | undefined): string {
+  if (!destinationUrl) {
+    return "";
+  }
+  try {
+    const parsed = new URL(destinationUrl);
+    return parsed.pathname.replace(/[/\-_]+/g, " ");
+  } catch {
+    return destinationUrl.replace(/[/\-_]+/g, " ");
+  }
+}
+
+/**
+ * Selects a small, criterion-relevant subset of `interactiveElements` (the reasoning
+ * layer's own observation.interactiveElements -- see InteractiveElement in
+ * types/task-response.ts) as bounded SemanticCandidateElement evidence for a
+ * semanticVerifier call. Never performs its own DOM scan -- see this function's own callers
+ * in src/core/successEvaluator.ts and src/core/loop.ts, which thread an already-captured
+ * observation through instead.
+ *
+ * Filtering: excludes any element currently covered by another element at its own centre
+ * point (InteractiveElement.covered -- the same generic elementFromPoint hit-test
+ * gatherSemanticPageSignals' own interactiveText already applies). observation.interactiveElements
+ * only ever contains elements the scan itself already found visible (see
+ * observation/observationBuilder.ts's scanInteractiveElements), so no separate visibility
+ * check is needed here. PROVEN LIMITATION (see the PR description): InteractiveElement
+ * carries no signal that identifies persistent site-wide navigation/header/footer/menu
+ * chrome the way gatherSemanticPageSignals' own NAVIGATION_CHROME_SELECTOR scan does, so
+ * this selection cannot exclude a generic nav/footer link merely for living in site chrome --
+ * only covered/hidden exclusion is actually supported by existing evidence.
+ *
+ * Ranking: each element's accessibleName, nearestHeadingText, and destinationUrl path
+ * tokens are scored for relevance against `anchorText` (objectiveRelevanceScore -- the same
+ * generic token-overlap primitive src/discovery/relevance.ts already uses elsewhere),
+ * favouring a small, specific match over a long, mostly-irrelevant one. Elements with zero
+ * relevance are dropped entirely; the rest are kept in descending relevance order up to
+ * MAX_CANDIDATE_ELEMENTS and MAX_CANDIDATE_ELEMENTS_BUDGET_CHARS -- a prompt-size bound only,
+ * never a one-entry-per-target limit (see this module's own doc comment on
+ * SemanticCandidateElement above).
+ */
+export function selectSemanticCandidateElements(
+  anchorText: string,
+  interactiveElements: readonly InteractiveElement[] | undefined,
+): SemanticCandidateElement[] {
+  if (!interactiveElements || interactiveElements.length === 0) {
+    return [];
+  }
+
+  const ranked = interactiveElements
+    .filter((el) => el.covered !== true)
+    .map((el) => {
+      const rankingText = [el.accessibleName, el.nearestHeadingText ?? "", destinationUrlRankingText(el.destinationUrl)].join(" ");
+      return { el, score: objectiveRelevanceScore(anchorText, rankingText) };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map(({ el }) => el);
+
+  const selected: SemanticCandidateElement[] = [];
+  let budgetUsedChars = 0;
+  for (const el of ranked) {
+    if (selected.length >= MAX_CANDIDATE_ELEMENTS) {
+      break;
+    }
+    const candidate: SemanticCandidateElement = {
+      accessibleName: truncateCandidateText(el.accessibleName, MAX_CANDIDATE_ACCESSIBLE_NAME_LENGTH),
+      role: el.role,
+      ...(el.destinationUrl ? { destinationUrl: normaliseDestinationUrlForEvidence(el.destinationUrl) } : {}),
+      ...(el.nearestHeadingText
+        ? { nearestHeadingText: truncateCandidateText(el.nearestHeadingText, MAX_CANDIDATE_HEADING_TEXT_LENGTH) }
+        : {}),
+    };
+    const candidateChars = JSON.stringify(candidate).length;
+    if (selected.length > 0 && budgetUsedChars + candidateChars > MAX_CANDIDATE_ELEMENTS_BUDGET_CHARS) {
+      break;
+    }
+    selected.push(candidate);
+    budgetUsedChars += candidateChars;
+  }
+  return selected;
 }
 
 export interface GatherSemanticPageSignalsOptions {
