@@ -9,8 +9,10 @@ import {
   gatherSemanticPageSignals,
   isSemanticSignalName,
   scoreSemanticPageMatch,
+  selectSemanticCandidateElements,
   type SemanticSignalName,
 } from "./semanticPageMatch.js";
+import type { InteractiveElement } from "../types/task-response.js";
 import type { PanelEvidence } from "./panelEvidence.js";
 import { RELEVANCE_ADOPT_THRESHOLD, RELEVANCE_REJECT_THRESHOLD, type RelevanceTier } from "./surfaceRelevance.js";
 
@@ -178,6 +180,17 @@ export async function evaluateSuccessCriteria(
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
   verifiedFormSubmission?: SemanticVerifiedFormSubmission,
+  /**
+   * PR A (evidence enrichment, see CLAUDE.md and the project thread's milestone-verifier
+   * investigation): the reasoning layer's own observation.interactiveElements for the exact
+   * page `page` already reflects, when the caller has one in hand -- never built here, never
+   * a second DOM scan. Forwarded, unmodified, down to evaluateSemanticPageMatch, which
+   * derives bounded SemanticCandidateElement evidence from it (see
+   * selectSemanticCandidateElements in semanticPageMatch.ts). Optional and additive: a
+   * caller that omits this (every pre-existing caller) reproduces prior behaviour exactly --
+   * see semanticPageMatch.ts's SemanticPageSignals.candidateElements doc comment.
+   */
+  candidateElementsSource?: readonly InteractiveElement[],
 ): Promise<string[]> {
   const satisfiedAtCallStart = alreadySatisfiedCriteriaIds ?? new Set<string>();
   const eligibleCriteriaIds = computeEligibleCriteriaIds(criteria, satisfiedAtCallStart);
@@ -201,6 +214,7 @@ export async function evaluateSuccessCriteria(
       panelContext,
       runStateMarker,
       verifiedFormSubmission,
+      candidateElementsSource,
     );
     if (result.satisfied) {
       satisfied.push(criterion.id);
@@ -488,6 +502,7 @@ async function evaluateSingle(
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
   verifiedFormSubmission?: SemanticVerifiedFormSubmission,
+  candidateElementsSource?: readonly InteractiveElement[],
 ): Promise<SingleCriterionResult> {
   switch (criterion.type) {
     case "url_pattern": {
@@ -533,6 +548,7 @@ async function evaluateSingle(
         panelContext,
         runStateMarker,
         verifiedFormSubmission,
+        candidateElementsSource,
       );
     }
     case "data_layer_event": {
@@ -676,6 +692,7 @@ async function evaluateSemanticPageMatch(
   panelContext?: PanelMatchContext,
   runStateMarker?: { surfaceGeneration: number; stepIndex: number },
   verifiedFormSubmission?: SemanticVerifiedFormSubmission,
+  candidateElementsSource?: readonly InteractiveElement[],
 ): Promise<SingleCriterionResult> {
   const anchorText = [objective, criterion.description].filter(Boolean).join(" ");
   if (!anchorText.trim()) {
@@ -768,11 +785,21 @@ async function evaluateSemanticPageMatch(
     };
   }
 
+  // PR A (evidence enrichment): built only now, right before the verifier call -- the
+  // deterministic score above (and any auto-pass it already produced) used `pageSignals`
+  // unmodified, so candidateElements can never affect the deterministic path (see CLAUDE.md
+  // "Do not change the deterministic auto-pass"). Derived from the caller's own
+  // candidateElementsSource (the reasoning layer's existing observation.interactiveElements),
+  // never a second DOM scan -- see selectSemanticCandidateElements's own doc comment.
+  const candidateElements = selectSemanticCandidateElements(anchorText, candidateElementsSource);
+  const verifierPageEvidence =
+    candidateElements.length > 0 ? { ...pageSignals, candidateElements } : pageSignals;
+
   const verification = await semanticVerifier.verify({
     criterionId: criterion.id,
     objective,
     criterionDescription: criterion.description,
-    pageEvidence: pageSignals,
+    pageEvidence: verifierPageEvidence,
     ...(lastActionEvidence ? { lastActionEvidence } : {}),
     ...(panelContext?.evidence && panelRelevanceForThisCriterion
       ? {

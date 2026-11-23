@@ -28,6 +28,20 @@ export interface SemanticPageEvidence {
   ariaState?: string[];
   /** Optional generic progress-indicator text -- see SemanticPageSignals.progressText. */
   progressText?: string[];
+  /** Optional, bounded candidate-element evidence -- see SemanticPageSignals.candidateElements (PR A). */
+  candidateElements?: SemanticCandidateElement[];
+}
+
+/**
+ * Structurally identical to (but decoupled from) core/semanticPageMatch.ts's own
+ * SemanticCandidateElement -- this module stays decoupled from src/core (see this file's
+ * own doc comment above), so it never imports that type directly.
+ */
+export interface SemanticCandidateElement {
+  accessibleName: string;
+  destinationUrl?: string;
+  role: string;
+  nearestHeadingText?: string;
 }
 
 /**
@@ -202,6 +216,29 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
     "one is satisfied). Each of those is satisfied by it, and the post-submission page no longer " +
     "showing the form is expected, not contradictory. It never satisfies any other criterion (reaching " +
     "another page, choosing an option, any further navigation): judge those on the page evidence alone. " +
+    "When \"candidateElements\" is present, it lists relevant interactive elements on the " +
+    "current page; each entry may include accessibleName, destinationUrl, role, and " +
+    "nearestHeadingText. You may use a candidate element as evidence that an item, card, " +
+    "link, or CTA the criterion describes is present and visible when all of the following " +
+    "hold: (1) the element's destinationUrl, accessibleName, nearestHeadingText, or the " +
+    "combination of those signals clearly identifies the target the criterion refers to -- " +
+    "the wording may differ from the criterion and may be in a different language; (2) " +
+    "available structural evidence does not indicate that the element is merely unrelated " +
+    "site navigation, footer/menu chrome, hidden, covered, or an advertisement for another " +
+    "page; (3) the page's title, headings, interactiveText, or other supplied page evidence " +
+    "is consistent with the type of page/state the criterion describes. A generic accessible " +
+    "label such as \"learn more\", \"read more\", \"en savoir plus\" or an equivalent phrase " +
+    "is not sufficient evidence by itself -- its destinationUrl and surrounding evidence may " +
+    "establish what that generic element refers to. Several candidate elements related to " +
+    "the same target are not inherently ambiguous; they may provide mutually supporting " +
+    "evidence. Treat the evidence as ambiguous when it points to different plausible targets " +
+    "and the criterion does not provide enough information to resolve them, or when the " +
+    "matching candidate cannot reliably be connected to the content/state the criterion " +
+    "describes. Candidate elements can support claims that an item/card/link/CTA is present " +
+    "or visible on the current page. Candidate elements alone never prove that a click " +
+    "happened, navigation completed, a later destination page loaded, a form submitted, a " +
+    "panel opened, or another later state was reached -- those later-state claims continue " +
+    "to require their own appropriate existing evidence. " +
     "Never output an action, URL, selector, or code. Give an honest " +
     "confidence for how sure you are, and always cite the specific page evidence (a short " +
     "quote, or the verifiedFormSubmission fields you relied on) that supports your verdict, even when the verdict is that the page does not match.";
@@ -215,6 +252,9 @@ function buildPrompt(input: SemanticVerificationInput): { system: string; user: 
       interactiveElementText: input.pageEvidence.interactiveText,
       ...(input.pageEvidence.ariaState ? { ariaState: input.pageEvidence.ariaState } : {}),
       ...(input.pageEvidence.progressText ? { progressIndicatorText: input.pageEvidence.progressText } : {}),
+      ...(input.pageEvidence.candidateElements && input.pageEvidence.candidateElements.length > 0
+        ? { candidateElements: input.pageEvidence.candidateElements }
+        : {}),
     },
     ...(input.lastActionEvidence ? { lastActionEvidence: input.lastActionEvidence } : {}),
     ...(input.panelEvidence ? { panelEvidence: input.panelEvidence } : {}),
@@ -251,6 +291,11 @@ function buildCacheKey(input: SemanticVerificationInput): string {
     interactiveText: input.pageEvidence.interactiveText,
     ariaState: input.pageEvidence.ariaState,
     progressText: input.pageEvidence.progressText,
+    // PR A (evidence enrichment): bounded candidate-element evidence materially affects the
+    // verdict (it is new, additional evidence the verifier reasons over), so it must be part
+    // of the cache key -- two calls with identical title/headings/interactiveText but
+    // different candidateElements must never share a cached decision.
+    candidateElements: input.pageEvidence.candidateElements,
     lastActionEvidence: input.lastActionEvidence,
     panelEvidence: input.panelEvidence,
     runStateMarker: input.runStateMarker,

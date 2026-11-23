@@ -361,3 +361,81 @@ test("criterionId is omitted from a decision-log entry when the caller didn't su
   assert.ok(decisions);
   assert.equal("criterionId" in decisions![0]!, false);
 });
+
+// ---------------------------------------------------------------------------------------
+// PR A (evidence enrichment, see CLAUDE.md and the Peugeot 208 milestone-verifier
+// investigation): bounded candidateElements evidence is forwarded into the prompt the model
+// actually receives, the system prompt carries the rule for using it, and it is part of the
+// cache key -- unlike criterionId, this evidence can legitimately change the verdict, so two
+// calls that differ only in candidateElements must never share a cached decision.
+// ---------------------------------------------------------------------------------------
+
+test("candidateElements, when present, is forwarded into the user prompt payload", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "destinationUrl identifies the 208." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(
+    buildInput({
+      pageEvidence: {
+        title: "Nos véhicules électriques",
+        headings: ["Découvrez notre gamme électrique"],
+        interactiveText: ["en savoir plus"],
+        candidateElements: [
+          { accessibleName: "en savoir plus", destinationUrl: "/nos-vehicules/208/electrique.html", role: "a" },
+        ],
+      },
+    }),
+  );
+
+  assert.equal(client.requests.length, 1);
+  const userPayload = JSON.parse(client.requests[0]!.userPrompt as string);
+  assert.deepEqual(userPayload.pageEvidence.candidateElements, [
+    { accessibleName: "en savoir plus", destinationUrl: "/nos-vehicules/208/electrique.html", role: "a" },
+  ]);
+});
+
+test("the system prompt instructs the model on how (and how not) to use candidateElements", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "ok" })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput());
+
+  const system = client.requests[0]!.system;
+  assert.ok(system.includes("candidateElements"), "system prompt documents the candidateElements evidence shape");
+  assert.ok(
+    system.toLowerCase().includes("not sufficient evidence by itself"),
+    "system prompt warns that a generic accessible label alone is not sufficient",
+  );
+  assert.ok(
+    system.toLowerCase().includes("never prove that a click"),
+    "system prompt bars candidateElements from proving click/navigation/later-state claims",
+  );
+});
+
+test("an empty candidateElements array is never sent to the model (same as omitting it)", async () => {
+  const client = new FakeReasoningModelClient([resultStep({ satisfied: true, confidence: 0.9, evidence: "ok" })]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  await verifier.verify(buildInput({ pageEvidence: { title: "T", headings: [], interactiveText: [], candidateElements: [] } }));
+
+  const userPayload = JSON.parse(client.requests[0]!.userPrompt as string);
+  assert.equal("candidateElements" in userPayload.pageEvidence, false);
+});
+
+test("two calls differing only in candidateElements never share a cached verdict", async () => {
+  const client = new FakeReasoningModelClient([
+    resultStep({ satisfied: true, confidence: 0.9, evidence: "First evidence set." }),
+    resultStep({ satisfied: false, confidence: 0.9, evidence: "Second evidence set does not support it." }),
+  ]);
+  const verifier = new ClaudeSemanticCriterionVerifier({ config: TEST_CONFIG, modelClient: client });
+
+  const base = { title: "T", headings: ["H"], interactiveText: ["I"] };
+  const first = await verifier.verify(buildInput({ pageEvidence: { ...base, candidateElements: [{ accessibleName: "A", role: "a" }] } }));
+  const second = await verifier.verify(buildInput({ pageEvidence: { ...base, candidateElements: [{ accessibleName: "B", role: "a" }] } }));
+
+  assert.equal(client.requests.length, 2, "different candidateElements must each trigger a real model call, never a cache hit");
+  assert.equal(first.satisfied, true);
+  assert.equal(second.satisfied, false);
+});

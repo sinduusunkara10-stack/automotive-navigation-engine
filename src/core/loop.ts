@@ -460,6 +460,11 @@ export async function runStep(params: {
       panelContextPreAction,
       { surfaceGeneration: state.surfaceGeneration, stepIndex },
       state.verifiedFormSubmission,
+      // PR A (evidence enrichment): this step's own fresh observation.interactiveElements
+      // already reflects the exact live `page` gatherSemanticPageSignals reads inside this
+      // same call -- reused as-is, never a second DOM scan (see
+      // successEvaluator.ts's own doc comment on this parameter).
+      observation.interactiveElements,
     )
   ).forEach((id) => {
     state.satisfiedCriteriaIds.add(id);
@@ -2660,6 +2665,16 @@ export async function runStep(params: {
       panelContextPostAction,
       { surfaceGeneration: state.surfaceGeneration, stepIndex },
       state.verifiedFormSubmission,
+      // PR A (evidence enrichment): deliberately omitted here. `observation` in this step
+      // still reflects pre-action page state (see the "Milestone-anchored recovery" comment
+      // a few lines below -- it is never refreshed after this step's own action dispatches),
+      // so it cannot be reused as this post-action call's candidateElementsSource without
+      // misattributing stale elements to the live postActionPage this call actually reads
+      // for its own pass/fail judgement -- the exact staleness class this PR fixes elsewhere.
+      // Building a fresh observation here solely to supply candidate evidence would be the
+      // second DOM scan CLAUDE.md's design explicitly rules out, so the post-action path
+      // keeps its prior, candidateElements-free behaviour; see the PR description's stated
+      // residual limitation.
     );
     if (chainResult.length === 0) {
       break;
